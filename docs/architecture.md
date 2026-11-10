@@ -16,6 +16,8 @@ Contracts that cross subsystem boundaries. This guide names the owner, the invar
 
 The widget (`src/electron/launch.js` → `src/electron/main.js`), headless collector (`src/agent/agent.js`) and Node Hub (`src/hub/server.js`) share `src/shared/`. The Cloudflare Hub (`worker/src/index.js`) speaks the same protocol.
 
+The fork's optional [online conversation extension](session-conversations.md) is Node-Hub-only. `shared/sessionConversationClient.js` owns a separate producer long poll; requested source reads run in a short-lived Worker. `hub/sessionConversations.js` relays response-owned requests without storage or stats/SSE changes. Both ends default off. Its Node-only protocol is registered in the Node Hub build closure, outside the portable Worker core.
+
 Device collection, transforms and archives live in `src/shared/usage/`. The neighboring `src/shared/usage.js` is the Hub-core usage model, not that directory's index: `require('./usage')` resolves the file. Do not add `usage/index.js`.
 
 Desktop windows share one renderer process: `src/electron/main.js` enables Chromium's process-per-site mode, because each additional surface otherwise costs a renderer baseline and compositor for a small local card. Every page is the same local bundle and heavy work already runs in the usage worker, so the shared main thread carries UI work only. A renderer crash takes every window down at once; main reloads each crashed page unless it already attempted recovery within the last 30 seconds. Settings and stats are republished on load. This is a deliberate memory trade, not an isolation boundary.

@@ -18,6 +18,7 @@ const {
 const { createSyncPayloadUploader } = require('../shared/syncPayload');
 const postSyncPayload = createSyncPayloadUploader();
 const { createAgentTitleSync } = require('./titleSync');
+const { createSessionConversationClient } = require('../shared/sessionConversationClient');
 const { HUB_RESPONSE_HEADER, HUB_RESPONSE_MINIMAL } = require('../shared/hubProtocol');
 const { applyProjectRollups } = require('../shared/usage');
 const { runAgent, runAgentOnce } = require('./runtime');
@@ -59,6 +60,7 @@ const limitsRefreshMs = normalizeLimitsRefreshMs(args.limitsRefreshMs || process
 const limitsRefreshMode = normalizeLimitsRefreshMode(args.limitsRefreshMode || process.env.TOKEN_MONITOR_LIMITS_REFRESH_MODE);
 const historyEnabled = parseBoolean(args.history ?? args.historyEnabled ?? process.env.TOKEN_MONITOR_HISTORY_ENABLED, true);
 const syncSessionTitles = parseBoolean(args.syncSessionTitles ?? args['sync-session-titles'] ?? process.env.TOKEN_MONITOR_SYNC_SESSION_TITLES, false);
+const sessionConversations = parseBoolean(args.sessionConversations ?? args['session-conversations'] ?? process.env.TOKEN_MONITOR_SESSION_CONVERSATIONS, false);
 const projectsEnabled = parseBoolean(args.projects ?? args.projectsEnabled ?? process.env.TOKEN_MONITOR_PROJECTS_ENABLED, true);
 const sessionUsageArchiveEnabled = parseBoolean(args.sessionArchive ?? args.sessionUsageArchiveEnabled ?? process.env.TOKEN_MONITOR_SESSION_USAGE_ARCHIVE_ENABLED, true);
 const wslScanEnabled = parseBoolean(args.wslScan ?? args.wslScanEnabled ?? process.env.TOKEN_MONITOR_WSL_SCAN, false);
@@ -147,6 +149,8 @@ function summaryWithSessionUsageArchive(summary, now = new Date()) {
 }
 
 const titleSyncNegotiator = createAgentTitleSync({ dataDir: path.dirname(pidFilePath()), fetchFn: fetch });
+const conversationClient = sessionConversations && secret && !once && !dryRun
+  ? createSessionConversationClient({ hubUrl, secret, deviceId, wslScanEnabled }) : null;
 
 async function postUsage(summary) {
   const authHeaders = secret ? { authorization: `Bearer ${secret}` } : {};
@@ -167,6 +171,8 @@ async function postUsage(summary) {
     titleSyncNegotiator.invalidate();
     throw new Error(`Hub responded ${response.status}: ${(await response.text()).slice(0, 300)}`);
   }
+  conversationClient?.update(summary);
+  conversationClient?.start();
   return response.json();
 }
 
@@ -200,6 +206,7 @@ async function main() {
   // Electron can yield before its history read-modify-write reaches disk.
   let runtimeHandle = null;
   if (!dryRun) registerPidFile(() => {
+    conversationClient?.stop();
     runtimeHandle?.stop();
     sessionUsageArchiveStore.close();
   });

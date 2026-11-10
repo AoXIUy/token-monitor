@@ -416,6 +416,22 @@ The Hub computes/encodes each distinct frame once per fan-out and sends a full f
 
 Clients with stream v2 or without a supported header receive complete `stats` events for each coalesced ingest window. This fallback keeps older widgets correct when they cannot apply session clocks, at the cost of their previous timestamp-only bandwidth saving. A v3 client also works with an older Hub through its existing full-snapshot fallback. The initial `snapshot` and subsequent complete `stats` shapes are unchanged.
 
+## Online session conversation queries (Node Hub extension)
+
+This fork's optional Antigravity/Codex extension is separate from DeviceRecord, stats and SSE. Enable `TOKEN_MONITOR_SESSION_CONVERSATIONS=1` independently on the Node Hub and each resident producer. The same authenticated Hub secret authorizes these reads. The Cloudflare Worker does not implement this extension. See [setup, sources and limits](session-conversations.md).
+
+`GET /api/session-conversations?deviceId=<id>&key=<client:sessionId>&cursor=<cursor>` asks the selected online producer for one page. The key must exist in that device's Today/Month sessions and the client must be `codex` or `antigravity`. An empty cursor starts at the beginning; the returned cursor binds the continuation offset to a source revision. Text is not filtered by the usage period. Responses are either `{ "error": "device_offline" }` (or another documented failure code) or:
+
+```json
+{"messages":[{"id":"0.0","role":"user","text":"Question","timestamp":"2026-11-11T00:00:00Z","kind":"message","continued":false}],"revision":"0123456789abcdef01234567","nextCursor":"","incomplete":false}
+```
+
+Roles are `user`, `assistant`, `tool` and `system`. Each page holds at most 40 fragments / 384 KiB; each fragment holds at most 12,000 UTF-16 code units. Long text continues in subsequent fragments, with `continued: true`. A changed source returns `source_changed`; restart with an empty cursor. Other expected errors are `disabled`, `reader_busy`, `not_found`, `source_unavailable`, `file_too_large`, `read_failed`, `query_timeout` and `invalid_request`. Expected query failures use HTTP 200; normal authentication, unsupported-route and request-body errors retain HTTP semantics.
+
+The resident producer holds `GET /api/session-conversations/poll?deviceId=<id>&instance=<random UUID>` for up to 20 seconds. The Hub returns `{ "request": null }` or `{ "request": { "id": "<random challenge>", "deviceId": "<id>", "key": "codex:…", "cursor": "" } }`. It accepts results at `POST /api/session-conversations/result` with `{ "id": "<challenge>", "deviceId": "<id>", "instance": "<same UUID>", "page": { ... } }`. Identity, session admission and challenge must match. The producer rechecks its own last published session keys before and after the read. Responses and polls use `Cache-Control: no-store`; redirects are refused by first-party clients.
+
+Only pending response-owned queries are retained in memory (up to 16 globally); reader registrations are bounded at 64. Reads time out after 12 seconds, are removed after delivery, and are not persisted or broadcast. Disconnecting the viewer discards late results. Restart requires producers to reconnect. No source filesystem path or executable command is accepted over this protocol.
+
 ## `GET /api/history`
 
 Returns the authenticated aggregate History. The detailed `daily` tier remains capped to the rolling 370-day window. When every usage-contributing stored device provides complete compact history, `dailyTotals` contains all observed dates merged across devices and `summary.activeDaysComplete` is `true`; otherwise `dailyTotals` is omitted and the flag is `false`.

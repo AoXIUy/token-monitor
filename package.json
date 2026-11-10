@@ -1,7 +1,7 @@
 {
   "name": "token-monitor",
   "productName": "Token Monitor",
-  "version": "0.90.0",
+  "version": "0.91.0",
   "description": "Live token & cost widget for Claude Code, Codex & Hermes — local-first, optional multi-device sync.",
   "main": "src/electron/launch.js",
   "scripts": {
@@ -130,7 +130,7 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "Javis603",
+        "owner": "AoXIUy",
         "repo": "token-monitor"
       }
     ]
@@ -154,11 +154,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Javis603/token-monitor.git"
+    "url": "git+https://github.com/AoXIUy/token-monitor.git"
   },
-  "homepage": "https://github.com/Javis603/token-monitor#readme",
+  "homepage": "https://github.com/AoXIUy/token-monitor#readme",
   "bugs": {
-    "url": "https://github.com/Javis603/token-monitor/issues"
+    "url": "https://github.com/AoXIUy/token-monitor/issues"
   },
   "dependencies": {
     "@xhayper/discord-rpc": "^1.5.1",

@@ -1,6 +1,9 @@
 <p align="right">
    <strong>EN</strong> | <a href="./README.zh-CN.md">简</a> | <a href="./README.zh-TW.md">繁</a> | <a href="./README.ko.md">KO</a> | <a href="./README.ja.md">JA</a> | <a href="./README.pt-BR.md">PT</a>
 </p>
+
+> This fork adds [online Antigravity / Codex conversations for Android](docs/session-conversations.md), read only when requested and never persisted by the Hub. See [release setup](docs/releasing-fork.md) and [0.91.0 notes](docs/releases/0.91.0.md).
+
 <div align="center">
     <img src=".github/assets/app.png" alt="Token Monitor logo" width="120">
     <h1>Token Monitor</h1>
@@ -11,8 +14,8 @@
 </p>
 
 <p align="center">
-    <a href="https://github.com/Javis603/token-monitor/releases"><img src="https://img.shields.io/github/v/release/Javis603/token-monitor?include_prereleases&style=flat-square&label=release&color=22c55e" alt="Latest release" /></a>
-    <a href="https://github.com/Javis603/token-monitor/releases"><img src="https://img.shields.io/github/downloads/Javis603/token-monitor/total?style=flat-square&color=22c55e" alt="Total downloads" /></a>
+    <a href="https://github.com/AoXIUy/token-monitor/releases"><img src="https://img.shields.io/github/v/release/AoXIUy/token-monitor?include_prereleases&style=flat-square&label=release&color=22c55e" alt="Latest release" /></a>
+    <a href="https://github.com/AoXIUy/token-monitor/releases"><img src="https://img.shields.io/github/downloads/AoXIUy/token-monitor/total?style=flat-square&color=22c55e" alt="Total downloads" /></a>
     <img src="https://img.shields.io/badge/Windows-10%2B-0078D4?style=flat-square" alt="Windows 10 or later" />
     <img src="https://img.shields.io/badge/macOS-13%2B-0A84FF?style=flat-square&logo=apple&logoColor=white" alt="macOS 13 or later" />
     <img src="https://img.shields.io/badge/Linux-x64-64748b?style=flat-square&logo=linux&logoColor=white" alt="Linux x64" />
@@ -152,7 +155,7 @@ On macOS, install through the official [Homebrew Cask](https://formulae.brew.sh/
 brew install --cask token-monitor
 ```
 
-Or download the app for macOS, Windows, or Linux from [GitHub Releases](https://github.com/Javis603/token-monitor/releases).
+Or download the app for macOS, Windows, or Linux from [GitHub Releases](https://github.com/AoXIUy/token-monitor/releases).
 
 Launch the app to start tracking this device locally, with no hub setup required. See [Installation](#installation) for full details.
 
@@ -325,7 +328,7 @@ On macOS, install through the official [Homebrew Cask](https://formulae.brew.sh/
 brew install --cask token-monitor
 ```
 
-Or download from [GitHub Releases](https://github.com/Javis603/token-monitor/releases).
+Or download from [GitHub Releases](https://github.com/AoXIUy/token-monitor/releases).
 
 - **macOS (Apple Silicon)** — `.dmg`, signed and notarized
 - **macOS (Intel)** — x64 `.dmg`, signed and notarized

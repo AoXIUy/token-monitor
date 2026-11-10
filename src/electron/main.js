@@ -346,6 +346,7 @@ const { deviceHistoryRevision, historyPreview, historyRevision } = require('../s
 const { completeHistorySource, resolveCompleteHistory, resolveCompleteHistoryWithDevices } = require('./historySource');
 const { fixedPeriodHistoryMeta } = require('./fixedPeriodHistory');
 const { readSessionDetailForPlatform } = require('../shared/sessionDetailResolver');
+const { createSessionConversationClient } = require('../shared/sessionConversationClient');
 const { startDiscordRpc, stopDiscordRpc, updateDiscordRpc } = require('./discordRpc');
 const {
   commitMacWidgetSnapshot,
@@ -3710,6 +3711,7 @@ async function startEmbeddedHub() {
       host: '0.0.0.0',
       secret: settings.hubHostSecret,
       syncSessionTitles: settings.hubSyncSessionTitles === true,
+      sessionConversations: process.env.TOKEN_MONITOR_SESSION_CONVERSATIONS === '1',
       dataFile: hubDataFile(),
       logger: { error: (err) => console.log(`[hub] ${err?.message || err}`) }
     });
@@ -3798,6 +3800,30 @@ async function deleteDeviceFromCurrentSync(deviceId) {
   return deleteDeviceFromHub(deviceId);
 }
 
+let sessionConversationClient = null;
+let sessionConversationBinding = '';
+
+function stopSessionConversationClient() {
+  sessionConversationClient?.stop();
+  sessionConversationClient = null;
+  sessionConversationBinding = '';
+}
+
+function serveSessionConversations(summary) {
+  if (process.env.TOKEN_MONITOR_SESSION_CONVERSATIONS !== '1') return;
+  const { url: hubUrl, secret } = effectiveHubConfig();
+  if (!hubUrl || !secret) { stopSessionConversationClient(); return; }
+  const binding = JSON.stringify([hubUrl, secret, summary.deviceId, settings.wslScanEnabled === true]);
+  if (binding !== sessionConversationBinding) {
+    stopSessionConversationClient();
+    sessionConversationBinding = binding;
+    sessionConversationClient = createSessionConversationClient({ hubUrl, secret, deviceId: summary.deviceId,
+      wslScanEnabled: settings.wslScanEnabled === true });
+  }
+  sessionConversationClient.update(summary);
+  sessionConversationClient.start();
+}
+
 async function postToHub(summary) {
   const { url: hubUrl, secret } = effectiveHubConfig();
   const uploadIdentity = getSyncContentRuntime().status().identity;
@@ -3829,6 +3855,7 @@ async function postToHub(summary) {
     logger: (message) => console.log(`[sync] ${message}`)
   });
   if (!response.ok) throw new Error(`Hub ${response.status}: ${(await response.text()).slice(0, 200)}`);
+  if (sameDestination(uploadContext, syncContentContext())) serveSessionConversations(summary);
   if (settings.lastPostedDeviceId !== summary.deviceId) {
     settings.lastPostedDeviceId = summary.deviceId;
     saveSettings();
@@ -4520,6 +4547,7 @@ async function saveSubscriptions(list, base) {
 // `options` is forwarded verbatim to the runtime; the quit path passes
 // `skipCloseWatchers` (see stopAll).
 function stopSyncCollector(options = {}) {
+  stopSessionConversationClient();
   usageRuntimeReconciler.cancel();
   usageRuntimeReconciler.setActiveKey(null);
   if (deviceRuntimeHandle) { try { deviceRuntimeHandle.stop(options); } catch (_) {} }
@@ -4816,6 +4844,7 @@ function startHostCollector() {
           console.log('[host-ingest] all-time project breakdown omitted to reduce the sync snapshot size');
         }
         embeddedHub.hub.ingest(payload);
+        serveSessionConversations(visibleSummary);
         if (settings.lastPostedDeviceId !== visibleSummary.deviceId) {
           settings.lastPostedDeviceId = visibleSummary.deviceId;
           saveSettings();
@@ -10127,6 +10156,7 @@ app.on('render-process-gone', (_event, contents, details) => {
 // then keep performQuit synchronous through to the exit. No preventDefault:
 // taking the quit over would cancel an OS-initiated logout or restart on macOS.
 app.on('before-quit', () => {
+  stopSessionConversationClient();
   quitRequested = true;
   limitsHistoryController?.dispose();
   limitsHistoryStore?.closeSync();

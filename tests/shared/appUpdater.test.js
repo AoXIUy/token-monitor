@@ -54,7 +54,7 @@ test('the automatic downloader stands down once an attempt is spent', () => {
 });
 
 test('source-mode release checks use the public GitHub page instead of the REST API', () => {
-  assert.equal(RELEASES_LATEST_URL, 'https://github.com/Javis603/token-monitor/releases/latest');
+  assert.equal(RELEASES_LATEST_URL, 'https://github.com/AoXIUy/token-monitor/releases/latest');
 });
 
 test('source-mode release checks negotiate public release JSON without authentication', async () => {
@@ -606,13 +606,13 @@ test('extractUpdaterReleaseHistory keeps every release up to the latest, newest 
     releaseNoteHistory: [
       {
         version: '0.71.0',
-        htmlUrl: 'https://github.com/Javis603/token-monitor/releases/tag/v0.71.0',
+        htmlUrl: 'https://github.com/AoXIUy/token-monitor/releases/tag/v0.71.0',
         releaseNotes: { en: [{ title: 'Fixed', items: ['Seventy-one.'] }] }
       },
-      { version: '0.70.0', htmlUrl: 'https://github.com/Javis603/token-monitor/releases/tag/v0.70.0' },
+      { version: '0.70.0', htmlUrl: 'https://github.com/AoXIUy/token-monitor/releases/tag/v0.70.0' },
       {
         version: '0.69.0',
-        htmlUrl: 'https://github.com/Javis603/token-monitor/releases/tag/v0.69.0',
+        htmlUrl: 'https://github.com/AoXIUy/token-monitor/releases/tag/v0.69.0',
         releaseNotes: { en: [{ title: 'Fixed', items: ['Sixty-nine.'] }] }
       }
     ],
@@ -664,7 +664,7 @@ test('latestFromUpdaterInfo reads every locale from the Atom feed\'s full change
 </ul>
 <h2>Download</h2>
 <ul>
-<li><strong>macOS Apple Silicon</strong> — <a href="https://github.com/Javis603/token-monitor/releases/download/v${version}/Token-Monitor-${version}-arm64.dmg">Token-Monitor-${version}-arm64.dmg</a></li>
+<li><strong>macOS Apple Silicon</strong> — <a href="https://github.com/AoXIUy/token-monitor/releases/download/v${version}/Token-Monitor-${version}-arm64.dmg">Token-Monitor-${version}-arm64.dmg</a></li>
 </ul>
 <details>
 <summary><strong>First launch and other notes</strong></summary>
@@ -683,7 +683,7 @@ test('latestFromUpdaterInfo reads every locale from the Atom feed\'s full change
 </ul>
 <h2>下载</h2>
 <ul>
-<li><strong>macOS Apple Silicon</strong> — <a href="https://github.com/Javis603/token-monitor/releases/download/v${version}/Token-Monitor-${version}-arm64.dmg">Token-Monitor-${version}-arm64.dmg</a></li>
+<li><strong>macOS Apple Silicon</strong> — <a href="https://github.com/AoXIUy/token-monitor/releases/download/v${version}/Token-Monitor-${version}-arm64.dmg">Token-Monitor-${version}-arm64.dmg</a></li>
 </ul>
 <details>
 <summary><strong>首次启动与其他说明</strong></summary>
@@ -961,8 +961,8 @@ test('release template exposes marked summaries for every bundled locale', () =>
   assert.match(template, /## 繁體中文[\s\S]*## 下載/);
   assert.match(template, /## 한국어[\s\S]*## 다운로드/);
   assert.match(template, /## 日本語[\s\S]*## ダウンロード/);
-  assert.match(template, /\(#\d+(?:, #\d+)*\)/);
-  assert.match(template, /（#\d+(?:、#\d+)*）/);
+  // A fork release can contain only direct commits. Dedicated parser fixtures
+  // above cover removing trailing PR references when those are present.
 });
 
 test('mergeLatestReleaseMetadata preserves notes when native updater metadata omits them', () => {
@@ -987,7 +987,7 @@ test('parseLatestReleasePayload returns normalized object for valid payload', ()
   const result = parseLatestReleasePayload({
     tag_name: 'v0.1.3',
     name: 'Token Monitor 0.1.3',
-    html_url: 'https://github.com/Javis603/token-monitor/releases/tag/v0.1.3',
+    html_url: 'https://github.com/AoXIUy/token-monitor/releases/tag/v0.1.3',
     published_at: '2026-05-26T12:00:00Z',
     body: `
 ## What's changed
@@ -1002,7 +1002,7 @@ test('parseLatestReleasePayload returns normalized object for valid payload', ()
     version: '0.1.3',
     tag: 'v0.1.3',
     name: 'Token Monitor 0.1.3',
-    htmlUrl: 'https://github.com/Javis603/token-monitor/releases/tag/v0.1.3',
+    htmlUrl: 'https://github.com/AoXIUy/token-monitor/releases/tag/v0.1.3',
     publishedAt: '2026-05-26T12:00:00Z',
     releaseNotes: {
       en: [{ title: 'Added', items: ['Release summaries in the app.'] }]
@@ -1013,7 +1013,7 @@ test('parseLatestReleasePayload returns normalized object for valid payload', ()
 test('parseLatestReleasePayload falls back to tag when name is missing', () => {
   const result = parseLatestReleasePayload({
     tag_name: 'v0.1.3',
-    html_url: 'https://github.com/Javis603/token-monitor/releases/tag/v0.1.3'
+    html_url: 'https://github.com/AoXIUy/token-monitor/releases/tag/v0.1.3'
   });
   assert.equal(result.name, 'v0.1.3');
   assert.equal(result.publishedAt, '');
@@ -1031,10 +1031,10 @@ test('parseLatestReleasePayload builds a trusted release URL from the validated 
   assert.equal(parseLatestReleasePayload({
     tag_name: 'v0.1.3',
     html_url: 'http://example.com'
-  }).htmlUrl, 'https://github.com/Javis603/token-monitor/releases/tag/v0.1.3');
+  }).htmlUrl, 'https://github.com/AoXIUy/token-monitor/releases/tag/v0.1.3');
   assert.equal(parseLatestReleasePayload({
     tag_name: 'v0.1.3'
-  }).htmlUrl, 'https://github.com/Javis603/token-monitor/releases/tag/v0.1.3');
+  }).htmlUrl, 'https://github.com/AoXIUy/token-monitor/releases/tag/v0.1.3');
 });
 
 test('latestFromUpdaterInfo normalizes provider metadata and release notes', () => {
@@ -1048,7 +1048,7 @@ test('latestFromUpdaterInfo normalizes provider metadata and release notes', () 
     version: '0.40.0',
     tag: 'v0.40.0',
     name: 'Token Monitor 0.40.0',
-    htmlUrl: 'https://github.com/Javis603/token-monitor/releases/tag/v0.40.0',
+    htmlUrl: 'https://github.com/AoXIUy/token-monitor/releases/tag/v0.40.0',
     publishedAt: '2026-08-03T08:00:00Z',
     releaseNotes: { en: [{ title: 'Fixed', items: ['Updater fix.'] }] }
   });

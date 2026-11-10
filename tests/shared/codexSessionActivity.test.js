@@ -364,7 +364,11 @@ test('historical multi-UUID rollout candidates require the actual header identit
     fs.mkdirSync(dir, { recursive: true }); fs.rmSync(f.file, { force: true });
     const file = path.join(dir, id + '.jsonl');
     const write = headerId => {
-      fs.writeFileSync(file, [entry('session_meta', { id: headerId }), started].join('\n') + '\n');
+      // The historical mtime and byte length stay fixed. Replace the inode so
+      // the fixture changes its fingerprint even on coarse timestamp filesystems.
+      const replacement = file + '.replacement';
+      fs.writeFileSync(replacement, [entry('session_meta', { id: headerId }), started].join('\n') + '\n');
+      fs.renameSync(replacement, file);
       fs.utimesSync(file, new Date(now - 7 * 86400_000), new Date(now - 7 * 86400_000));
     };
     const row = { client: 'codex', sessionId: id, totalTokens: 100,

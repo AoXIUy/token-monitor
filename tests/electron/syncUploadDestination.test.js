@@ -31,7 +31,7 @@ function harness() {
       posts.push({ url, options });
       return { response: { ok: true, json: async () => ({ ok: true }) } };
     },
-    fetch: async () => {}, saveSettings: () => {},
+    fetch: async () => {}, saveSettings: () => {}, serveSessionConversations: () => {},
     HUB_RESPONSE_HEADER: 'x-token-monitor-response', HUB_RESPONSE_MINIMAL: 'minimal'
   });
   vm.runInContext(source.slice(start, end), sandbox);
@@ -219,7 +219,7 @@ for (const failure of ['cleanup', 'preferences', 'bind']) test(`host ${failure} 
   const sandbox = vm.createContext({
     settings: { hubMode: 'host', hubHostPort: 17321, hubHostSecret: '', syncContentState: originalState },
     embeddedHub: null, embeddedHubError: null, modeQueue: Promise.resolve(), hubModeGeneration: 0,
-    console: { log: () => {} }, normalizeHubPort: value => value,
+    console: { log: () => {} }, process: { env: {} }, normalizeHubPort: value => value,
     normalizeSyncContentState: value => structuredClone(value), generateHubSecret: () => 'generated-secret',
     syncContentContext: value => value,
     getSyncContentRuntime: () => ({

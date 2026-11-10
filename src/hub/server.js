@@ -35,6 +35,8 @@ const {
 } = require('../shared/hubProtocol');
 const { isAuthorized, readJsonBody, sendJson, sendText } = require('../shared/http');
 const { loadDotEnv, parseArgs, projectRoot, readJson, writeJsonAtomic } = require('../shared/config');
+const { CONVERSATION_BASE, MAX_CONVERSATION_BYTES } = require('../shared/sessionConversationProtocol');
+const { createSessionConversationRelay } = require('./sessionConversations');
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 const SHUTDOWN_DRAIN_TIMEOUT_MS = 5000;
@@ -54,6 +56,7 @@ function createHub({
   host = '0.0.0.0',
   secret = '',
   syncSessionTitles = false,
+  sessionConversations = false,
   staleAfterMs = DEFAULT_STALE_AFTER_MS,
   broadcastDelayMs = 100,
   persistIntervalMs = 0,
@@ -76,6 +79,8 @@ function createHub({
   store.syncSettings = Object.assign(Object.create(null), store.syncSettings || {});
   const bindHost = resolveBindHost(host, secret);
   const uploadBaselines = createUploadBaselines();
+  const conversationRelay = createSessionConversationRelay({ enabled: sessionConversations === true,
+    getDevice: (id) => store.devices[id] });
   let persistTimer = null;
   let persistPending = false;
   let stopping = false;
@@ -270,6 +275,7 @@ function createHub({
       store.savedAt = previousSavedAt;
       throw error;
     }
+    conversationRelay.remove(deviceId);
     broadcastStats('delete');
   }
 
@@ -411,6 +417,33 @@ function createHub({
     }
 
     if (!isAuthorized(req, secret)) return sendJson(res, 401, { error: 'unauthorized' });
+
+    if (url.pathname === CONVERSATION_BASE || url.pathname === `${CONVERSATION_BASE}/poll`) {
+      if (req.method !== 'GET') return sendJson(res, 405, { error: 'invalid_request' });
+      const controller = new AbortController();
+      const cancel = () => controller.abort();
+      res.once('close', cancel);
+      try {
+        const result = url.pathname.endsWith('/poll')
+          ? await conversationRelay.poll(url.searchParams.get('deviceId'), url.searchParams.get('instance'), controller.signal)
+          : await conversationRelay.query({ deviceId: url.searchParams.get('deviceId'), key: url.searchParams.get('key'),
+            cursor: url.searchParams.get('cursor') || '' }, controller.signal);
+        if (!res.destroyed) return sendJson(res, 200, result);
+        return;
+      } finally { res.off('close', cancel); }
+    }
+    if (req.method === 'POST' && url.pathname === `${CONVERSATION_BASE}/result`) {
+      try {
+        const payload = await readJsonBody(req, MAX_CONVERSATION_BYTES + 4096);
+        return sendJson(res, 200, conversationRelay.result(payload));
+      } catch (error) {
+        if (error.code === 'payload_too_large') {
+          res.shouldKeepAlive = false;
+          return sendJson(res, 413, { error: 'invalid_request' }, { connection: 'close' });
+        }
+        return sendJson(res, 400, { error: 'invalid_request' });
+      }
+    }
 
     if (req.method === 'GET' && url.pathname === '/api/sync/content') return sendJson(res, 200, getSyncContent());
 
@@ -579,6 +612,7 @@ function createHub({
   function stop() {
     if (stopPromise) return stopPromise;
     stopping = true;
+    conversationRelay.stop();
     const operation = new Promise((resolve, reject) => {
       clearTimeout(persistTimer);
       persistTimer = null;
@@ -632,7 +666,8 @@ if (require.main === module) {
   const dataFile = String(args.dataFile || process.env.TOKEN_MONITOR_DATA_FILE || path.join(projectRoot(), 'data', 'devices.json'));
 
   const syncSessionTitles = syncSessionTitlesEnabled(args.syncSessionTitles ?? args['sync-session-titles'] ?? process.env.TOKEN_MONITOR_SYNC_SESSION_TITLES);
-  const hub = createHub({ port, host, secret, staleAfterMs, dataFile, syncSessionTitles, persistIntervalMs });
+  const sessionConversations = syncSessionTitlesEnabled(args.sessionConversations ?? args['session-conversations'] ?? process.env.TOKEN_MONITOR_SESSION_CONVERSATIONS);
+  const hub = createHub({ port, host, secret, staleAfterMs, dataFile, syncSessionTitles, sessionConversations, persistIntervalMs });
   for (const signal of ['SIGINT', 'SIGTERM']) {
     process.once(signal, () => {
       hub.stop().catch((error) => {

@@ -108,7 +108,7 @@ test('mac release scripts build native Apple Silicon and Intel artifacts with th
     .filter((line) => line.startsWith('<summary><strong>Full Changelog:</strong>'));
   assert.equal(fullChangelogSummaries.length, 1);
   assert.match(fullChangelogSummaries[0], />v\d+\.\d+\.\d+\.\.\.v\d+\.\d+\.\d+<\/a>/);
-  assert.match(fullChangelogSummaries[0], /https:\/\/github\.com\/Javis603\/token-monitor\/compare\/v\d+\.\d+\.\d+\.\.\.v\d+\.\d+\.\d+/);
+  assert.match(fullChangelogSummaries[0], /https:\/\/github\.com\/AoXIUy\/token-monitor\/compare\/v\d+\.\d+\.\d+\.\.\.v\d+\.\d+\.\d+/);
   assert.ok(fullChangelogSummaries[0].includes(`v${rootPackage.version}`));
   assert.match(
     releaseTemplate,

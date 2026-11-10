@@ -54,6 +54,8 @@ Restart the agent after changing `TZ` in its service environment. If `TZ` is uns
 
 ### Title-sync state and migration
 
+For optional online-only Antigravity/Codex conversation reads from Android, enable `TOKEN_MONITOR_SESSION_CONVERSATIONS=1` separately on the resident agent and Node Hub. One-shot and dry-run agents never open the request lane. See [conversation setup and privacy boundary](session-conversations.md).
+
 Title sync is off by default and needs opt-in on both the Hub and agent. For the agent, use `TOKEN_MONITOR_SYNC_SESSION_TITLES=1` or `--sync-session-titles`. The widget's title-display setting is independent. See the [title-sync API](API.md#put-apisynctitlesdeviceid) for protocol and legacy-agent cleanup details.
 
 Before deleting or moving the agent's state directory (`TOKEN_MONITOR_SHARED_DIR`, if set), stop the agent/service and run `npm run agent:once -- --sync-session-titles=false` with the original Hub URL, credentials, Device ID and state directory. Keep the state until revocation is confirmed; pending cleanup or state warnings mean it must be retained. This command still collects and uploads usage without titles after cleanup.
