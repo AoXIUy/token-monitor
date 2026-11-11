@@ -90,6 +90,27 @@ function parseCodexConversation(records) {
   return messages;
 }
 
+function antigravityUserInput(content) {
+  const match = /^\s*<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>([\s\S]*)$/.exec(content);
+  if (!match) return null;
+  let remaining = match[2].trim();
+  if (!remaining) return null;
+  // Recognize the export envelope, not arbitrary XML in a user's message.
+  // Unknown/partial suffixes retain the original text instead of losing data.
+  while (remaining) {
+    const opening = /^<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE)>/.exec(remaining);
+    if (!opening) return null;
+    const closing = `</${opening[1]}>`;
+    const end = remaining.indexOf(closing, opening[0].length);
+    if (end < 0) return null;
+    remaining = remaining.slice(end + closing.length).trimStart();
+  }
+  return {
+    request: match[1].replace(/^\r?\n/, '').replace(/\r?\n$/, ''),
+    context: match[2].trim()
+  };
+}
+
 function parseAntigravityConversation(records) {
   const steps = new Map();
   for (const row of records) if (Number.isSafeInteger(row.step_index) && row.step_index >= 0) steps.set(row.step_index, row);
@@ -101,7 +122,14 @@ function parseAntigravityConversation(records) {
     const add = (text, kind, messageRole = role) => {
       if (text.trim()) messages.push({ id: `${index}.${messages.length}`, role: messageRole, text, timestamp, kind });
     };
-    add(textContent(row.content), row.type === 'USER_INPUT' || row.type === 'PLANNER_RESPONSE' ? 'message' : String(row.type || 'event').slice(0, 80));
+    const content = textContent(row.content);
+    const userInput = row.type === 'USER_INPUT' ? antigravityUserInput(content) : null;
+    if (userInput) {
+      add(userInput.request, 'message', 'user');
+      add(userInput.context, 'context', 'system');
+    } else {
+      add(content, row.type === 'USER_INPUT' || row.type === 'PLANNER_RESPONSE' ? 'message' : String(row.type || 'event').slice(0, 80));
+    }
     add(textContent(row.thinking), 'reasoning_summary', 'assistant');
     if (Array.isArray(row.tool_calls)) for (const call of row.tool_calls) {
       if (!call || typeof call !== 'object') continue;
@@ -213,7 +241,11 @@ function readSessionConversation(query, { home = os.homedir(), env = process.env
     const file = sourceFile(client, sessionId, home, env);
     if (!file) return { error: 'source_unavailable' };
     const bytes = readBytes(file);
-    const revision = createHash('sha256').update(bytes).digest('hex').slice(0, 24);
+    const hash = createHash('sha256');
+    // Separating user input from metadata changes fragment offsets even when
+    // the file is unchanged. Old cursors must request a fresh first page.
+    if (client === 'antigravity') hash.update('antigravity-user-request-v1\0');
+    const revision = hash.update(bytes).digest('hex').slice(0, 24);
     const lines = bytes.toString('utf8').split(/\r?\n/);
     const records = [];
     let incomplete = false;

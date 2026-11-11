@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const zlib = require('node:zlib');
+const { createHash } = require('node:crypto');
 const { parseCodexConversation, parseAntigravityConversation, readSessionConversation } = require('../../src/shared/sessionConversation');
 const { conversationQuery, conversationPage } = require('../../src/shared/sessionConversationProtocol');
 const { readConversationInWorker } = require('../../src/shared/sessionConversationClient');
@@ -54,6 +55,65 @@ test('Antigravity exports keep the latest step, source order, prompt context, to
   assert.equal(messages[2].kind, 'reasoning_summary');
   assert.equal(messages[3].role, 'tool');
   assert.ok(!JSON.stringify(messages).includes('draft'));
+});
+
+test('Antigravity separates the actual user request from exported command metadata and settings changes', () => {
+  const request = '/plan 优化升级总览首页UI UX';
+  const context = '<ADDITIONAL_METADATA>\nThe current local time is: 2026-11-11T11:51:53+08:00.\n/plan is a [Slash Command]:\n<PLAN>Planning command description, treated as recorded context.</PLAN>\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nModel Selection changed.\n</USER_SETTINGS_CHANGE>';
+  const messages = parseAntigravityConversation([{ step_index: 1, type: 'USER_INPUT',
+    content: `<USER_REQUEST>\n${request}\n</USER_REQUEST>\n${context}`, created_at: '2026-11-11T03:51:53Z' }]);
+  assert.equal(messages.length, 2);
+  assert.equal(messages[0].role, 'user');
+  assert.equal(messages[0].kind, 'message');
+  assert.equal(messages[0].text, request);
+  assert.equal(messages[1].role, 'system');
+  assert.equal(messages[1].kind, 'context');
+  assert.equal(messages[1].text, context);
+  assert.equal(messages[1].timestamp, messages[0].timestamp);
+});
+
+test('Antigravity keeps literal tags, unrecognized or partial envelopes and assistant/tool text intact', () => {
+  const texts = [
+    'Explain <USER_REQUEST>literal</USER_REQUEST> in this example.',
+    '<USER_REQUEST>literal</USER_REQUEST>',
+    '<USER_REQUEST>hello</USER_REQUEST>context',
+    '<USER_REQUEST>hello</USER_REQUEST><UNKNOWN_CONTEXT>keep me</UNKNOWN_CONTEXT>',
+    '<USER_REQUEST>hello</USER_REQUEST><ADDITIONAL_METADATA>unfinished',
+    '<USER_REQUEST>unfinished'
+  ];
+  for (const text of texts) {
+    const messages = parseAntigravityConversation([{ step_index: 0, type: 'USER_INPUT', content: text }]);
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].text, text);
+  }
+  const wrapped = '<USER_REQUEST>literal</USER_REQUEST><ADDITIONAL_METADATA>literal</ADDITIONAL_METADATA>';
+  for (const row of [{ type: 'PLANNER_RESPONSE' }, { type: 'RUN_COMMAND', source: 'TOOL' }]) {
+    assert.equal(parseAntigravityConversation([{ ...row, step_index: 0, content: wrapped }])[0].text, wrapped);
+  }
+});
+
+test('Antigravity preserves request whitespace and long metadata across pagination and rejects legacy cursors', t => {
+  const root = home(t);
+  const request = '  /plan 你好😀\n\nKeep this indentation.  ';
+  const metadata = '<ADDITIONAL_METADATA>\r\n' + '上下文😀'.repeat(50000) + '\r\n</ADDITIONAL_METADATA>';
+  const file = path.join(root, '.gemini/antigravity/brain/wrapped/.system_generated/logs/transcript_full.jsonl');
+  write(file, [{ step_index: 1, type: 'USER_INPUT', content: `<USER_REQUEST>\r\n${request}\r\n</USER_REQUEST>\r\n${metadata}` }]);
+  let cursor = '', user = '', context = '', pages = 0;
+  do {
+    const page = conversationPage(readSessionConversation(query('antigravity:wrapped', cursor), { home: root, env: {} }));
+    assert.ok(!page.error);
+    user += page.messages.filter(m => m.role === 'user').map(m => m.text).join('');
+    context += page.messages.filter(m => m.kind === 'context').map(m => m.text).join('');
+    cursor = page.nextCursor;
+    pages++;
+  } while (cursor);
+  assert.equal(user.length, request.length);
+  assert.equal(user, request);
+  assert.equal(context.length, metadata.length);
+  assert.equal(createHash('sha256').update(context).digest('hex'), createHash('sha256').update(metadata).digest('hex'));
+  assert.ok(pages > 1);
+  const legacy = createHash('sha256').update(fs.readFileSync(file)).digest('hex').slice(0, 24) + ':1';
+  assert.equal(readSessionConversation(query('antigravity:wrapped', legacy), { home: root, env: {} }).error, 'source_changed');
 });
 
 test('on-demand pagination round trips long Unicode messages without truncating or splitting surrogate pairs', (t) => {

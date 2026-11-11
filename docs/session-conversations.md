@@ -23,12 +23,13 @@ Hub 可使用 `npm run hub -- --session-conversations`，常驻无界面采集�
 ## 来源和范围
 
 - Antigravity 读取 `brain/<sessionId>/.system_generated/logs/transcript_full.jsonl`。识别 IDE、CLI、备份、`ANTIGRAVITY_HOME` / `ANTIGRAVITY_DATA_DIR`、`GEMINI_CLI_HOME` 和 CC Switch 私有 `~/.cc-switch/agy/<profile>/antigravity-cli` 根目录。同一步骤被改写时采用最新记录。只有二进制数据库而没有导出日志的会话明确显示正文不可用。
+- Antigravity 的已识别用户输入导出包装会拆分显示：用户消息只显示 `USER_REQUEST` 中的实际正文，`ADDITIONAL_METADATA` 和 `USER_SETTINGS_CHANGE` 保留为单独的系统上下文，默认折叠。普通文本、未识别或不完整的包装保留原样；日志中的命令说明始终按文本处理。
 - Codex 读取 `CODEX_HOME` 或 `~/.codex` 内当前及归档 rollout，支持 `.jsonl` 和 `.jsonl.zst`。原生线程 ID 通过本机 catalog 解析并核对日志头。只有 Dots 用量计数而没有 rollout 时，不补造对话。
 - 显示用户提问、助手回复及记录在日志中的上下文、可读思考摘要和工具输入 / 输出；工具与上下文默认折叠。图片只显示附件占位，不读取图片文件、加载外部链接或解密不透明推理。
 - Windows 的 WSL 查询仅在现有 WSL 扫描开关开启后检查已经运行的发行版；不启动已停止的发行版。
 - 仅查询该设备在今日 / 本月快照中实际上报的会话键。对话本身不按统计周期裁剪，也不把父子会话或其他设备的消息拼接在一起。
 
-读取在独立 Worker 中执行，10 秒超时，单个解码日志上限 64 MiB。每页最多 40 个文本片段、384 KiB；长消息分段后可继续加载，保留原文和顺序，不用摘要替换正文。日志改动使原分页游标失效，需要刷新重新读取。无法解析或未写完的记录保留不完整提示。
+读取在独立 Worker 中执行，10 秒超时，单个解码日志上限 64 MiB。每页最多 40 个文本片段、384 KiB；长消息分段后可继续加载，保留原文和顺序，不用摘要替换正文。日志改动或解析格式升级会使原分页游标失效，需要刷新重新读取。无法解析或未写完的记录保留不完整提示。
 
 ## 数据边界和故障
 
