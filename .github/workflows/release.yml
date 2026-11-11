@@ -144,7 +144,7 @@ jobs:
           const metadata = JSON.parse(asar.extractFile(archive, 'package.json'));
           const context = { module: { exports: {} }, URL,
             require: id => id === '../../package.json' ? metadata : require(id) };
-          vm.runInNewContext(asar.extractFile(archive, 'src/shared/appUpdater.js').toString(), context);
+          vm.runInNewContext(asar.extractFile(archive, path.join('src', 'shared', 'appUpdater.js')).toString(), context);
           if (context.module.exports.RELEASES_LATEST_URL !== 'https://github.com/AoXIUy/token-monitor/releases/latest') {
             throw Error('Packaged updater does not load or points to another repository');
           }
