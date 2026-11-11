@@ -103,3 +103,42 @@ test('feature remains off without explicit Hub opt-in', async () => {
   assert.deepEqual(await relay.poll('pc', id), { error: 'disabled' });
   assert.deepEqual(relay.result({}), { error: 'disabled' });
 });
+
+test('turning permission off cancels queries and polls and forgets late replies before enabling again', async (t) => {
+  const relay = createSessionConversationRelay({ enabled: true, getDevice: () => ({ periods: { today: { sessions } } }) });
+  t.after(() => relay.stop());
+  const query = { deviceId: 'pc', key: 'codex:example', cursor: '' };
+  const reading = relay.poll('pc', id);
+  const pending = relay.query(query);
+  const { request } = await reading;
+  const idle = relay.poll('other', id);
+  relay.setEnabled(false);
+  assert.deepEqual(await pending, { error: 'disabled' });
+  assert.deepEqual(await idle, { error: 'disabled' });
+  assert.deepEqual(await relay.query(query), { error: 'disabled' });
+  assert.deepEqual(relay.result({ ...request, instance: id, page }), { error: 'disabled' });
+  relay.setEnabled(true);
+  assert.deepEqual(relay.result({ ...request, instance: id, page }), { error: 'not_found' });
+  assert.deepEqual(await relay.query(query), { error: 'device_offline' });
+  const fresh = relay.poll('pc', id);
+  const response = relay.query(query);
+  const next = await fresh;
+  relay.result({ ...next.request, instance: id, page });
+  assert.deepEqual(await response, page);
+});
+
+test('embedded Hub permission changes take effect without restarting its HTTP server', async (t) => {
+  const hub = createHub({ host: '127.0.0.1', port: 0, secret: 'test-secret' });
+  await hub.start();
+  t.after(() => hub.stop());
+  hub.ingest(record);
+  const port = hub.server.address().port;
+  const url = `http://127.0.0.1:${port}/api/session-conversations?deviceId=pc&key=codex:example`;
+  const query = async () => (await fetch(url, { headers: { authorization: 'Bearer test-secret' } })).json();
+  assert.deepEqual(await query(), { error: 'disabled' });
+  hub.setSessionConversationsEnabled(true);
+  assert.deepEqual(await query(), { error: 'device_offline' });
+  hub.setSessionConversationsEnabled(false);
+  assert.deepEqual(await query(), { error: 'disabled' });
+  assert.equal(hub.server.address().port, port);
+});

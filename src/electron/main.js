@@ -648,6 +648,7 @@ function defaultSettings() {
     hubHostSecret: process.env.TOKEN_MONITOR_SECRET || '',
     secret: process.env.TOKEN_MONITOR_SECRET || '',
     hubSyncSessionTitles: parseBoolean(process.env.TOKEN_MONITOR_SYNC_SESSION_TITLES, false),
+    sessionConversationsEnabled: parseBoolean(process.env.TOKEN_MONITOR_SESSION_CONVERSATIONS, true),
     syncContentState: normalizeSyncContentState(null),
     windowBehavior,
     alwaysOnTop: windowBehavior === 'floating',
@@ -2818,6 +2819,7 @@ function readSettings() {
     merged.modelAliases = normalizeModelAliases(merged.modelAliases);
     merged.syncContentState = normalizeSyncContentState(merged.syncContentState);
     merged.hubSyncSessionTitles = parseBoolean(merged.hubSyncSessionTitles, false);
+    merged.sessionConversationsEnabled = parseBoolean(merged.sessionConversationsEnabled, true);
     merged.modelAliasGrouping = normalizeModelAliasGrouping(merged.modelAliasGrouping);
     merged.textSize = fontSettingsApi.normalizeTextSize(merged.textSize);
     merged.interfaceFontFamily = fontSettingsApi.normalizeFontFamily(merged.interfaceFontFamily);
@@ -3711,7 +3713,7 @@ async function startEmbeddedHub() {
       host: '0.0.0.0',
       secret: settings.hubHostSecret,
       syncSessionTitles: settings.hubSyncSessionTitles === true,
-      sessionConversations: process.env.TOKEN_MONITOR_SESSION_CONVERSATIONS === '1',
+      sessionConversations: settings.sessionConversationsEnabled !== false,
       dataFile: hubDataFile(),
       logger: { error: (err) => console.log(`[hub] ${err?.message || err}`) }
     });
@@ -3810,7 +3812,7 @@ function stopSessionConversationClient() {
 }
 
 function serveSessionConversations(summary) {
-  if (process.env.TOKEN_MONITOR_SESSION_CONVERSATIONS !== '1') return;
+  if (settings?.sessionConversationsEnabled === false) { stopSessionConversationClient(); return; }
   const { url: hubUrl, secret } = effectiveHubConfig();
   if (!hubUrl || !secret) { stopSessionConversationClient(); return; }
   const binding = JSON.stringify([hubUrl, secret, summary.deviceId, settings.wslScanEnabled === true]);
@@ -8428,6 +8430,7 @@ app.whenReady().then(() => {
       hubHostPort: patch.hubHostPort !== undefined ? normalizeHubPort(patch.hubHostPort, settings.hubHostPort) : settings.hubHostPort,
       hubHostSecret: patch.hubHostSecret !== undefined ? String(patch.hubHostSecret) : settings.hubHostSecret,
       hubSyncSessionTitles: parseBoolean(patch.hubSyncSessionTitles ?? settings.hubSyncSessionTitles, false),
+      sessionConversationsEnabled: parseBoolean(patch.sessionConversationsEnabled ?? settings.sessionConversationsEnabled, true),
       syncContentState: normalizeSyncContentState(settings.syncContentState),
       deviceId: (patch.deviceId !== undefined ? String(patch.deviceId).trim() : settings.deviceId) || defaultDeviceId(),
       clients: patch.clients !== undefined ? clientsCsvForSetting(patch.clients, '') : clientsCsvForSetting(settings.clients, DEFAULT_CLIENTS),
@@ -8625,6 +8628,11 @@ app.whenReady().then(() => {
     contentRuntime.invalidate();
     const receiverPermissionChanged = settings.hubSyncSessionTitles !== previousSettingsState.hubSyncSessionTitles;
     if (receiverPermissionChanged) contentRuntime.receiverPermissionChanged(settings.hubSyncSessionTitles);
+    const conversationPermissionChanged = (settings.sessionConversationsEnabled !== false) !== (previousSettingsState.sessionConversationsEnabled !== false);
+    if (conversationPermissionChanged) {
+      embeddedHub?.hub.setSessionConversationsEnabled(settings.sessionConversationsEnabled !== false);
+      if (settings.sessionConversationsEnabled === false) stopSessionConversationClient();
+    }
     // A worker-hosted transform holds its own copy of the settings it reads.
     // Update it now rather than when the usage reconfigure settles: pausing the
     // session archive must stop captures from the next summary on.
@@ -8685,6 +8693,8 @@ app.whenReady().then(() => {
       }
       restartDeviceRuntimeForMode();
     } else {
+      if (conversationPermissionChanged && settings.sessionConversationsEnabled !== false
+        && lastCollectedDevice && !isExternalAgentActive()) serveSessionConversations(lastCollectedDevice);
       if (runtimeChange.usageStructural) {
         reconfigureUsageRuntimeForMode();
       } else if (previousRuntimeSettings.codexDotsVisible !== settings.codexDotsVisible) {

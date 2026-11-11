@@ -16,7 +16,7 @@ Contracts that cross subsystem boundaries. This guide names the owner, the invar
 
 The widget (`src/electron/launch.js` → `src/electron/main.js`), headless collector (`src/agent/agent.js`) and Node Hub (`src/hub/server.js`) share `src/shared/`. The Cloudflare Hub (`worker/src/index.js`) speaks the same protocol.
 
-The fork's optional [online conversation extension](session-conversations.md) is Node-Hub-only. `shared/sessionConversationClient.js` owns a separate producer long poll; requested source reads run in a short-lived Worker. `hub/sessionConversations.js` relays response-owned requests without storage or stats/SSE changes. Both ends default off. Its Node-only protocol is registered in the Node Hub build closure, outside the portable Worker core.
+The fork's optional [online conversation extension](session-conversations.md) is Node-Hub-only. `shared/sessionConversationClient.js` owns a separate producer long poll; requested source reads run in a short-lived Worker. `hub/sessionConversations.js` relays response-owned requests without storage or stats/SSE changes. Standalone Hub/Agent processes default off; desktop Host/Client settings default on and can revoke queries immediately. Its Node-only protocol is registered in the Node Hub build closure, outside the portable Worker core.
 
 Device collection, transforms and archives live in `src/shared/usage/`. The neighboring `src/shared/usage.js` is the Hub-core usage model, not that directory's index: `require('./usage')` resolves the file. Do not add `usage/index.js`.
 

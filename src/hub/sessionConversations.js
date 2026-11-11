@@ -93,7 +93,14 @@ function createSessionConversationRelay({ enabled, getDevice, now = Date.now, po
   function stop() {
     for (const id of readers.keys()) remove(id);
   }
-  return { poll, query, result, remove, stop };
+  function setEnabled(value) {
+    enabled = value === true;
+    if (enabled) return;
+    for (const id of pending.keys()) finish(id, { error: 'disabled' });
+    for (const reader of readers.values()) reader.deliver?.({ error: 'disabled' });
+    readers.clear();
+  }
+  return { poll, query, result, remove, stop, setEnabled };
 }
 
 module.exports = { createSessionConversationRelay };

@@ -2,7 +2,7 @@
    <strong>EN</strong> | <a href="./README.zh-CN.md">简</a> | <a href="./README.zh-TW.md">繁</a> | <a href="./README.ko.md">KO</a> | <a href="./README.ja.md">JA</a> | <a href="./README.pt-BR.md">PT</a>
 </p>
 
-> This fork adds [online Antigravity / Codex conversations for Android](docs/session-conversations.md), read only when requested and never persisted by the Hub. See [release setup](docs/releasing-fork.md) and [0.91.0 notes](docs/releases/0.91.0.md).
+> This fork adds [online Antigravity / Codex conversations for Android](docs/session-conversations.md), read only when requested and never persisted by the Hub. See [release setup](docs/releasing-fork.md) and [0.91.1 notes](docs/releases/0.91.1.md).
 
 <div align="center">
     <img src=".github/assets/app.png" alt="Token Monitor logo" width="120">
@@ -325,11 +325,11 @@ Token Monitor supports token usage, account-limit checks, and session details se
 Download this fork from [GitHub Releases](https://github.com/AoXIUy/token-monitor/releases).
 
 - **Windows 10/11 x64** — setup and portable `.exe`
-- **Linux amd64** — `.deb`, install with `sudo apt install ./Token-Monitor-<version>-amd64.deb`
+- **Linux amd64 / x86_64** — `.deb` and `.AppImage`; install the Debian package with `sudo apt install ./Token-Monitor-<version>-amd64.deb`, or mark the AppImage executable and run it.
 
 This fork publishes only these two platforms. The upstream Homebrew Cask installs the upstream application.
 
-Packaged builds check this fork's GitHub Releases automatically. When an update is available, the app shows an update indicator; Windows setup builds can also install from Settings → General. Linux `.deb` and Windows portable users download updates through View release.
+Packaged builds check this fork's GitHub Releases automatically. When an update is available, the app shows an update indicator; Windows setup and Linux AppImage builds can also install from Settings → General. Linux `.deb` and Windows portable users download updates through View release.
 
 ### First run
 
@@ -408,6 +408,7 @@ npm run dist:mac     # macOS arm64 .dmg           → dist/
 npm run dist:mac:x64 # macOS Intel x64 .dmg       → dist/
 npm run dist:win     # Windows x64 installer .exe → dist/
 npm run dist:linux   # Linux amd64 .deb           → dist/
+npm run dist:linux:appimage # Linux x86_64 AppImage → dist/
 npm run pack         # unpacked app dir (no installer), for quick local testing
 ```
 

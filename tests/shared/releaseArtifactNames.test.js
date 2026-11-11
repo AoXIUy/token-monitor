@@ -44,12 +44,14 @@ test('release artifact templates use GitHub-safe names', () => {
   const patterns = [
     rootPackage.build.mac.artifactName,
     rootPackage.build.linux.artifactName,
+    rootPackage.build.appImage.artifactName,
     rootPackage.build.nsis.artifactName,
     rootPackage.build.portable.artifactName
   ];
   assert.deepEqual(patterns, [
     'Token-Monitor-${version}-${arch}.${ext}',
     'Token-Monitor-${version}-amd64.${ext}',
+    'Token-Monitor-${version}-${arch}.${ext}',
     'Token-Monitor-Setup-${version}.${ext}',
     'Token-Monitor-${version}.${ext}'
   ]);
@@ -69,17 +71,19 @@ test('release body template carries every localized release-note section', () =>
   }
 });
 
-test('release publishes only Windows x64 and Linux amd64 Debian packages', () => {
+test('release publishes Windows x64 and separate Debian and AppImage packages', () => {
   const { load } = require('js-yaml');
   const workflow = load(fs.readFileSync(path.join(__dirname, '..', '..', '.github', 'workflows', 'release.yml'), 'utf8'));
   const matrix = workflow.jobs.build.strategy.matrix.include;
-  assert.deepEqual(matrix.map(({ target }) => target), ['win', 'linux']);
+  assert.deepEqual(matrix.map(({ target }) => target), ['win', 'linux', 'linux-appimage']);
   assert.deepEqual(rootPackage.build.linux.target, [{ target: 'deb', arch: ['x64'] }]);
   assert.deepEqual(rootPackage.build.win.target, [
     { target: 'nsis', arch: ['x64'] }, { target: 'portable', arch: ['x64'] }
   ]);
   assert.match(matrix.find(({ target }) => target === 'linux').artifact_path, /dist\/\*\.deb/);
-  assert.doesNotMatch(workflow.jobs.release.steps.find(step => step.name === 'Upload complete release assets to draft').with.files, /AppImage|\.dmg|latest-mac/);
+  assert.match(matrix.find(({ target }) => target === 'linux-appimage').artifact_path, /dist\/\*\.AppImage/);
+  assert.match(rootPackage.scripts['dist:linux:appimage'], /--linux AppImage --x64 --publish never/);
+  assert.doesNotMatch(workflow.jobs.release.steps.find(step => step.name === 'Upload complete release assets to draft').with.files, /\.dmg|latest-mac/);
   const releaseTemplate = fs.readFileSync(path.join(__dirname, '..', '..', '.github', 'RELEASE_TEMPLATE.md'), 'utf8');
   const fullChangelogSummaries = releaseTemplate
     .split('\n')

@@ -523,6 +523,10 @@
       {
         "revision": 11,
         "buildId": "sha256:5e0b93e55afbeca7692c3a9756edb350ec5ac47df424e6059bbd06fa82a9a8c1"
+      },
+      {
+        "revision": 12,
+        "buildId": "sha256:4b62bcde17144ba92de54feed9848ae94ea1ba968589e37bb92b0f7085f0bf66"
       }
     ],
     "cloudflare-worker": [

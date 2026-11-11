@@ -4,26 +4,17 @@
 
 ## 启用
 
-在 Node Hub 和每个允许查询的来源设备上分别设置并重启：
+桌面应用打开 **设置 → 多设备同步 → 会话对话查询**。此开关默认开启，在连接 Hub / 本机托管 Hub 模式下显示。关闭后立即停止本机提供对话；作为 Host 时，同时取消正在进行的查询并拒绝 Hub 上的新查询。重新开启立即生效，无需重启。关闭的选择会保存在本机，后续启动仍保持关闭。
+
+桌面应用未保存该选项时，也接受 `TOKEN_MONITOR_SESSION_CONVERSATIONS` 作为初始值；已保存的界面选择优先，因此环境变量 `=1` 不会覆盖用户在设置中关闭的选择。
+
+独立 Node Hub 和常驻无界面 Agent 仍分别默认关闭。在对应进程上设置后重启：
 
 ```env
 TOKEN_MONITOR_SESSION_CONVERSATIONS=1
 ```
 
-Hub 可使用 `npm run hub -- --session-conversations`，常驻无界面采集端可使用 `npm run agent -- --session-conversations`。两端均默认关闭，且需要配置相同的 `TOKEN_MONITOR_SECRET`。一次性采集和 `--dry-run` 不提供查询服务。Cloudflare Worker 目前不实现此扩展；原有统计功能继续兼容。
-
-桌面应用在 Host 和 Client 模式下也可作为来源设备。源码启动时在 `.env` 设置上述变量；安装包通过系统环境变量启用，重新启动应用后生效。Windows PowerShell 示例：
-
-```powershell
-$env:TOKEN_MONITOR_SESSION_CONVERSATIONS='1'
-& 'C:\path\to\Token Monitor.exe'
-```
-
-macOS 示例：
-
-```bash
-TOKEN_MONITOR_SESSION_CONVERSATIONS=1 '/Applications/Token Monitor.app/Contents/MacOS/Token Monitor'
-```
+Hub 可使用 `npm run hub -- --session-conversations`，常驻无界面采集端可使用 `npm run agent -- --session-conversations`。两端需要配置相同的 `TOKEN_MONITOR_SECRET`。一次性采集和 `--dry-run` 不提供查询服务。Cloudflare Worker 目前不实现此扩展；原有统计功能继续兼容。
 
 若桌面应用检测到独立常驻 Agent，需在该 Agent 上启用。Hub 和来源端必须使用此分支的新版本；Android 使用 1.8.0 或更新版本。在 APK 的会话详情中选择在线来源设备，然后点击「查看对话」。同一会话在多个设备上存在时可分别查询，不混合正文。
 

@@ -1,7 +1,7 @@
 {
   "name": "token-monitor",
   "productName": "Token Monitor",
-  "version": "0.91.0",
+  "version": "0.91.1",
   "description": "Live token & cost widget for Claude Code, Codex & Hermes — local-first, optional multi-device sync.",
   "main": "src/electron/launch.js",
   "scripts": {
@@ -35,7 +35,8 @@
     "benchmark:hub-bandwidth": "node scripts/benchmark-hub-bandwidth.js",
     "lint": "eslint .",
     "verify": "npm run lint && npm test",
-    "verify:plugins": "electron scripts/test-plugin-trusted.cjs && electron scripts/test-plugin-trusted-runtime.cjs && electron scripts/test-plugin-trusted-app.cjs && electron scripts/test-plugin-trusted-surfaces.cjs"
+    "verify:plugins": "electron scripts/test-plugin-trusted.cjs && electron scripts/test-plugin-trusted-runtime.cjs && electron scripts/test-plugin-trusted-app.cjs && electron scripts/test-plugin-trusted-surfaces.cjs",
+    "dist:linux:appimage": "npm run ensure:tokscale -- --platform=linux-x64 && electron-builder --config scripts/electron-builder.config.js --linux AppImage --x64 --publish never"
   },
   "build": {
     "beforePack": "scripts/build-windows-dock.js",
@@ -131,7 +132,10 @@
         "owner": "AoXIUy",
         "repo": "token-monitor"
       }
-    ]
+    ],
+    "appImage": {
+      "artifactName": "Token-Monitor-${version}-${arch}.${ext}"
+    }
   },
   "keywords": [
     "tokscale",

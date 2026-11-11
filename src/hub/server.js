@@ -647,7 +647,8 @@ function createHub({
 
   return {
     start, stop, server, getStats, getHistory, getDevices, ingest, deleteDevice, onStats, bindHost,
-    getSubscriptions, setSubscriptions, getSyncContent, getSyncSettings, setSyncSettings, setSyncTitlePolicy
+    getSubscriptions, setSubscriptions, getSyncContent, getSyncSettings, setSyncSettings, setSyncTitlePolicy,
+    setSessionConversationsEnabled: (enabled) => conversationRelay.setEnabled(enabled)
   };
 }
 

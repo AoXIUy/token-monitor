@@ -524,6 +524,8 @@ Object.assign(els, {
   syncPanelOpenDevices: document.getElementById('syncPanelOpenDevices'),
   hubAddressList: document.getElementById('hubAddressList'),
   syncUploadIntervalInput: document.getElementById('syncUploadIntervalInput'),
+  sessionConversationsRow: document.getElementById('sessionConversationsRow'),
+  sessionConversationsInput: document.getElementById('sessionConversationsInput'),
   collectionCadenceInput: document.getElementById('collectionCadenceInput'),
   sessionUsageArchiveInput: document.getElementById('sessionUsageArchiveInput'),
   sessionUsageArchiveStatus: document.getElementById('sessionUsageArchiveStatus'),
@@ -9195,6 +9197,11 @@ async function saveAppearanceFromControls() {
 function syncHubModeUi() {
   syncContentForm?.syncSettings();
   const mode = state.settings.hubMode || 'local';
+  if (els.sessionConversationsRow) {
+    els.sessionConversationsRow.hidden = mode !== 'host' && mode !== 'client';
+    els.sessionConversationsRow.inert = els.sessionConversationsRow.hidden;
+  }
+  if (els.sessionConversationsInput) els.sessionConversationsInput.checked = state.settings.sessionConversationsEnabled !== false;
   els.hubModeOptions.value = mode;
   if (els.syncModeDescription) els.syncModeDescription.textContent = t(SYNC_MODE_DESCRIPTIONS[mode] || SYNC_MODE_DESCRIPTIONS.local);
   const icloudSupported = state.appInfo?.platform === 'darwin';
@@ -14132,6 +14139,13 @@ for (const [field, inputId] of HUB_DRAFT_FIELDS) {
     els[inputId]?.addEventListener('focus', () => beginClientConnectionEdit());
   }
 }
+els.sessionConversationsInput?.addEventListener('change', async () => {
+  const input = els.sessionConversationsInput;
+  input.disabled = true;
+  try { await saveSettings({ sessionConversationsEnabled: input.checked }); }
+  catch (_) { input.checked = state.settings.sessionConversationsEnabled !== false; }
+  finally { input.disabled = false; }
+});
 els.syncUploadIntervalInput?.addEventListener('change', async () => {
   await saveSettings({ syncUploadIntervalMs: Number(els.syncUploadIntervalInput.value) });
 });

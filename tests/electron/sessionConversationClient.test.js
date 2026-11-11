@@ -6,14 +6,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-test('desktop readers are opt-in, reuse the same destination and stop before changing the binding', () => {
+test('desktop readers honor the saved switch, reuse destinations and stop before changing binding', () => {
   const source = fs.readFileSync(path.join(__dirname, '../../src/electron/main.js'), 'utf8');
   const start = source.indexOf('let sessionConversationClient = null;');
   const end = source.indexOf('\nasync function postToHub(summary)', start);
   let destination = { url: 'https://hub-one.test', secret: 'first-secret' };
   const calls = [];
   const process = { env: {} };
-  const sandbox = vm.createContext({ process, settings: { wslScanEnabled: true },
+  const sandbox = vm.createContext({ process, settings: { wslScanEnabled: true, sessionConversationsEnabled: false },
     effectiveHubConfig: () => destination,
     createSessionConversationClient: options => {
       calls.push(['create', options.hubUrl, options.deviceId, options.wslScanEnabled]);
@@ -24,11 +24,21 @@ test('desktop readers are opt-in, reuse the same destination and stop before cha
   assert.deepEqual(calls, []);
   process.env.TOKEN_MONITOR_SESSION_CONVERSATIONS = '1';
   sandbox.serveSessionConversations({ deviceId: 'pc' });
+  assert.deepEqual(calls, [], 'the saved off switch wins over an environment opt-in');
+  sandbox.settings.sessionConversationsEnabled = true;
+  sandbox.serveSessionConversations({ deviceId: 'pc' });
   sandbox.serveSessionConversations({ deviceId: 'pc' });
   assert.equal(calls.filter(call => call[0] === 'create').length, 1);
   destination = { url: 'https://hub-two.test', secret: 'second-secret' };
   sandbox.serveSessionConversations({ deviceId: 'pc' });
   assert.deepEqual(calls.slice(-4), [['stop'], ['create', 'https://hub-two.test', 'pc', true], ['update', 'pc'], ['start']]);
+  sandbox.settings.sessionConversationsEnabled = false;
+  sandbox.serveSessionConversations({ deviceId: 'pc' });
+  assert.deepEqual(calls.at(-1), ['stop']);
+  delete sandbox.settings.sessionConversationsEnabled;
+  delete process.env.TOKEN_MONITOR_SESSION_CONVERSATIONS;
+  sandbox.serveSessionConversations({ deviceId: 'pc' });
+  assert.deepEqual(calls.at(-1), ['start'], 'desktop readers default on without an environment opt-in');
   destination = { url: '', secret: '' };
   sandbox.serveSessionConversations({ deviceId: 'pc' });
   assert.deepEqual(calls.at(-1), ['stop']);

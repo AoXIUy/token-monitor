@@ -66,6 +66,14 @@ jobs:
               dist/*.deb
               dist/latest-linux.yml
               dist/*.blockmap
+          - os: ubuntu-latest
+            target: linux-appimage
+            dist_script: dist:linux:appimage
+            artifact_name: token-monitor-linux-appimage
+            artifact_path: |
+              dist/*.AppImage
+              dist/latest-linux.yml
+              dist/*.blockmap
     runs-on: ${{ matrix.os }}
     permissions:
       actions: read
@@ -92,9 +100,11 @@ jobs:
       - name: Verify Electron packaging version
         run: |
           node -e "const config = require('./scripts/electron-builder.config.js'); const installed = require('electron/package.json').version; const effective = config.electronVersion || installed; const expected = process.env.TOKEN_MONITOR_LINUX_ELECTRON_VERSION || installed; console.log('Electron packaging version:', effective, '(installed:', installed + ')'); if (effective !== expected) throw new Error('Electron packaging version mismatch: expected ' + expected + ', got ' + effective);"
-      - name: Build Linux amd64 Debian package
-        if: matrix.target == 'linux'
+      - name: Build Linux package
+        if: matrix.target == 'linux' || matrix.target == 'linux-appimage'
         run: npm run ${{ matrix.dist_script }}
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
       - name: Verify Debian identity and architecture
         if: matrix.target == 'linux'
         run: |
@@ -125,6 +135,7 @@ jobs:
       - name: Verify packaged update repository
         shell: bash
         env:
+          LINUX_PACKAGE_TYPE: ${{ matrix.target == 'linux' && 'deb' || matrix.target == 'linux-appimage' && 'AppImage' || '' }}
           UPDATE_CONFIG: ${{ matrix.target == 'win' && 'dist/win-unpacked/resources/app-update.yml' || 'dist/linux-unpacked/resources/app-update.yml' }}
         run: |
           node <<'NODE'
@@ -140,7 +151,15 @@ jobs:
           if (process.platform === 'win32' && config.publisherName) {
             throw Error('Unsigned Windows releases must not claim a signing publisher');
           }
-          const archive = path.join(path.dirname(process.env.UPDATE_CONFIG), 'app.asar');
+          const resources = path.dirname(process.env.UPDATE_CONFIG);
+          const packageType = path.join(resources, 'package-type');
+          if (process.env.LINUX_PACKAGE_TYPE === 'AppImage' && fs.existsSync(packageType)) {
+            throw Error('AppImage must not inherit a Debian updater package type');
+          }
+          if (process.env.LINUX_PACKAGE_TYPE === 'deb' && fs.readFileSync(packageType, 'utf8').trim() !== 'deb') {
+            throw Error('Debian updater package type is missing');
+          }
+          const archive = path.join(resources, 'app.asar');
           const metadata = JSON.parse(asar.extractFile(archive, 'package.json'));
           const context = { module: { exports: {} }, URL,
             require: id => id === '../../package.json' ? metadata : require(id) };
@@ -185,7 +204,8 @@ jobs:
               exit 1
             fi
             cp "$file" "release-artifacts/$name"
-          done < <(find artifacts -mindepth 2 -type f -print0)
+          done < <(find artifacts -mindepth 2 -type f ! -name 'latest-linux.yml' -print0)
+          node scripts/merge-linux-updater-metadata.js release-artifacts/latest-linux.yml artifacts/token-monitor-linux-appimage/latest-linux.yml artifacts/token-monitor-linux/latest-linux.yml
           node scripts/verify-updater-artifact-names.js release-artifacts
       - name: Prepare reviewed release notes
         id: version
@@ -202,7 +222,7 @@ jobs:
           fs.writeFileSync(path.join(dir, 'SHA256SUMS'), assets.map(a => a.sha256+'  '+a.name).join('\n')+'\n');
           fs.writeFileSync(path.join(dir, 'release-metadata.json'), JSON.stringify({version: require('./package.json').version,
             tag: 'v'+require('./package.json').version, commit: process.env.GITHUB_SHA,
-            platforms: ['windows-x64', 'linux-deb-amd64'], windowsSigning: 'unsigned', assets}, null, 2)+'\n');
+            platforms: ['windows-x64', 'linux-deb-amd64', 'linux-appimage-x86_64'], windowsSigning: 'unsigned', assets}, null, 2)+'\n');
           NODE
       - name: Create or resume source-matched draft
         id: draft

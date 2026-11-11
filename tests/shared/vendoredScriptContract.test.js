@@ -21,7 +21,8 @@ const runtimeScripts = [
   'dist:mac:widget:x64',
   'dist:win',
   'dist:win:dir',
-  'dist:linux'
+  'dist:linux',
+  'dist:linux:appimage'
 ];
 
 test('runtime and packaging scripts explicitly ensure vendored tokscale', () => {
@@ -51,7 +52,7 @@ test('only the mac-widget CI structural build opts out of a strict cross-arch en
   // real cross-arch build has to fail the build, not silently ship without
   // the pinned binary.
   assert.match(packageJson.scripts['pack:mac:widget:x64'], /--allow-missing-target-package/);
-  for (const name of ['dist:mac:x64', 'dist:mac:widget:x64', 'dist:mac', 'dist:mac:widget', 'dist:win', 'dist:win:dir', 'dist:linux', 'pack', 'pack:mac:widget']) {
+  for (const name of ['dist:mac:x64', 'dist:mac:widget:x64', 'dist:mac', 'dist:mac:widget', 'dist:win', 'dist:win:dir', 'dist:linux', 'dist:linux:appimage', 'pack', 'pack:mac:widget']) {
     assert.doesNotMatch(packageJson.scripts[name], /--allow-missing-target-package/, name);
   }
 });
