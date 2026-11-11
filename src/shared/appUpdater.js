@@ -2,8 +2,9 @@
 
 const semver = require('semver');
 
-const updateTarget = require('../../package.json').build.publish.find((entry) => entry.provider === 'github');
-const GITHUB_REPO = `${updateTarget.owner}/${updateTarget.repo}`;
+// electron-builder strips build.publish from the packaged package.json.
+const repositoryUrl = require('../../package.json').repository.url.replace(/^git\+/, '');
+const GITHUB_REPO = new URL(repositoryUrl).pathname.slice(1).replace(/\.git$/, '');
 const RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases`;
 const RELEASES_LATEST_URL = `${RELEASES_URL}/latest`;
 const REQUEST_TIMEOUT_MS = 10 * 1000;

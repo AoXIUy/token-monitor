@@ -397,6 +397,8 @@ test('the external URL allowlist admits exactly the provider consoles it should'
     'https://status.factory.ai/',
     'https://github.com/junhoyeo/tokscale',
     'https://github.com/Javis603/token-monitor/releases',
+    'https://github.com/AoXIUy/token-monitor/releases',
+    'https://github.com/AoXIUy/token-monitor/releases/tag/v0.91.0',
     'https://www.npmjs.com/package/@tokscale/cli',
     'https://javis-ai.com/token-monitor',
     'https://www.javis-ai.com/token-monitor/'
@@ -444,6 +446,8 @@ test('the external URL allowlist admits exactly the provider consoles it should'
     'https://codex-resets.com/path',
     'https://github.com/junhoyeo',
     'https://github.com/Javis603/other-repo',
+    'https://github.com/AoXIUy/token-monitor-other/releases',
+    'https://github.com.evil.example/AoXIUy/token-monitor/releases',
     'https://javis-ai.com/',
     'http://claude.ai/settings',
     'https://evil-claude.ai/settings',

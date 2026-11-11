@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
 
 const {
   appUpdateInstallSupport,
@@ -30,6 +31,20 @@ const {
 } = require('../../src/shared/appUpdater');
 
 const trailingPullRequestReference = /(?:\(\s*#\d+(?:\s*,\s*#\d+)*\s*\)|（\s*#\d+(?:\s*[、，,]\s*#\d+)*\s*）)$/;
+
+test('packaged updater loads without electron-builder stripped build metadata', () => {
+  const pkg = require('../../package.json');
+  const { build, ...packagedMetadata } = pkg;
+  const context = {
+    module: { exports: {} },
+    URL,
+    require: (id) => id === '../../package.json' ? packagedMetadata : require(id)
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../src/shared/appUpdater.js'), 'utf8'), context);
+  const target = build.publish.find((entry) => entry.provider === 'github');
+  assert.equal(context.module.exports.GITHUB_REPO, `${target.owner}/${target.repo}`);
+  assert.equal(context.module.exports.RELEASES_LATEST_URL, 'https://github.com/AoXIUy/token-monitor/releases/latest');
+});
 
 test('the automatic downloader stands down once an attempt is spent', () => {
   const base = {

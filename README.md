@@ -155,7 +155,7 @@ On macOS, install through the official [Homebrew Cask](https://formulae.brew.sh/
 brew install --cask token-monitor
 ```
 
-Or download the app for macOS, Windows, or Linux from [GitHub Releases](https://github.com/AoXIUy/token-monitor/releases).
+Or download the Windows or Linux app from [GitHub Releases](https://github.com/AoXIUy/token-monitor/releases).
 
 Launch the app to start tracking this device locally, with no hub setup required. See [Installation](#installation) for full details.
 
@@ -322,20 +322,14 @@ Token Monitor supports token usage, account-limit checks, and session details se
 
 ## Installation
 
-On macOS, install through the official [Homebrew Cask](https://formulae.brew.sh/cask/token-monitor):
+Download this fork from [GitHub Releases](https://github.com/AoXIUy/token-monitor/releases).
 
-```bash
-brew install --cask token-monitor
-```
+- **Windows 10/11 x64** — setup and portable `.exe`
+- **Linux amd64** — `.deb`, install with `sudo apt install ./Token-Monitor-<version>-amd64.deb`
 
-Or download from [GitHub Releases](https://github.com/AoXIUy/token-monitor/releases).
+This fork publishes only these two platforms. The upstream Homebrew Cask installs the upstream application.
 
-- **macOS (Apple Silicon)** — `.dmg`, signed and notarized
-- **macOS (Intel)** — x64 `.dmg`, signed and notarized
-- **Windows 10/11** — setup and portable `.exe`, [code-signed](docs/code-signing.md)
-- **Linux x64** — `.AppImage`
-
-Packaged builds check GitHub Releases automatically. When an update is available, the app shows an update indicator; supported platforms can also install from Settings → General.
+Packaged builds check this fork's GitHub Releases automatically. When an update is available, the app shows an update indicator; Windows setup builds can also install from Settings → General. Linux `.deb` and Windows portable users download updates through View release.
 
 ### First run
 
@@ -413,7 +407,7 @@ npm install
 npm run dist:mac     # macOS arm64 .dmg           → dist/
 npm run dist:mac:x64 # macOS Intel x64 .dmg       → dist/
 npm run dist:win     # Windows x64 installer .exe → dist/
-npm run dist:linux   # Linux x64 AppImage         → dist/
+npm run dist:linux   # Linux amd64 .deb           → dist/
 npm run pack         # unpacked app dir (no installer), for quick local testing
 ```
 

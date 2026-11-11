@@ -92,35 +92,18 @@ test('SignPath configurations restrict every signed PE to the release product me
       'product-version': '${version}'
     }
   ]);
-  assert.equal(pkg.build.win.verifyUpdateCodeSignature, true);
-  assert.equal(pkg.build.win.signtoolOptions.publisherName, 'SignPath Foundation');
 });
 
-test('release workflow signs the application before packaging and signs public artifacts last', () => {
-  const workflow = fs.readFileSync(
-    path.join(PROJECT_ROOT, '.github', 'workflows', 'release.yml'),
-    'utf8'
-  );
-  const unpacked = workflow.indexOf('npm run dist:win:dir');
-  const signApplication = workflow.indexOf('artifact-configuration-slug: application');
-  const prepackaged = workflow.indexOf('npm run dist:win:prepackaged');
-  const signArtifacts = workflow.indexOf('artifact-configuration-slug: initial');
-  const rebuildBlockmap = workflow.indexOf('node scripts/signpath-windows-artifacts.js apply-artifacts');
-
-  assert.ok(unpacked >= 0);
-  assert.match(workflow, /path: \$\{\{ runner\.temp \}\}\/signpath-application-input\s/);
-  assert.match(
-    workflow,
-    /artifact-configuration-slug: application[\s\S]*?version: \$\{\{ toJSON\(steps\.prepare-unsigned-win-app\.outputs\.product_version\) \}\}/
-  );
-  assert.match(
-    workflow,
-    /artifact-configuration-slug: initial[\s\S]*?version: \$\{\{ toJSON\(steps\.prepare-unsigned-win\.outputs\.version\) \}\}/
-  );
-  assert.ok(unpacked < signApplication);
-  assert.ok(signApplication < prepackaged);
-  assert.ok(prepackaged < signArtifacts);
-  assert.ok(signArtifacts < rebuildBlockmap);
+test('fork release builds explicitly unsigned Windows executables and verifies their identity', () => {
+  const workflow = fs.readFileSync(path.join(PROJECT_ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  const pkg = require('../../package.json');
+  assert.equal(pkg.build.win.verifyUpdateCodeSignature, false);
+  assert.equal(pkg.build.win.signtoolOptions, undefined);
+  assert.match(workflow, /Build unsigned Windows installer and portable application/);
+  assert.match(workflow, /Get-AuthenticodeSignature -LiteralPath/);
+  assert.match(workflow, /Status -ne 'NotSigned'/);
+  assert.match(workflow, /Packaged update provider must point to this fork/);
+  assert.doesNotMatch(workflow, /SIGNPATH_API_TOKEN|organization-id:|SignPath\/github-action/);
 });
 
 function makeFixture(t) {

@@ -45,7 +45,7 @@ for (const count of [1, 5001]) test(`plugin session model components preserve ob
   // Coverage/invalidation is independent of machine speed. Keep both eager
   // projection and lazy scan/page work from consuming the admission budget.
   t.mock.method(performance, 'now', () => 0);
-  const service = createBusinessDataService();
+  const service = createBusinessDataService({ now: () => 0 });
   t.after(() => service.dispose());
   const components = { totalTokens: 50, inputTokens: 10, cacheReadTokens: 20, cacheWriteTokens: 5, outputTokens: 10, secret: 'DO_NOT_COPY' };
   const row = { client: 'codex', sessionId: 's', totalTokens: 100,

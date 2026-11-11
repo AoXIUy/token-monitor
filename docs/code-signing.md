@@ -1,38 +1,24 @@
-# Code signing policy
+# Code signing policy for this fork
 
-Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
-
-## Signed artifacts
-
-The current release workflow Authenticode-signs Token Monitor's Windows application executable, installer (`Token-Monitor-Setup-*.exe`), and portable build (`Token-Monitor-*.exe`). The expected publisher is **SignPath Foundation**.
+`AoXIUy/token-monitor` publishes **unsigned** Windows x64 installer and portable executables, as selected by the repository maintainer. Windows may show an unknown publisher warning. This fork does not use the upstream SignPath organization or claim the SignPath Foundation signing identity.
 
 ## Verify a download
 
-In Windows Explorer, right-click the `.exe`, select **Properties**, then open **Digital Signatures**. The signer should be SignPath Foundation and Windows should report that the signature is valid.
-
-You can also inspect both downloads in PowerShell:
+Compare the downloaded file against `SHA256SUMS` from the same Release:
 
 ```powershell
-Get-AuthenticodeSignature ".\Token-Monitor-Setup-<version>.exe", ".\Token-Monitor-<version>.exe" | Format-List Path, Status, SignerCertificate, TimeStamperCertificate
+Get-FileHash ".\Token-Monitor-Setup-<version>.exe" -Algorithm SHA256
+Get-AuthenticodeSignature ".\Token-Monitor-Setup-<version>.exe", ".\Token-Monitor-<version>.exe" | Format-List Path, Status, SignerCertificate
 ```
 
-A genuine Token Monitor release should show `Valid` status, SignPath Foundation as the signer, and timestamp information.
+The fork's Windows application executable, installer and portable wrapper are expected to report `NotSigned`. The release workflow checks this before publishing. Checksums detect corruption; they do not establish an Authenticode publisher identity.
 
-After installation, the same check can be run against `Token Monitor.exe` in the application's installation directory.
+Windows installer updates use this fork's GitHub Releases over HTTPS and verify the SHA-512 hashes from update metadata. `build.win.verifyUpdateCodeSignature` is explicitly `false`; no signing publisher is embedded in `app-update.yml`. Portable builds update manually through View release. Never treat an unsigned package as a signed upstream build.
 
-## Signing controls
+## Future signing setup
 
-- Signing requests originate from the repository's [release workflow](../.github/workflows/release.yml), which builds on GitHub-hosted runners.
-- Every production signing request requires manual approval in SignPath.
-- The version-controlled [application](../.github/signpath/application-artifact-configuration.xml) and [release artifact](../.github/signpath/artifact-configuration.xml) configurations restrict signed files by exact path, product name, and product version.
-- The application executable is signed before packaging; the resulting installer and portable wrapper are signed afterward.
-- Before publishing, the release workflow verifies all three signatures, their signer, and their timestamps.
+Before enabling signed releases, configure a signing identity authorized for this fork and restore the expected publisher checks for both packaging and updates. Keystore files, passwords and API tokens belong only in ignored local files or encrypted Actions Secrets.
 
-## Team roles
+The retained SignPath helper scripts and artifact configurations describe the upstream signing implementation. They are not used by this fork's release workflow and do not grant access to upstream signing. Original authorship and the MIT license remain intact.
 
-- Committers and reviewers: [@Javis603](https://github.com/Javis603)
-- Approvers: [@Javis603](https://github.com/Javis603)
-
-## Privacy
-
-- Privacy policy: [Token Monitor privacy policy](privacy.md)
+See [the fork release guide](releasing-fork.md) and [privacy policy](privacy.md).

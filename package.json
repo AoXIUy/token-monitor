@@ -97,22 +97,20 @@
       "files": [
         "assets/icon-win.png"
       ],
-      "verifyUpdateCodeSignature": true,
-      "signtoolOptions": {
-        "publisherName": "SignPath Foundation"
-      }
+      "verifyUpdateCodeSignature": false
     },
     "linux": {
-      "artifactName": "Token-Monitor-${version}.${ext}",
+      "artifactName": "Token-Monitor-${version}-amd64.${ext}",
       "target": [
         {
-          "target": "AppImage",
+          "target": "deb",
           "arch": [
             "x64"
           ]
         }
       ],
       "category": "Development",
+      "maintainer": "AoXIUy <78833411+AoXIUy@users.noreply.github.com>",
       "icon": "assets/icon.png",
       "synopsis": "Live token & cost widget for AI coding tools",
       "description": "Real-time token, cost, and AI limits widget with multi-device sync for Claude Code, Codex, OpenCode and more."
