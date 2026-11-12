@@ -114,6 +114,7 @@ test('CREDENTIAL_SETTING_PATHS is exactly this set (the store is default-deny)',
     qoderCookie: ['providers', 'qoder', 'cookie'],
     devinBearerToken: ['providers', 'devin', 'bearerToken'],
     deepseekApiKey: ['providers', 'deepseek', 'apiKey'],
+    deepseekWebToken: ['providers', 'deepseek', 'webToken'],
     openrouterProfiles: ['providers', 'openrouter', 'profiles'],
     minimaxApiProfiles: ['providers', 'minimax', 'profiles'],
     minimaxApiKey: ['providers', 'minimax', 'apiKey'],
@@ -167,7 +168,7 @@ test('LIMIT_PROVIDER_SETTING_KEYS is exactly this set (drives per-provider refre
     zaiteam: ['zaiTeamApiKey', 'zaiTeamOrganizationId', 'zaiTeamProjectId'],
     workbuddy: ['workbuddyAccessToken', 'workbuddyUserId', 'workbuddyEnterpriseId', 'workbuddyLocale', 'workbuddyDomain', 'workbuddyDepartmentInfo'],
     qoder: ['qoderCookie', 'qoderSite'],
-    deepseek: ['deepseekApiKey'],
+    deepseek: ['deepseekApiKey', 'deepseekWebToken'],
     devin: ['devinBearerToken', 'devinOrganization'],
     mistral: ['mistralCookie'],
     typesafe: ['typesafeCookie'],
@@ -285,7 +286,7 @@ test('settings:update normalizes provider fields and strips separately managed a
   const fields = LIMIT_PROVIDER_REGISTRY.flatMap(({ fields }) => fields);
   const normalizedKeys = fields.filter(({ normalize, persist }) => normalize && persist !== 'never').map(({ key }) => key);
   assert.deepEqual(normalizedKeys.sort(), [
-    'claudeWebCookie', 'claudeWebOrganizationId', 'deepseekApiKey', 'minimaxApiKey', 'minimaxApiRegion', 'minimaxBillingMode', 'copilotApiToken', 'copilotEnterpriseHost',
+    'claudeWebCookie', 'claudeWebOrganizationId', 'deepseekApiKey', 'deepseekWebToken', 'minimaxApiKey', 'minimaxApiRegion', 'minimaxBillingMode', 'copilotApiToken', 'copilotEnterpriseHost',
     'factoryApiKey', 'clineApiKey', 'zaiApiKey', 'zaiApiRegion', 'zaiTeamApiKey',
     'zaiTeamOrganizationId', 'zaiTeamProjectId', 'volcengineAccessKeyId',
     'volcengineSecretAccessKey', 'volcengineRegion', 'volcengineAgentAccessKeyId',
@@ -328,6 +329,20 @@ test('settings:update normalizes provider fields and strips separately managed a
     'subscriptionsCacheHub', 'subscriptionsShared', 'subscriptionsHub', 'subscriptionsUpdatedAt']) {
     assert.match(handler, new RegExp(`delete normalizedPatch\\.${key};`), key);
   }
+});
+
+test('generic settings updates cannot reclassify discovered Cursor accounts as manual', () => {
+  const start = mainSource.indexOf('    const normalizedPatch = { ...patch, currency: normalizedCurrency };');
+  const end = mainSource.indexOf('    normalizeAccountPatch(patch, normalizedPatch);', start);
+  const stored = { cursorManualAccountIds: ['user_MANUAL'] };
+  const patch = { cursorManualAccountIds: ['user_STALE'], cursorDisabledAccountIds: ['user_DISABLED'] };
+  const normalized = vm.runInNewContext(`${mainSource.slice(start, end)}; normalizedPatch`, {
+    patch, normalizedCurrency: 'USD'
+  });
+  const saved = { ...stored, ...normalized };
+  assert.deepEqual(saved.cursorManualAccountIds, ['user_MANUAL']);
+  assert.deepEqual(saved.cursorDisabledAccountIds, ['user_DISABLED']);
+  assert.deepEqual(patch.cursorManualAccountIds, ['user_STALE']);
 });
 
 test('the external URL allowlist admits exactly the provider consoles it should', () => {

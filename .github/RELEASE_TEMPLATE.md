@@ -3,17 +3,20 @@
 ## What's changed
 
 <!-- app-update-notes:en:start -->
+### Added
+- Search sessions from the total panel and refresh supported quota accounts individually.
+- Plugin updates from trusted sources can run automatically; enable controls stay in sync with the menu.
+- More display/subscription currencies and optional DeepSeek console Search/Fetch fees.
 ### Fixed
-- Antigravity user messages show the actual request, including slash commands, instead of the surrounding export envelope.
-- Additional metadata and settings changes remain available as collapsible context. Literal, unknown or incomplete wrappers remain intact.
-- Refresh Antigravity conversations after updating the source device to reload pagination with the corrected format. The existing Android app is compatible.
+- Cursor stale accounts and period labels, platform-specific settings copy and language names.
+- Hub uploads now accept up to 2 MiB, with an explicit Worker storage-size guard.
 <!-- app-update-notes:en:end -->
 ## Download
 
-- **Windows Installer** — [Token-Monitor-Setup-0.91.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-Setup-0.91.2.exe) (recommended)
-- **Windows Portable** — [Token-Monitor-0.91.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-0.91.2.exe) (no install required)
-- **Linux amd64** — [Token-Monitor-0.91.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-0.91.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.91.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-0.91.2-x86_64.AppImage)
+- **Windows Installer** — [Token-Monitor-Setup-0.91.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-Setup-0.91.3.exe) (recommended)
+- **Windows Portable** — [Token-Monitor-0.91.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-0.91.3.exe) (no install required)
+- **Linux amd64** — [Token-Monitor-0.91.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-0.91.3-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.91.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-0.91.3-x86_64.AppImage)
 
 <details>
 <summary><strong>First launch and other notes</strong></summary>
@@ -22,7 +25,7 @@
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.91.2-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.91.2-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.91.3-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.91.3-x86_64.AppImage` then run it.
 
 ### Other notes
 
@@ -41,18 +44,21 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 ## 更新内容
 
 <!-- app-update-notes:zh:start -->
+### 新增
+- 可从总量面板搜索会话，并单独刷新受支持的额度账户。
+- 可信来源插件支持自动更新，菜单与插件启用开关保持同步。
+- 扩展显示和订阅币种，增加可选的 DeepSeek 控制台 Search / Fetch 费用展示。
 ### 修复
-- Antigravity 用户消息提取实际发送的正文，包含斜杠命令，不再混入导出的包装标签和命令说明。
-- 附加元数据与设置变更保留为可折叠上下文；普通文本、未识别或不完整的包装保持原样。
-- 更新来源设备后刷新 Antigravity 会话，以修复后的格式重新加载分页；现有 Android 应用无需更新。
+- 修复 Cursor 过期账户与周期标签、系统专属设置文案及语言名称。
+- Hub 上传上限提高到 2 MiB，Worker 明确校验存储大小。
 <!-- app-update-notes:zh:end -->
 
 ## 下载
 
-- **Windows 安装版** — [Token-Monitor-Setup-0.91.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-Setup-0.91.2.exe)（推荐）
-- **Windows 便携版** — [Token-Monitor-0.91.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-0.91.2.exe)（免安装）
-- **Linux amd64** — [Token-Monitor-0.91.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-0.91.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.91.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-0.91.2-x86_64.AppImage)
+- **Windows 安装版** — [Token-Monitor-Setup-0.91.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-Setup-0.91.3.exe)（推荐）
+- **Windows 便携版** — [Token-Monitor-0.91.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-0.91.3.exe)（免安装）
+- **Linux amd64** — [Token-Monitor-0.91.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-0.91.3-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.91.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-0.91.3-x86_64.AppImage)
 
 <details>
 <summary><strong>首次启动与其他说明</strong></summary>
@@ -61,7 +67,7 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.91.2-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.91.2-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.91.3-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.91.3-x86_64.AppImage` then run it.
 
 ### 其他说明
 
@@ -76,7 +82,7 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ---
 
 <details>
-<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.91.1...v0.91.2">v0.91.1...v0.91.2</a></summary>
+<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.91.2...v0.91.3">v0.91.2...v0.91.3</a></summary>
 
 <!-- github-generated-release-notes -->
 
@@ -93,18 +99,21 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ## 更新內容
 
 <!-- app-update-notes:zh-TW:start -->
+### 新增
+- 可從總量面板搜尋會話，並單獨重新整理支援的額度帳戶。
+- 信任來源外掛支援自動更新，選單與外掛啟用開關保持同步。
+- 擴充顯示與訂閱幣別，新增選用的 DeepSeek 控制台 Search / Fetch 費用顯示。
 ### 修復
-- Antigravity 使用者訊息顯示實際傳送的正文，包含斜線指令，不再混入匯出包裝與指令說明。
-- 附加中繼資料與設定變更保留為可摺疊的上下文；未識別或不完整的包裝保持原樣。
-- 更新來源裝置後重新整理會話，重新載入修正格式的分頁；現有 Android 應用程式不需更新。
+- 修正 Cursor 過期帳戶與週期標籤、系統專屬設定文案及語言名稱。
+- Hub 上傳上限提高至 2 MiB，Worker 明確檢查儲存大小。
 <!-- app-update-notes:zh-TW:end -->
 
 ## 下載
 
-- **Windows 安裝版** — [Token-Monitor-Setup-0.91.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-Setup-0.91.2.exe)（推薦）
-- **Windows 便攜版** — [Token-Monitor-0.91.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-0.91.2.exe)（免安裝）
-- **Linux amd64** — [Token-Monitor-0.91.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-0.91.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.91.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-0.91.2-x86_64.AppImage)
+- **Windows 安裝版** — [Token-Monitor-Setup-0.91.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-Setup-0.91.3.exe)（推薦）
+- **Windows 便攜版** — [Token-Monitor-0.91.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-0.91.3.exe)（免安裝）
+- **Linux amd64** — [Token-Monitor-0.91.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-0.91.3-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.91.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-0.91.3-x86_64.AppImage)
 
 </details>
 
@@ -116,18 +125,21 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ## 업데이트 내용
 
 <!-- app-update-notes:ko:start -->
+### 추가
+- 총량 패널에서 세션을 검색하고 지원되는 할당량 계정을 개별 새로 고침할 수 있습니다.
+- 신뢰할 수 있는 출처의 플러그인 자동 업데이트와 메뉴의 활성화 상태를 동기화합니다.
+- 표시 및 구독 통화를 확장하고 선택적 DeepSeek Search / Fetch 비용을 표시합니다.
 ### 수정
-- Antigravity 사용자 메시지에서 내보내기 태그와 명령 설명을 분리하고 슬래시 명령을 포함한 실제 요청을 표시합니다.
-- 추가 메타데이터와 설정 변경은 접을 수 있는 문맥으로 유지하며, 알 수 없거나 불완전한 태그는 원문을 보존합니다.
-- 원본 기기를 업데이트한 후 대화를 새로 고쳐 수정된 페이지 형식으로 읽으세요. 기존 Android 앱은 그대로 사용할 수 있습니다.
+- Cursor의 오래된 계정과 기간 표시, 운영체제별 설정 문구와 언어 이름을 수정했습니다.
+- Hub 업로드 한도를 2 MiB로 늘리고 Worker 저장 크기를 검사합니다.
 <!-- app-update-notes:ko:end -->
 
 ## 다운로드
 
-- **Windows 설치 버전** — [Token-Monitor-Setup-0.91.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-Setup-0.91.2.exe) (권장)
-- **Windows 포터블 버전** — [Token-Monitor-0.91.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-0.91.2.exe) (설치 필요 없음)
-- **Linux amd64** — [Token-Monitor-0.91.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-0.91.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.91.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-0.91.2-x86_64.AppImage)
+- **Windows 설치 버전** — [Token-Monitor-Setup-0.91.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-Setup-0.91.3.exe) (권장)
+- **Windows 포터블 버전** — [Token-Monitor-0.91.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-0.91.3.exe) (설치 필요 없음)
+- **Linux amd64** — [Token-Monitor-0.91.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-0.91.3-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.91.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-0.91.3-x86_64.AppImage)
 
 </details>
 
@@ -139,18 +151,21 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ## 更新内容
 
 <!-- app-update-notes:ja:start -->
+### 追加
+- 合計パネルからセッションを検索し、対応するクォータアカウントを個別に更新できます。
+- 信頼済みソースのプラグインを自動更新し、メニューと有効化設定を同期します。
+- 表示・サブスクリプション通貨を拡充し、任意の DeepSeek Search / Fetch 料金を表示します。
 ### 修正
-- Antigravity のユーザーメッセージからエクスポート用タグとコマンド説明を分離し、スラッシュコマンドを含む実際の本文を表示します。
-- 追加メタデータと設定変更は折りたたみ可能なコンテキストとして保持し、不明または不完全なタグは原文を保持します。
-- 送信元端末を更新した後、会話を再読み込みして修正後のページ形式を取得してください。既存の Android アプリはそのまま利用できます。
+- Cursor の古いアカウントと期間ラベル、OS 別の設定文言と言語名を修正しました。
+- Hub のアップロード上限を 2 MiB に引き上げ、Worker の保存サイズを検査します。
 <!-- app-update-notes:ja:end -->
 
 ## ダウンロード
 
-- **Windows インストーラー** — [Token-Monitor-Setup-0.91.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-Setup-0.91.2.exe)（推奨）
-- **Windows ポータブル版** — [Token-Monitor-0.91.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-0.91.2.exe)（インストール不要）
-- **Linux amd64** — [Token-Monitor-0.91.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-0.91.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.91.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.2/Token-Monitor-0.91.2-x86_64.AppImage)
+- **Windows インストーラー** — [Token-Monitor-Setup-0.91.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-Setup-0.91.3.exe)（推奨）
+- **Windows ポータブル版** — [Token-Monitor-0.91.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-0.91.3.exe)（インストール不要）
+- **Linux amd64** — [Token-Monitor-0.91.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-0.91.3-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.91.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.91.3/Token-Monitor-0.91.3-x86_64.AppImage)
 
 </details>
 
