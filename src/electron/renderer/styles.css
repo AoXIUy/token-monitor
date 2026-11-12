@@ -9361,3 +9361,16 @@ html.native-liquid-glass .view-switcher-menu-item { border-radius: 9px; }
 
 .plugin-author-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .plugin-author-heading .plugin-detail-heading { margin: 0; }
+
+.session-realtime { min-width: 0; margin: 8px 0 14px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; }
+.session-realtime-title { margin: 0 0 10px; font-size: .8125rem; }
+.session-realtime-source { display: flex; flex-direction: column; gap: 5px; font-size: .6875rem; }
+.session-realtime-source select { min-width: 0; width: 100%; max-width: 100%; }
+.session-realtime-values { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 8px; }
+.session-realtime-values strong { font-size: 1.125rem; font-variant-numeric: tabular-nums; }
+.session-realtime-values > div { min-width: 0; overflow-wrap: anywhere; }
+.session-realtime-values span { font-size: .6875rem; color: var(--muted); }
+.session-realtime-status, .session-realtime-caption, .session-realtime-empty, .session-realtime-note { font-size: .6875rem; line-height: 1.5; overflow-wrap: anywhere; }
+.session-realtime-note, .session-realtime-axis, .session-realtime-status { color: var(--muted); }
+.session-realtime svg { display: block; width: 100%; height: 76px; color: var(--accent); border-bottom: 1px solid var(--line); }
+.session-realtime-axis { display: flex; justify-content: space-between; font-size: .625rem; font-variant-numeric: tabular-nums; }

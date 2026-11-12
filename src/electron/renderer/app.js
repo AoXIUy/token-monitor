@@ -5496,6 +5496,11 @@ async function openSessionDetail({ client, sessionId, sessionCost, title, return
     period: state.period, detail: null, returnTo, titleFollowsSession: titleFollowsSession === true };
   state.openSession = request;
   renderSessionDetail({ loading: true });
+  if (client === 'antigravity') {
+    request.detail = { found: true, realtimeOnly: true };
+    renderSessionDetail({ detail: request.detail });
+    return;
+  }
   // Read before the request, not after: a stats push that lands while it is in
   // flight has to stay unseen so catch-up re-reads, instead of being written
   // off against a response that predates it.
@@ -5547,6 +5552,7 @@ function sessionDetailLiveSignature() {
 async function refreshOpenSessionDetail() {
   const request = state.openSession;
   if (request?.kind !== 'session' || !request.detail || request.detailLiveBusy) return;
+  if (request.detail.realtimeOnly) return;
   if (visibleStatsSurface() !== 'main' || sessionTooltipShouldHoldRender()) return;
   // Paint a held result once, then check whether usage advanced during its read.
   // An unchanged signature still avoids another transcript read.
@@ -5610,6 +5616,31 @@ function sessionDetailBack() {
   closeSessionDetail();
 }
 
+let sessionRealtimePanel = null;
+let sessionRealtimeRequest = null;
+
+function sessionRealtimeView() {
+  const request = state.openSession;
+  if (sessionRealtimeRequest !== request || sessionRealtimePanel?.disposed) {
+    sessionRealtimePanel?.dispose();
+    sessionRealtimePanel = null;
+    sessionRealtimeRequest = request;
+  }
+  if (!request || !['antigravity', 'codex'].includes(request.client)) return null;
+  if (!sessionRealtimePanel) {
+    sessionRealtimePanel = window.TokenMonitorSessionRealtimeView.createPanel({
+      document, rates: window.TokenMonitorSessionRealtime,
+      query: { client: request.client, sessionId: request.sessionId },
+      getStats: () => state.stats,
+      active: () => state.openSession === request && state.breakdown === 'session',
+      available: () => !isRendererWindowHidden() && (state.settings?.hubMode !== 'client' || state.streamConnected),
+      binding: () => liveTokenRateSourceKey('session'), t
+    });
+  }
+  sessionRealtimePanel.update();
+  return sessionRealtimePanel.element;
+}
+
 function renderSessionDetail({ detail, loading, error, preserveScroll = false } = {}) {
   els.sessionToolFilter.classList.add('hidden');
   els.sessionSearchHost?.classList.add('hidden');
@@ -5635,6 +5666,9 @@ function renderSessionDetail({ detail, loading, error, preserveScroll = false } 
 
   head.append(sessionDetailBackButton());
 
+  const realtime = sessionRealtimeView();
+  if (realtime) container.append(realtime);
+
   const idLabel = sessionRowsApi.sessionDetailIdLabel(state.openSession?.client, state.openSession?.sessionId, detail);
   if (idLabel) container.append(sessionIdLine(idLabel));
 
@@ -5644,6 +5678,7 @@ function renderSessionDetail({ detail, loading, error, preserveScroll = false } 
     return;
   }
   if (detail && detail.found === false) { container.append(detailNote(t('detailNotFound') || 'Transcript not found on this machine.')); return; }
+  if (detail?.realtimeOnly) return;
 
   const rows = sessionDetailApi.exchangeRows(detail, { now: new Date(), sortBy: state.detailSort });
   if (rows.length === 0) { container.append(detailNote(t('detailEmpty') || 'No activity in this period.')); return; }
@@ -14061,7 +14096,7 @@ els.breakdown.addEventListener('click', (event) => {
   }
   const key = rowEl.dataset.key || '';            // "session:<client>:<sessionId>"
   const client = rowEl.dataset.client || '';
-  if (client !== 'claude' && client !== 'codex' && client !== 'opencode' && client !== 'reasonix' && client !== 'dsh' && client !== 'codebuddy' && client !== 'workbuddy' && client !== 'pi' && client !== 'omp' && client !== 'senpi') return;
+  if (client !== 'claude' && client !== 'codex' && client !== 'opencode' && client !== 'reasonix' && client !== 'dsh' && client !== 'codebuddy' && client !== 'workbuddy' && client !== 'pi' && client !== 'omp' && client !== 'senpi' && client !== 'antigravity') return;
   if (client === 'reasonix' && rowEl.dataset.detailUnavailable === 'true') return;
   const match = key.match(/^session:([^:]+):(.+)$/);
   if (!match) return;
@@ -15288,6 +15323,7 @@ window.tokenMonitor.onWindowVisibilityPush?.((visible) => {
   if (!visible) windowActivationFocus.cancel();
   if (!visible) hideTrendTooltip();
   state.windowVisible = visible;
+  sessionRealtimePanel?.setVisible(visible);
   handleWindowVisibilityChange();
 });
 window.tokenMonitor.onWindowSummoned(() => windowActivationFocus.summon());

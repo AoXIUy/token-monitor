@@ -68,6 +68,7 @@ test('session detail renders its heading before loading, errors and empty result
     detailNote: text => ({ textContent: text }),
     sessionDetailApi: { exchangeRows: detail => detail?.exchanges || [] },
     sessionRowsApi: require('../../src/electron/renderer/sessionRows'),
+    sessionRealtimeView: () => null,
     copyToClipboard: (text) => { state.copied = text; },
     exchangeNode: (row, max, expanded) => {
       state.expands = [...(state.expands || []), expanded === true];
@@ -462,6 +463,17 @@ function sessionDetailHarness(getSessionDetail) {
   };
 }
 
+test('Antigravity opens a realtime monitor without starting a transcript IPC read', async () => {
+  let reads = 0;
+  const h = sessionDetailHarness(async () => { reads += 1; });
+  await h.openSessionDetail({ client: 'antigravity', sessionId: 'one', title: 'Antigravity' });
+  assert.equal(h.state.openSession.detail.realtimeOnly, true);
+  assert.equal(reads, 0);
+  await h.refreshOpenSessionDetail();
+  assert.equal(reads, 0);
+  assert.equal(require('../../src/electron/renderer/sessionRows').sessionRowDetailAvailable({ client: 'antigravity' }), true);
+});
+
 const detail = {
   found: true,
   exchanges: [
@@ -835,6 +847,7 @@ test('live detail anchors the visible turn across growth and exchange reordering
     document: { createElement: () => ({ addEventListener() {} }) },
     t: () => '', sessionDetailBackButton: () => ({}), toggleDetailSort() {},
     sessionRowsApi: { sessionDetailIdLabel: () => '' },
+    sessionRealtimeView: () => null,
     sessionDetailApi: { exchangeRows: detail => detail.exchanges }, exchangeNode
   };
   const start = rendererSource.indexOf('function renderSessionDetail(');
