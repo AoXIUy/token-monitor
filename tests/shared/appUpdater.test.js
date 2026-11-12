@@ -895,25 +895,29 @@ test('release template exposes marked summaries for every bundled locale', () =>
     ['Added', '新增'],
     ['Changed', '变更'],
     ['Improved', '改进'],
-    ['Fixed', '修复']
+    ['Fixed', '修复'],
+    ['Notes', '说明']
   ]);
   const traditionalCategoryPairs = new Map([
     ['Added', '新增'],
     ['Changed', '變更'],
     ['Improved', '改進'],
-    ['Fixed', '修復']
+    ['Fixed', '修復'],
+    ['Notes', '說明']
   ]);
   const koreanCategoryPairs = new Map([
     ['Added', '추가'],
     ['Changed', '변경'],
     ['Improved', '개선'],
-    ['Fixed', '수정']
+    ['Fixed', '수정'],
+    ['Notes', '참고']
   ]);
   const japaneseCategoryPairs = new Map([
     ['Added', '追加'],
     ['Changed', '変更'],
     ['Improved', '改善'],
-    ['Fixed', '修正']
+    ['Fixed', '修正'],
+    ['Notes', '注意']
   ]);
   assert.ok(notes.en.length > 0);
   assert.deepEqual(
