@@ -41,9 +41,9 @@ function writePrivateJsonAtomic(filePath, value) {
   fs.renameSync(tempPath, filePath);
 }
 
-function probeUnixSocket(socketPath, timeoutMs = 250) {
+function probeEndpoint(targetEndpoint, timeoutMs = 250) {
   return new Promise((resolve) => {
-    const client = net.createConnection(socketPath);
+    const client = net.createConnection(targetEndpoint);
     let done = false;
     const finish = (active) => {
       if (done) return;
@@ -86,9 +86,6 @@ function createApprovalBridge({
       return;
     }
     activeSockets.add(socket);
-    const cleanupSocket = () => activeSockets.delete(socket);
-    socket.once('close', cleanupSocket);
-    socket.once('error', cleanupSocket);
 
     let buffer = Buffer.alloc(0);
     let expectedLength = null;
@@ -97,6 +94,13 @@ function createApprovalBridge({
     const readTimeout = setTimeout(() => {
       if (!handling) socket.destroy();
     }, 2000);
+
+    const cleanupSocket = () => {
+      clearTimeout(readTimeout);
+      activeSockets.delete(socket);
+    };
+    socket.once('close', cleanupSocket);
+    socket.once('error', cleanupSocket);
 
     const onData = (chunk) => {
       if (handling) return;
@@ -170,9 +174,15 @@ function createApprovalBridge({
     if (stopped) return { started: false, reason: 'stopped' };
     if (server && owned) return { started: true, endpoint };
     fs.mkdirSync(dataDir, { recursive: true });
-    if (platform !== 'win32' && fs.existsSync(endpoint)) {
-      const active = await probeUnixSocket(endpoint);
-      if (active) return { started: false, reason: 'already_owned' };
+    if (platform === 'win32') {
+      // Named pipes do not appear as filesystem entries and allow duplicate listeners on win32 unless probed first.
+      if (await probeEndpoint(endpoint)) {
+        return { started: false, reason: 'already_owned' };
+      }
+    } else if (fs.existsSync(endpoint)) {
+      if (await probeEndpoint(endpoint)) {
+        return { started: false, reason: 'already_owned' };
+      }
       try { fs.unlinkSync(endpoint); } catch (err) {
         if (err.code !== 'ENOENT') return { started: false, reason: err.code || 'unlink_failed' };
       }

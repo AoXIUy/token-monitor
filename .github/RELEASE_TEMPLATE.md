@@ -3,19 +3,18 @@
 ## What's changed
 
 <!-- app-update-notes:en:start -->
-### Added
-- Optional read-only approval alerts for Codex (`PermissionRequest`) and Antigravity (`PreToolUse`) when a session pauses for confirmation.
-- Non-blocking desktop hooks forward confirmation alerts over a permission-restricted local IPC bridge to the Node Hub (`POST /api/approval-alerts` / `GET /api/approval-alerts`) and immediately return native desktop prompting.
-- Desktop Multi-Device Sync settings add one-click Codex / Antigravity hook installers and matcher configuration; headless Agent and standalone Node Hub support `--approval-alerts` and `TOKEN_MONITOR_APPROVAL_ALERTS=1`.
+### Fixed
+- Probe active Windows named pipes when starting the local approval alert IPC bridge so competing instances cleanly receive `already_owned` instead of opening duplicate pipe listeners.
+- Clean up idle probe timers on socket close and give subprocess hook dispatch assertions headroom on busy Windows runners while still asserting non-blocking return.
 ### Notes
-- Approval alerts are read-only and disabled by default across Hub, collector, and Android; confirmations always stay on the desktop. Node Hub keeps alerts in memory only for 2 minutes; Cloudflare Worker does not implement this route.
+- Carries forward all 0.93.0 read-only Codex (`PermissionRequest`) and Antigravity (`PreToolUse`) approval alert features; alerts remain disabled by default and confirmations always stay on the desktop.
 <!-- app-update-notes:en:end -->
 ## Download
 
-- **Windows Installer** — [Token-Monitor-Setup-0.93.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-Setup-0.93.0.exe) (recommended)
-- **Windows Portable** — [Token-Monitor-0.93.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-0.93.0.exe) (no install required)
-- **Linux amd64** — [Token-Monitor-0.93.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-0.93.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.93.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-0.93.0-x86_64.AppImage)
+- **Windows Installer** — [Token-Monitor-Setup-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-Setup-0.93.1.exe) (recommended)
+- **Windows Portable** — [Token-Monitor-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1.exe) (no install required)
+- **Linux amd64** — [Token-Monitor-0.93.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.93.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-x86_64.AppImage)
 
 <details>
 <summary><strong>First launch and other notes</strong></summary>
@@ -24,7 +23,7 @@
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.93.0-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.93.0-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.93.1-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.93.1-x86_64.AppImage` then run it.
 
 ### Other notes
 
@@ -43,20 +42,19 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 ## 更新内容
 
 <!-- app-update-notes:zh:start -->
-### 新增
-- 新增可选的 Codex（`PermissionRequest`）与 Antigravity（`PreToolUse`）只读审批提醒，在会话暂停等待确认时通知手机端。
-- 非阻塞桌面端 Hook 通过受权限保护的本地 IPC 桥将提醒转发至 Node Hub（`POST /api/approval-alerts` / `GET /api/approval-alerts`），并立即返回桌面原生确认弹窗。
-- 桌面端「多设备同步」设置新增一键安装 Codex / Antigravity Hook 与匹配规则配置；独立 Hub 与无界面 Agent 支持 `--approval-alerts` 与 `TOKEN_MONITOR_APPROVAL_ALERTS=1`。
+### 修复
+- 启动本地审批提醒 IPC 桥时在 Windows 命名管道上先执行存活探测，避免并发实例打开重复监听并确保返回 `already_owned`。
+- 在连接关闭时及时清理读取超时定时器，并在高负载 Windows 运行环境下保持钩子子进程非阻塞时序检查的稳定余量。
 ### 说明
-- 审批提醒严格只读且在 Hub、采集端与 Android 均默认关闭，允许与拒绝操作始终在电脑端完成；Node Hub 仅在内存中保留 2 分钟，Cloudflare Worker 不实现此接口。
+- 包含 0.93.0 全部只读 Codex（`PermissionRequest`）与 Antigravity（`PreToolUse`）审批提醒功能；开关默认关闭，允许与拒绝操作始终留在电脑端完成。
 <!-- app-update-notes:zh:end -->
 
 ## 下载
 
-- **Windows 安装版** — [Token-Monitor-Setup-0.93.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-Setup-0.93.0.exe)（推荐）
-- **Windows 便携版** — [Token-Monitor-0.93.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-0.93.0.exe)（免安装）
-- **Linux amd64** — [Token-Monitor-0.93.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-0.93.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.93.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-0.93.0-x86_64.AppImage)
+- **Windows 安装版** — [Token-Monitor-Setup-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-Setup-0.93.1.exe)（推荐）
+- **Windows 便携版** — [Token-Monitor-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1.exe)（免安装）
+- **Linux amd64** — [Token-Monitor-0.93.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.93.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-x86_64.AppImage)
 
 <details>
 <summary><strong>首次启动与其他说明</strong></summary>
@@ -65,7 +63,7 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.93.0-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.93.0-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.93.1-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.93.1-x86_64.AppImage` then run it.
 
 ### 其他说明
 
@@ -80,7 +78,7 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ---
 
 <details>
-<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.92.0...v0.93.0">v0.92.0...v0.93.0</a></summary>
+<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.93.0...v0.93.1">v0.93.0...v0.93.1</a></summary>
 
 <!-- github-generated-release-notes -->
 
@@ -97,20 +95,19 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ## 更新內容
 
 <!-- app-update-notes:zh-TW:start -->
-### 新增
-- 新增可選的 Codex（`PermissionRequest`）與 Antigravity（`PreToolUse`）唯讀審批提醒，在工作階段暫停等待確認時通知手機端。
-- 非阻塞桌面端 Hook 透過受權限保護的本機 IPC 橋將提醒轉發至 Node Hub（`POST /api/approval-alerts` / `GET /api/approval-alerts`），並立即返回桌面原生確認視窗。
-- 桌面端「多裝置同步」設定新增一鍵安裝 Codex / Antigravity Hook 與比對規則設定；獨立 Hub 與無介面 Agent 支援 `--approval-alerts` 與 `TOKEN_MONITOR_APPROVAL_ALERTS=1`。
+### 修復
+- 啟動本機審批提醒 IPC 橋時於 Windows 命名管道先執行存活探測，確保重複實例返回 `already_owned` 而非建立重複監聽。
+- 連線關閉時即時清除逾時計時器，並為高負載 Windows 測試環境保留足夠的非阻塞行程啟動餘裕。
 ### 說明
-- 審批提醒為嚴格唯讀且於 Hub、擷取端與 Android 皆預設關閉，允許與拒絕操作一律在電腦端完成；Node Hub 僅於記憶體保留 2 分鐘，Cloudflare Worker 不實作此路由。
+- 保留 0.93.0 全部 Codex（`PermissionRequest`）與 Antigravity（`PreToolUse`）唯讀審批提醒功能；預設維持關閉，所有允許或拒絕操作均在電腦端完成。
 <!-- app-update-notes:zh-TW:end -->
 
 ## 下載
 
-- **Windows 安裝版** — [Token-Monitor-Setup-0.93.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-Setup-0.93.0.exe)（推薦）
-- **Windows 便攜版** — [Token-Monitor-0.93.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-0.93.0.exe)（免安裝）
-- **Linux amd64** — [Token-Monitor-0.93.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-0.93.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.93.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-0.93.0-x86_64.AppImage)
+- **Windows 安裝版** — [Token-Monitor-Setup-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-Setup-0.93.1.exe)（推薦）
+- **Windows 便攜版** — [Token-Monitor-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1.exe)（免安裝）
+- **Linux amd64** — [Token-Monitor-0.93.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.93.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-x86_64.AppImage)
 
 </details>
 
@@ -122,20 +119,19 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ## 업데이트 내용
 
 <!-- app-update-notes:ko:start -->
-### 추가
-- 세션이 확인 대기로 일시 중지될 때 Codex(`PermissionRequest`) 및 Antigravity(`PreToolUse`)용 선택적 읽기 전용 승인 알림을 추가했습니다.
-- 비차단 데스크톱 훅이 권한이 제한된 로컬 IPC 브리지를 통해 Node Hub(`POST /api/approval-alerts` / `GET /api/approval-alerts`)로 알림을 전달하고 즉시 데스크톱 기본 확인 흐름을 반환합니다.
-- 데스크톱 다중 기기 동기화 설정에 원클릭 Codex / Antigravity 훅 설치 및 매처 설정을 추가했으며, 독립 실행형 Hub와 헤드리스 Agent는 `--approval-alerts` 및 `TOKEN_MONITOR_APPROVAL_ALERTS=1`을 지원합니다.
+### 수정
+- 로컬 승인 알림 IPC 브리지 시작 시 Windows 명명된 파이프의 활성 상태를 먼저 확인해 중복 인스턴스가 리스너를 겹쳐 열지 않고 `already_owned`를 반환하도록 수정했습니다.
+- 소켓 종료 시 대기 타이머를 즉시 정리하고 부하가 높은 Windows 실행 환경에서도 비차단 훅 프로세스 검증이 안정적으로 통과하도록 여유 시간을 조정했습니다.
 ### 참고
-- 승인 알림은 읽기 전용이며 Hub, 수집기, Android에서 기본 비활성화되어 있습니다. 허용/거부 결정은 항상 데스크톱에서 처리하며, Node Hub는 알림을 메모리에만 2분간 보관하고 Cloudflare Worker는 이 경로를 구현하지 않습니다.
+- 0.93.0의 모든 Codex(`PermissionRequest`) 및 Antigravity(`PreToolUse`) 읽기 전용 승인 알림 기능을 포함하며, 기본값은 비활성화이고 허용/거부 결정은 항상 데스크톱에서 진행됩니다.
 <!-- app-update-notes:ko:end -->
 
 ## 다운로드
 
-- **Windows 설치 버전** — [Token-Monitor-Setup-0.93.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-Setup-0.93.0.exe) (권장)
-- **Windows 포터블 버전** — [Token-Monitor-0.93.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-0.93.0.exe) (설치 필요 없음)
-- **Linux amd64** — [Token-Monitor-0.93.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-0.93.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.93.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-0.93.0-x86_64.AppImage)
+- **Windows 설치 버전** — [Token-Monitor-Setup-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-Setup-0.93.1.exe) (권장)
+- **Windows 포터블 버전** — [Token-Monitor-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1.exe) (설치 필요 없음)
+- **Linux amd64** — [Token-Monitor-0.93.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.93.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-x86_64.AppImage)
 
 </details>
 
@@ -147,20 +143,19 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ## 更新内容
 
 <!-- app-update-notes:ja:start -->
-### 追加
-- セッションが確認待ちで一時停止した際に通知する、Codex（`PermissionRequest`）および Antigravity（`PreToolUse`）向けの読み取り専用承認通知（オプション）を追加しました。
-- 非ブロッキングのデスクトップフックが権限制限付きローカル IPC ブリッジ経由で Node Hub（`POST /api/approval-alerts` / `GET /api/approval-alerts`）へ通知を送信し、直ちにデスクトップ標準の確認動作へ戻ります。
-- デスクトップのマルチデバイス同期設定にワンクリックの Codex / Antigravity フック導入とマッチャー設定を追加し、単体 Hub とヘッドレス Agent で `--approval-alerts` / `TOKEN_MONITOR_APPROVAL_ALERTS=1` に対応しました。
+### 修正
+- ローカル承認通知 IPC ブリッジの起動時に Windows 名前付きパイプの生存確認を行い、競合インスタンスが重複リスナーを開かず `already_owned` を返すよう修正しました。
+- ソケット切断時に待機タイマーを確実に解放し、高負荷な Windows 環境でもサブプロセスフックの非ブロッキング検証が安定して動作するよう調整しました。
 ### 注意
-- 承認通知は読み取り専用であり、Hub・コレクター・Android のすべてで既定無効です。許可・拒否の操作は常にデスクトップ側で行い、Node Hub はメモリ上に 2 分間のみ保持します（Cloudflare Worker は未実装）。
+- 0.93.0 の Codex（`PermissionRequest`）および Antigravity（`PreToolUse`）向け読み取り専用承認通知機能をすべて引き継ぎます。既定では無効であり、許可・拒否の操作は常にデスクトップ側で行います。
 <!-- app-update-notes:ja:end -->
 
 ## ダウンロード
 
-- **Windows インストーラー** — [Token-Monitor-Setup-0.93.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-Setup-0.93.0.exe)（推奨）
-- **Windows ポータブル版** — [Token-Monitor-0.93.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-0.93.0.exe)（インストール不要）
-- **Linux amd64** — [Token-Monitor-0.93.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-0.93.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.93.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.0/Token-Monitor-0.93.0-x86_64.AppImage)
+- **Windows インストーラー** — [Token-Monitor-Setup-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-Setup-0.93.1.exe)（推奨）
+- **Windows ポータブル版** — [Token-Monitor-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1.exe)（インストール不要）
+- **Linux amd64** — [Token-Monitor-0.93.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.93.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-x86_64.AppImage)
 
 </details>
 

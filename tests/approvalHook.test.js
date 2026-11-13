@@ -48,15 +48,24 @@ test('hook subprocess returns desktop fallback immediately when bridge is absent
 test('hook subprocess dispatches read-only alerts and returns desktop fallback without waiting', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tm-hook-live-'));
   const observed = [];
+  const pendingTimers = new Set();
   const bridge = createApprovalBridge({
     dataDir: dir,
     onAlert: async (alert) => {
       observed.push(alert);
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          pendingTimers.delete(timer);
+          resolve();
+        }, 4000);
+        pendingTimers.add(timer);
+      });
     }
   });
   await bridge.start();
   t.after(async () => {
+    for (const timer of pendingTimers) clearTimeout(timer);
+    pendingTimers.clear();
     await bridge.stop();
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -72,7 +81,7 @@ test('hook subprocess dispatches read-only alerts and returns desktop fallback w
       cwd: '/home/user/workspace/my-app'
     })
   );
-  assert.ok(Date.now() - t0 < 1500, 'Codex hook must not block on alert delivery');
+  assert.ok(Date.now() - t0 < 3000, 'Codex hook must not block on alert delivery');
   assert.equal(codex.code, 0);
   assert.equal(codex.stdout, '');
   assert.deepEqual(observed[0], {
@@ -93,7 +102,7 @@ test('hook subprocess dispatches read-only alerts and returns desktop fallback w
       workspacePaths: ['/home/user/workspace/my-app']
     })
   );
-  assert.ok(Date.now() - t1 < 1500, 'Antigravity hook must not block on alert delivery');
+  assert.ok(Date.now() - t1 < 3000, 'Antigravity hook must not block on alert delivery');
   assert.equal(agy.code, 0);
   assert.deepEqual(JSON.parse(agy.stdout), { decision: 'ask' });
   assert.deepEqual(observed[1], {

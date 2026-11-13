@@ -15,6 +15,7 @@ function tmpDir(prefix) {
 test('bridge authenticates token, dispatches alerts without blocking, and isolates ownership', async (t) => {
   const dir = tmpDir('tm-bridge-');
   const seen = [];
+  const pendingTimers = new Set();
   let mode = 'slow';
 
   const bridge = createApprovalBridge({
@@ -22,12 +23,20 @@ test('bridge authenticates token, dispatches alerts without blocking, and isolat
     onAlert: async (alert) => {
       seen.push(alert);
       if (mode === 'error') throw new Error('boom');
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          pendingTimers.delete(timer);
+          resolve();
+        }, 2000);
+        pendingTimers.add(timer);
+      });
     }
   });
   const started = await bridge.start();
   assert.equal(started.started, true);
   t.after(async () => {
+    for (const timer of pendingTimers) clearTimeout(timer);
+    pendingTimers.clear();
     await bridge.stop();
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -67,6 +76,7 @@ test('bridge authenticates token, dispatches alerts without blocking, and isolat
   const rival = createApprovalBridge({ dataDir: dir, onAlert: () => {} });
   const rivalStarted = await rival.start();
   assert.equal(rivalStarted.started, false);
+  assert.equal(rivalStarted.reason, 'already_owned');
   await rival.stop();
   assert.equal(fs.existsSync(bridge.metadataPath), true);
 
