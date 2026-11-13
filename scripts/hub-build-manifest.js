@@ -46,6 +46,8 @@ const NODE_RUNTIME_SOURCE_FILES = Object.freeze([
   'src/hub/server.js',
   'src/hub/sessionConversations.js',
   'src/shared/sessionConversationProtocol.js',
+  'src/hub/approvalAlerts.js',
+  'src/shared/approvalProtocol.js',
   'src/shared/http.js',
   'src/shared/config.js'
 ]);

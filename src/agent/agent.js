@@ -19,6 +19,7 @@ const { createSyncPayloadUploader } = require('../shared/syncPayload');
 const postSyncPayload = createSyncPayloadUploader();
 const { createAgentTitleSync } = require('./titleSync');
 const { createSessionConversationClient } = require('../shared/sessionConversationClient');
+const { createApprovalAlertRuntime } = require('../shared/approvalAlertRuntime');
 const { HUB_RESPONSE_HEADER, HUB_RESPONSE_MINIMAL } = require('../shared/hubProtocol');
 const { applyProjectRollups } = require('../shared/usage');
 const { runAgent, runAgentOnce } = require('./runtime');
@@ -61,6 +62,7 @@ const limitsRefreshMode = normalizeLimitsRefreshMode(args.limitsRefreshMode || p
 const historyEnabled = parseBoolean(args.history ?? args.historyEnabled ?? process.env.TOKEN_MONITOR_HISTORY_ENABLED, true);
 const syncSessionTitles = parseBoolean(args.syncSessionTitles ?? args['sync-session-titles'] ?? process.env.TOKEN_MONITOR_SYNC_SESSION_TITLES, false);
 const sessionConversations = parseBoolean(args.sessionConversations ?? args['session-conversations'] ?? process.env.TOKEN_MONITOR_SESSION_CONVERSATIONS, false);
+const approvalAlerts = parseBoolean(args.approvalAlerts ?? args['approval-alerts'] ?? process.env.TOKEN_MONITOR_APPROVAL_ALERTS, false);
 const projectsEnabled = parseBoolean(args.projects ?? args.projectsEnabled ?? process.env.TOKEN_MONITOR_PROJECTS_ENABLED, true);
 const sessionUsageArchiveEnabled = parseBoolean(args.sessionArchive ?? args.sessionUsageArchiveEnabled ?? process.env.TOKEN_MONITOR_SESSION_USAGE_ARCHIVE_ENABLED, true);
 const wslScanEnabled = parseBoolean(args.wslScan ?? args.wslScanEnabled ?? process.env.TOKEN_MONITOR_WSL_SCAN, false);
@@ -151,6 +153,10 @@ function summaryWithSessionUsageArchive(summary, now = new Date()) {
 const titleSyncNegotiator = createAgentTitleSync({ dataDir: path.dirname(pidFilePath()), fetchFn: fetch });
 const conversationClient = sessionConversations && secret && !once && !dryRun
   ? createSessionConversationClient({ hubUrl, secret, deviceId, wslScanEnabled }) : null;
+const approvalAlertRuntime = approvalAlerts && !once && !dryRun
+  ? createApprovalAlertRuntime({
+    onError: (error) => console.error(`[approval-alerts] ${error.message}`)
+  }) : null;
 
 async function postUsage(summary) {
   const authHeaders = secret ? { authorization: `Bearer ${secret}` } : {};
@@ -207,6 +213,7 @@ async function main() {
   let runtimeHandle = null;
   if (!dryRun) registerPidFile(() => {
     conversationClient?.stop();
+    void approvalAlertRuntime?.stop();
     runtimeHandle?.stop();
     sessionUsageArchiveStore.close();
   });
@@ -233,6 +240,7 @@ async function main() {
     }
     return;
   }
+  approvalAlertRuntime?.reconcile({ enabled: true, hubUrl, secret, deviceId });
   runtimeHandle = runAgent(runtimeOptions);
 }
 

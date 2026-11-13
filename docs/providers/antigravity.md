@@ -17,7 +17,7 @@ Antigravity appears in Token Monitor in two independent data planes. Keep them s
 | Token/session activity | Local model-token activity attributed to Antigravity | Shared usage collector through `tokscale` | Local Antigravity conversation data and the Token Monitor-managed tokscale cache |
 | Limits/quota | Remaining Google account quota and reset windows | Shared limits runtime | A running local Antigravity RPC endpoint, or standalone Google OAuth accounts |
 
-An OAuth account is not a token-history source. Likewise, finding local Antigravity sessions does not identify the Google account that owns a quota row.
+An OAuth account is not a token-history source. Likewise, finding local Antigravity sessions does not identify the Google account that owns a quota row. Optional read-only approval alert notifications use only the explicit non-blocking `PreToolUse` hook in [approval-alerts.md](../approval-alerts.md) and remain separate from token/session collection and quota probing.
 
 ## Token and session activity
 

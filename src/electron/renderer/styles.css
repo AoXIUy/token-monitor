@@ -9374,3 +9374,13 @@ html.native-liquid-glass .view-switcher-menu-item { border-radius: 9px; }
 .session-realtime-note, .session-realtime-axis, .session-realtime-status { color: var(--muted); }
 .session-realtime svg { display: block; width: 100%; height: 76px; color: var(--accent); border-bottom: 1px solid var(--line); }
 .session-realtime-axis { display: flex; justify-content: space-between; font-size: .625rem; font-variant-numeric: tabular-nums; }
+
+.approval-alerts-panel { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(var(--overlay-rgb), 0.03); }
+.approval-alert-hook-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.approval-alert-hook-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.approval-alert-matcher-row { display: flex; flex-direction: column; gap: 5px; }
+.approval-alert-matcher-controls { display: flex; align-items: center; gap: 6px; }
+.approval-alert-matcher-controls input { flex: 1; min-width: 0; }
+.settings-mini-button, .approval-alert-matcher-controls button { padding: 5px 10px; border-radius: 8px; border: 1px solid var(--line); background: rgba(var(--overlay-rgb), 0.05); color: var(--text); font-size: .75rem; cursor: pointer; white-space: nowrap; }
+.settings-mini-button:hover, .approval-alert-matcher-controls button:hover { border-color: var(--line-strong); background: rgba(var(--overlay-rgb), 0.09); }
+.settings-mini-button:disabled, .approval-alert-matcher-controls button:disabled { opacity: .5; cursor: default; }

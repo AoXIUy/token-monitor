@@ -37,6 +37,8 @@ const { isAuthorized, readJsonBody, sendJson, sendText } = require('../shared/ht
 const { loadDotEnv, parseArgs, projectRoot, readJson, writeJsonAtomic } = require('../shared/config');
 const { CONVERSATION_BASE, MAX_CONVERSATION_BYTES } = require('../shared/sessionConversationProtocol');
 const { createSessionConversationRelay } = require('./sessionConversations');
+const { APPROVAL_ALERT_BASE, MAX_APPROVAL_BODY_BYTES } = require('../shared/approvalProtocol');
+const { createApprovalAlertStore } = require('./approvalAlerts');
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 const SHUTDOWN_DRAIN_TIMEOUT_MS = 5000;
@@ -57,6 +59,7 @@ function createHub({
   secret = '',
   syncSessionTitles = false,
   sessionConversations = false,
+  approvalAlerts = false,
   staleAfterMs = DEFAULT_STALE_AFTER_MS,
   broadcastDelayMs = 100,
   persistIntervalMs = 0,
@@ -80,6 +83,8 @@ function createHub({
   const bindHost = resolveBindHost(host, secret);
   const uploadBaselines = createUploadBaselines();
   const conversationRelay = createSessionConversationRelay({ enabled: sessionConversations === true,
+    getDevice: (id) => store.devices[id] });
+  const approvalAlertStore = createApprovalAlertStore({ enabled: approvalAlerts === true,
     getDevice: (id) => store.devices[id] });
   let persistTimer = null;
   let persistPending = false;
@@ -276,6 +281,7 @@ function createHub({
       throw error;
     }
     conversationRelay.remove(deviceId);
+    approvalAlertStore.remove(deviceId);
     broadcastStats('delete');
   }
 
@@ -443,6 +449,25 @@ function createHub({
         }
         return sendJson(res, 400, { error: 'invalid_request' });
       }
+    }
+
+    if (url.pathname === APPROVAL_ALERT_BASE) {
+      if (req.method === 'GET') {
+        return sendJson(res, 200, approvalAlertStore.list());
+      }
+      if (req.method === 'POST') {
+        try {
+          const payload = await readJsonBody(req, MAX_APPROVAL_BODY_BYTES);
+          return sendJson(res, 200, approvalAlertStore.create(payload));
+        } catch (error) {
+          if (error.code === 'payload_too_large') {
+            res.shouldKeepAlive = false;
+            return sendJson(res, 413, { error: 'invalid_request' }, { connection: 'close' });
+          }
+          return sendJson(res, 400, { error: 'invalid_request' });
+        }
+      }
+      return sendJson(res, 405, { error: 'invalid_request' });
     }
 
     if (req.method === 'GET' && url.pathname === '/api/sync/content') return sendJson(res, 200, getSyncContent());
@@ -613,6 +638,7 @@ function createHub({
     if (stopPromise) return stopPromise;
     stopping = true;
     conversationRelay.stop();
+    approvalAlertStore.stop();
     const operation = new Promise((resolve, reject) => {
       clearTimeout(persistTimer);
       persistTimer = null;
@@ -648,7 +674,8 @@ function createHub({
   return {
     start, stop, server, getStats, getHistory, getDevices, ingest, deleteDevice, onStats, bindHost,
     getSubscriptions, setSubscriptions, getSyncContent, getSyncSettings, setSyncSettings, setSyncTitlePolicy,
-    setSessionConversationsEnabled: (enabled) => conversationRelay.setEnabled(enabled)
+    setSessionConversationsEnabled: (enabled) => conversationRelay.setEnabled(enabled),
+    setApprovalAlertsEnabled: (enabled) => approvalAlertStore.setEnabled(enabled)
   };
 }
 
@@ -668,7 +695,8 @@ if (require.main === module) {
 
   const syncSessionTitles = syncSessionTitlesEnabled(args.syncSessionTitles ?? args['sync-session-titles'] ?? process.env.TOKEN_MONITOR_SYNC_SESSION_TITLES);
   const sessionConversations = syncSessionTitlesEnabled(args.sessionConversations ?? args['session-conversations'] ?? process.env.TOKEN_MONITOR_SESSION_CONVERSATIONS);
-  const hub = createHub({ port, host, secret, staleAfterMs, dataFile, syncSessionTitles, sessionConversations, persistIntervalMs });
+  const approvalAlerts = syncSessionTitlesEnabled(args.approvalAlerts ?? args['approval-alerts'] ?? process.env.TOKEN_MONITOR_APPROVAL_ALERTS);
+  const hub = createHub({ port, host, secret, staleAfterMs, dataFile, syncSessionTitles, sessionConversations, approvalAlerts, persistIntervalMs });
   for (const signal of ['SIGINT', 'SIGTERM']) {
     process.once(signal, () => {
       hub.stop().catch((error) => {

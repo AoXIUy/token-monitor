@@ -534,6 +534,16 @@ Object.assign(els, {
   syncUploadIntervalInput: document.getElementById('syncUploadIntervalInput'),
   sessionConversationsRow: document.getElementById('sessionConversationsRow'),
   sessionConversationsInput: document.getElementById('sessionConversationsInput'),
+  approvalAlertsRow: document.getElementById('approvalAlertsRow'),
+  approvalAlertsInput: document.getElementById('approvalAlertsInput'),
+  approvalAlertsPanel: document.getElementById('approvalAlertsPanel'),
+  codexApprovalHookStatus: document.getElementById('codexApprovalHookStatus'),
+  codexApprovalHookButton: document.getElementById('codexApprovalHookButton'),
+  antigravityApprovalHookStatus: document.getElementById('antigravityApprovalHookStatus'),
+  antigravityApprovalHookButton: document.getElementById('antigravityApprovalHookButton'),
+  approvalAlertsMatcherInput: document.getElementById('approvalAlertsMatcherInput'),
+  approvalAlertsMatcherSave: document.getElementById('approvalAlertsMatcherSave'),
+  approvalAlertsHookError: document.getElementById('approvalAlertsHookError'),
   collectionCadenceInput: document.getElementById('collectionCadenceInput'),
   sessionUsageArchiveInput: document.getElementById('sessionUsageArchiveInput'),
   sessionUsageArchiveStatus: document.getElementById('sessionUsageArchiveStatus'),
@@ -9404,11 +9414,30 @@ async function saveAppearanceFromControls() {
 function syncHubModeUi() {
   syncContentForm?.syncSettings();
   const mode = state.settings.hubMode || 'local';
+  const hubCapable = mode === 'host' || mode === 'client';
   if (els.sessionConversationsRow) {
-    els.sessionConversationsRow.hidden = mode !== 'host' && mode !== 'client';
+    els.sessionConversationsRow.hidden = !hubCapable;
     els.sessionConversationsRow.inert = els.sessionConversationsRow.hidden;
   }
   if (els.sessionConversationsInput) els.sessionConversationsInput.checked = state.settings.sessionConversationsEnabled !== false;
+  if (els.approvalAlertsRow) {
+    els.approvalAlertsRow.hidden = !hubCapable;
+    els.approvalAlertsRow.inert = els.approvalAlertsRow.hidden;
+  }
+  if (els.approvalAlertsInput) els.approvalAlertsInput.checked = state.settings.approvalAlertsEnabled === true;
+  if (els.approvalAlertsPanel) {
+    els.approvalAlertsPanel.hidden = !hubCapable;
+    els.approvalAlertsPanel.inert = els.approvalAlertsPanel.hidden;
+  }
+  if (els.approvalAlertsMatcherInput && (typeof document === 'undefined' || document.activeElement !== els.approvalAlertsMatcherInput)) {
+    els.approvalAlertsMatcherInput.value = state.settings.approvalAlertsAntigravityMatcher || 'run_command';
+  }
+  if (hubCapable) {
+    if (typeof renderApprovalHooksStatus === 'function') renderApprovalHooksStatus();
+    if (typeof window !== 'undefined' && typeof approvalHooksLoaded !== 'undefined' && !approvalHooksLoaded && typeof refreshApprovalHooksStatus === 'function') {
+      void refreshApprovalHooksStatus();
+    }
+  }
   els.hubModeOptions.value = mode;
   if (els.syncModeDescription) els.syncModeDescription.textContent = t(SYNC_MODE_DESCRIPTIONS[mode] || SYNC_MODE_DESCRIPTIONS.local);
   const icloudSupported = state.appInfo?.platform === 'darwin';
@@ -14376,6 +14405,93 @@ els.sessionConversationsInput?.addEventListener('change', async () => {
   try { await saveSettings({ sessionConversationsEnabled: input.checked }); }
   catch (_) { input.checked = state.settings.sessionConversationsEnabled !== false; }
   finally { input.disabled = false; }
+});
+let approvalHooksStatus = null;
+let approvalHooksLoaded = false;
+function renderApprovalHooksStatus() {
+  const codex = approvalHooksStatus?.codex;
+  const agy = approvalHooksStatus?.antigravity;
+  if (els.codexApprovalHookStatus) {
+    els.codexApprovalHookStatus.textContent = !codex ? '…'
+      : codex.invalidJson ? t('settings.sync.approvalAlertsHookInvalid')
+        : codex.installed ? t('settings.sync.approvalAlertsCodexInstalled')
+          : t('settings.sync.approvalAlertsNotInstalled');
+  }
+  if (els.codexApprovalHookButton) {
+    els.codexApprovalHookButton.textContent = codex?.installed
+      ? t('settings.sync.approvalAlertsUninstall')
+      : t('settings.sync.approvalAlertsInstall');
+    els.codexApprovalHookButton.disabled = Boolean(codex?.invalidJson);
+  }
+  if (els.antigravityApprovalHookStatus) {
+    els.antigravityApprovalHookStatus.textContent = !agy ? '…'
+      : agy.invalidJson ? t('settings.sync.approvalAlertsHookInvalid')
+        : agy.installed ? t('settings.sync.approvalAlertsInstalled')
+          : t('settings.sync.approvalAlertsNotInstalled');
+  }
+  if (els.antigravityApprovalHookButton) {
+    els.antigravityApprovalHookButton.textContent = agy?.installed
+      ? t('settings.sync.approvalAlertsUninstall')
+      : t('settings.sync.approvalAlertsInstall');
+    els.antigravityApprovalHookButton.disabled = Boolean(agy?.invalidJson);
+  }
+}
+async function refreshApprovalHooksStatus() {
+  if (typeof window === 'undefined' || !window?.tokenMonitor?.getApprovalHooksStatus) return;
+  try {
+    approvalHooksStatus = await window.tokenMonitor.getApprovalHooksStatus();
+    approvalHooksLoaded = true;
+    renderApprovalHooksStatus();
+  } catch (_) {}
+}
+async function toggleApprovalHook(client) {
+  if (els.approvalAlertsHookError) {
+    els.approvalAlertsHookError.hidden = true;
+    els.approvalAlertsHookError.textContent = '';
+  }
+  const btn = client === 'codex' ? els.codexApprovalHookButton : els.antigravityApprovalHookButton;
+  const installed = Boolean(approvalHooksStatus?.[client]?.installed);
+  if (btn) btn.disabled = true;
+  try {
+    const res = installed
+      ? await window.tokenMonitor.uninstallApprovalHook(client)
+      : await window.tokenMonitor.installApprovalHook(client);
+    if (res?.status) approvalHooksStatus = res.status;
+    approvalHooksLoaded = true;
+    if (!res?.ok && els.approvalAlertsHookError) {
+      els.approvalAlertsHookError.textContent = res?.error === 'invalid_hooks_json'
+        ? t('settings.sync.approvalAlertsHookInvalid')
+        : String(res?.error || 'Hook update failed');
+      els.approvalAlertsHookError.hidden = false;
+    }
+  } catch (error) {
+    if (els.approvalAlertsHookError) {
+      els.approvalAlertsHookError.textContent = error?.message || 'Hook update failed';
+      els.approvalAlertsHookError.hidden = false;
+    }
+  } finally {
+    renderApprovalHooksStatus();
+  }
+}
+els.approvalAlertsInput?.addEventListener('change', async () => {
+  const input = els.approvalAlertsInput;
+  input.disabled = true;
+  try { await saveSettings({ approvalAlertsEnabled: input.checked }); }
+  catch (_) { input.checked = state.settings.approvalAlertsEnabled === true; }
+  finally { input.disabled = false; }
+});
+els.codexApprovalHookButton?.addEventListener('click', () => { void toggleApprovalHook('codex'); });
+els.antigravityApprovalHookButton?.addEventListener('click', () => { void toggleApprovalHook('antigravity'); });
+els.approvalAlertsMatcherSave?.addEventListener('click', async () => {
+  const btn = els.approvalAlertsMatcherSave;
+  const value = (els.approvalAlertsMatcherInput?.value || '').trim() || 'run_command';
+  if (btn) btn.disabled = true;
+  try {
+    await saveSettings({ approvalAlertsAntigravityMatcher: value });
+    await refreshApprovalHooksStatus();
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 });
 els.syncUploadIntervalInput?.addEventListener('change', async () => {
   await saveSettings({ syncUploadIntervalMs: Number(els.syncUploadIntervalInput.value) });

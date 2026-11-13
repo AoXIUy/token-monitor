@@ -432,6 +432,13 @@ The resident producer holds `GET /api/session-conversations/poll?deviceId=<id>&i
 
 Only pending response-owned queries are retained in memory (up to 16 globally); reader registrations are bounded at 64. Reads time out after 12 seconds, are removed after delivery, and are not persisted or broadcast. Disconnecting the viewer discards late results. Restart requires producers to reconnect. No source filesystem path or executable command is accepted over this protocol.
 
+## Approval alerts (Node Hub extension)
+
+This fork's optional Codex/Antigravity approval-alert stream is Node-Hub-only, read-only for consumers, and separate from `DeviceRecord`, stats, SSE and disk persistence. Enable `TOKEN_MONITOR_APPROVAL_ALERTS=1` (`--approval-alerts`) on the Node Hub and each resident producer (or via Desktop Sync settings); the Cloudflare Worker does not implement these endpoints. All routes use the same shared secret bearer gate and `Cache-Control: no-store`. See [setup and caveats](approval-alerts.md).
+
+- `GET /api/approval-alerts`: Read-only endpoint returning `{ "ok": true, "alerts": [...] }` sorted oldest-first. Each entry carries `{ id, deviceId, deviceName, client, sessionId, tool, command, description, projectLabel, createdAt, expiresAt }`.
+- `POST /api/approval-alerts`: Producer bridge submits a read-only alert (`{ deviceId, client, sessionId, tool, command, description, projectLabel }`, body limit 16 KiB) and immediately receives `{ "ok": true, "id": "<uuid>", "expiresAt": <epochMs> }` (2-minute TTL, FIFO-bounded at 32 global / 8 per-device). No `/poll`, `/decision` or `/cancel` endpoints exist; confirming or denying stays strictly on the desktop.
+
 ## `GET /api/history`
 
 Returns the authenticated aggregate History. The detailed `daily` tier remains capped to the rolling 370-day window. When every usage-contributing stored device provides complete compact history, `dailyTotals` contains all observed dates merged across devices and `summary.activeDaysComplete` is `true`; otherwise `dailyTotals` is omitted and the flag is `false`.

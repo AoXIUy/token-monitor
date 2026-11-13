@@ -347,6 +347,15 @@ const { completeHistorySource, resolveCompleteHistory, resolveCompleteHistoryWit
 const { fixedPeriodHistoryMeta } = require('./fixedPeriodHistory');
 const { readSessionDetailForPlatform } = require('../shared/sessionDetailResolver');
 const { createSessionConversationClient } = require('../shared/sessionConversationClient');
+const { createApprovalAlertRuntime } = require('../shared/approvalAlertRuntime');
+const {
+  inspectApprovalHooks,
+  installAntigravityHook,
+  installCodexHook,
+  normalizeAntigravityMatcher,
+  uninstallAntigravityHook,
+  uninstallCodexHook
+} = require('../shared/approvalHooks');
 const { startDiscordRpc, stopDiscordRpc, updateDiscordRpc } = require('./discordRpc');
 const {
   commitMacWidgetSnapshot,
@@ -650,6 +659,8 @@ function defaultSettings() {
     secret: process.env.TOKEN_MONITOR_SECRET || '',
     hubSyncSessionTitles: parseBoolean(process.env.TOKEN_MONITOR_SYNC_SESSION_TITLES, false),
     sessionConversationsEnabled: parseBoolean(process.env.TOKEN_MONITOR_SESSION_CONVERSATIONS, true),
+    approvalAlertsEnabled: parseBoolean(process.env.TOKEN_MONITOR_APPROVAL_ALERTS, false),
+    approvalAlertsAntigravityMatcher: normalizeAntigravityMatcher(process.env.TOKEN_MONITOR_APPROVAL_ALERTS_MATCHER),
     syncContentState: normalizeSyncContentState(null),
     windowBehavior,
     alwaysOnTop: windowBehavior === 'floating',
@@ -2855,6 +2866,8 @@ function readSettings() {
     merged.syncContentState = normalizeSyncContentState(merged.syncContentState);
     merged.hubSyncSessionTitles = parseBoolean(merged.hubSyncSessionTitles, false);
     merged.sessionConversationsEnabled = parseBoolean(merged.sessionConversationsEnabled, true);
+    merged.approvalAlertsEnabled = parseBoolean(merged.approvalAlertsEnabled, false);
+    merged.approvalAlertsAntigravityMatcher = normalizeAntigravityMatcher(merged.approvalAlertsAntigravityMatcher);
     merged.modelAliasGrouping = normalizeModelAliasGrouping(merged.modelAliasGrouping);
     merged.textSize = fontSettingsApi.normalizeTextSize(merged.textSize);
     merged.interfaceFontFamily = fontSettingsApi.normalizeFontFamily(merged.interfaceFontFamily);
@@ -3749,6 +3762,7 @@ async function startEmbeddedHub() {
       secret: settings.hubHostSecret,
       syncSessionTitles: settings.hubSyncSessionTitles === true,
       sessionConversations: settings.sessionConversationsEnabled !== false,
+      approvalAlerts: settings.approvalAlertsEnabled === true,
       dataFile: hubDataFile(),
       logger: { error: (err) => console.log(`[hub] ${err?.message || err}`) }
     });
@@ -4585,6 +4599,7 @@ async function saveSubscriptions(list, base) {
 // `skipCloseWatchers` (see stopAll).
 function stopSyncCollector(options = {}) {
   stopSessionConversationClient();
+  if (typeof approvalAlertRuntime !== 'undefined') void approvalAlertRuntime.stop();
   usageRuntimeReconciler.cancel();
   usageRuntimeReconciler.setActiveKey(null);
   if (deviceRuntimeHandle) { try { deviceRuntimeHandle.stop(options); } catch (_) {} }
@@ -4808,6 +4823,7 @@ function publishSyncDisplayStats({ reason, at, generation, widgetProducerOwner }
 function startSyncCollector() {
   stopSyncCollector();
   if (!effectiveHubConfig().url) return;
+  if (typeof reconcileApprovalAlerts === 'function') void reconcileApprovalAlerts();
   const widgetProducerOwner = captureMacWidgetProducerOwner();
   const syncUploadScheduler = createSyncUploadScheduler({
     intervalMs: syncUploadIntervalMs(),
@@ -4858,6 +4874,7 @@ function startSyncCollector() {
 // Monitor's own outbound connections can't zero out the widget's own usage (#17).
 function startHostCollector() {
   stopSyncCollector();
+  if (typeof reconcileApprovalAlerts === 'function') void reconcileApprovalAlerts();
   const sink = {
     enqueue(summary) {
       seedInitialLimitProviders(summary);
@@ -8172,6 +8189,23 @@ async function cursorStatusValue({ discover = false } = {}) {
   };
 }
 
+const approvalAlertRuntime = createApprovalAlertRuntime({
+  onError: (error) => console.log(`[approval-alerts] ${error.message}`)
+});
+
+function reconcileApprovalAlerts() {
+  const inHubMode = settings?.hubMode === 'client' || settings?.hubMode === 'host';
+  const { url: hubUrl, secret } = effectiveHubConfig();
+  const deviceId = String(settings?.deviceId || '').trim() || defaultDeviceId();
+  const enabled = Boolean(
+    settings?.approvalAlertsEnabled === true
+    && inHubMode
+    && hubUrl
+    && !isExternalAgentActive()
+  );
+  return approvalAlertRuntime.reconcile({ enabled, hubUrl, secret, deviceId });
+}
+
 // Plugin hosts load from their own privileged scheme, which Chromium only
 // accepts before 'ready'.
 registerPluginScheme(protocol);
@@ -8474,6 +8508,10 @@ app.whenReady().then(() => {
       hubHostSecret: patch.hubHostSecret !== undefined ? String(patch.hubHostSecret) : settings.hubHostSecret,
       hubSyncSessionTitles: parseBoolean(patch.hubSyncSessionTitles ?? settings.hubSyncSessionTitles, false),
       sessionConversationsEnabled: parseBoolean(patch.sessionConversationsEnabled ?? settings.sessionConversationsEnabled, true),
+      approvalAlertsEnabled: parseBoolean(patch.approvalAlertsEnabled ?? settings.approvalAlertsEnabled, false),
+      approvalAlertsAntigravityMatcher: normalizeAntigravityMatcher(
+        patch.approvalAlertsAntigravityMatcher ?? settings.approvalAlertsAntigravityMatcher
+      ),
       syncContentState: normalizeSyncContentState(settings.syncContentState),
       deviceId: (patch.deviceId !== undefined ? String(patch.deviceId).trim() : settings.deviceId) || defaultDeviceId(),
       clients: patch.clients !== undefined ? clientsCsvForSetting(patch.clients, '') : clientsCsvForSetting(settings.clients, DEFAULT_CLIENTS),
@@ -8676,6 +8714,21 @@ app.whenReady().then(() => {
       embeddedHub?.hub.setSessionConversationsEnabled(settings.sessionConversationsEnabled !== false);
       if (settings.sessionConversationsEnabled === false) stopSessionConversationClient();
     }
+    const approvalAlertsChanged = (settings.approvalAlertsEnabled === true) !== (previousSettingsState.approvalAlertsEnabled === true);
+    const antigravityMatcherChanged = settings.approvalAlertsAntigravityMatcher !== previousSettingsState.approvalAlertsAntigravityMatcher;
+    if (approvalAlertsChanged) {
+      embeddedHub?.hub.setApprovalAlertsEnabled(settings.approvalAlertsEnabled === true);
+    }
+    if (antigravityMatcherChanged) {
+      try {
+        if (inspectApprovalHooks().antigravity.installed) {
+          installAntigravityHook({ matcher: settings.approvalAlertsAntigravityMatcher });
+        }
+      } catch (error) {
+        console.log(`[approval-alerts] failed to update antigravity matcher: ${error.message}`);
+      }
+    }
+    void reconcileApprovalAlerts();
     // A worker-hosted transform holds its own copy of the settings it reads.
     // Update it now rather than when the usage reconfigure settles: pausing the
     // session archive must stop captures from the next summary on.
@@ -10064,6 +10117,27 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('dashboard:open', () => { createDashboardWindow(); return true; });
   ipcMain.handle('dashboard:getHistory', (_event, options) => getDashboardHistory(options));
+  ipcMain.handle('approvalHooks:status', () => inspectApprovalHooks());
+  ipcMain.handle('approvalHooks:install', (_event, client) => {
+    if (client !== 'codex' && client !== 'antigravity') return { ok: false, error: 'invalid_client', status: inspectApprovalHooks() };
+    try {
+      if (client === 'codex') installCodexHook();
+      else installAntigravityHook({ matcher: settings?.approvalAlertsAntigravityMatcher });
+      return { ok: true, status: inspectApprovalHooks() };
+    } catch (error) {
+      return { ok: false, error: error.code || error.message || 'install_failed', status: inspectApprovalHooks() };
+    }
+  });
+  ipcMain.handle('approvalHooks:uninstall', (_event, client) => {
+    if (client !== 'codex' && client !== 'antigravity') return { ok: false, error: 'invalid_client', status: inspectApprovalHooks() };
+    try {
+      if (client === 'codex') uninstallCodexHook();
+      else uninstallAntigravityHook();
+      return { ok: true, status: inspectApprovalHooks() };
+    } catch (error) {
+      return { ok: false, error: error.code || error.message || 'uninstall_failed', status: inspectApprovalHooks() };
+    }
+  });
   ipcMain.on('dashboard:ready', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (!win || win !== dashboardWindow || win.isDestroyed()) return;
@@ -10202,6 +10276,7 @@ app.on('render-process-gone', (_event, contents, details) => {
 // taking the quit over would cancel an OS-initiated logout or restart on macOS.
 app.on('before-quit', () => {
   stopSessionConversationClient();
+  if (typeof approvalAlertRuntime !== 'undefined') void approvalAlertRuntime.stop();
   quitRequested = true;
   limitsHistoryController?.dispose();
   limitsHistoryStore?.closeSync();

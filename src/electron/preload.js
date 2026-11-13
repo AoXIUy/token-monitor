@@ -61,6 +61,9 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
   previewSyncContent: (kind) => ipcRenderer.invoke('syncContent:preview', kind),
   configureSyncContent: (options) => ipcRenderer.invoke('syncContent:configure', options),
   retrySyncContentCleanup: () => ipcRenderer.invoke('syncContent:retryCleanup'),
+  getApprovalHooksStatus: () => ipcRenderer.invoke('approvalHooks:status'),
+  installApprovalHook: (client) => ipcRenderer.invoke('approvalHooks:install', client),
+  uninstallApprovalHook: (client) => ipcRenderer.invoke('approvalHooks:uninstall', client),
   onSyncContentPush: (callback) => {
     const listener = (_event, status) => { try { callback(status); } catch (_) {} };
     ipcRenderer.on('syncContent:push', listener);
