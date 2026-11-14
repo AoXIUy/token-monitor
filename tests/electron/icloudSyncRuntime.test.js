@@ -62,8 +62,8 @@ function blockingWriteFs() {
       return new Proxy(handle, {
         get(target, property, receiver) {
           if (property === 'sync' && !blocked) {
-            blocked = true;
             return async (...syncArgs) => {
+              blocked = true;
               await writeGate;
               return target.sync(...syncArgs);
             };
