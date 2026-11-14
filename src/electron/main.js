@@ -154,7 +154,7 @@ const {
   antigravitySyncLockPath,
   repairAntigravitySyncLock
 } = require('../shared/providers/antigravity/selfSync');
-const { deviceRecordFromAnchor } = require('../shared/anchorSeed');
+const { deviceRecordFromAnchor, seedWithColdPreview } = require('../shared/anchorSeed');
 const { sendWhenRendererReady } = require('./deferredWindowSend');
 const { actionWindowForEvent, activateWindowAction, handoffWindow, showWindow } = require('./windowLifecycle');
 const { applyInitialLimitProviderSeed } = require('./initialLimitProviderSeed');
@@ -203,6 +203,8 @@ const {
   rendererOmittedAccountKeys
 } = require('./limits/accountSettings');
 const { createCredentialCommands } = require('./limits/credentialCommands');
+const { createCopilotAccounts } = require('./providers/copilot/accounts');
+const copilotLimits = require('../shared/providers/copilot/limits');
 const { createMinimaxApiKeys } = require('./providers/minimax/apiKeys');
 const { createClaudeManagedAccounts, claudeAccountChangeScope } = require('./providers/claude/managedAccounts');
 const { copilotLoginErrorMessage, isAllowedVerificationUrl, runCopilotDeviceFlowLogin } = require('../shared/providers/copilot/deviceFlow');
@@ -3080,7 +3082,11 @@ function updateArchivedClientUsage(previousClients, nextClients) {
   const removedClients = removedTrackedClients(previousClients, nextClients);
   let archive = pruneArchivedClientUsage(settings.archivedClientUsage, nextClients);
   if (removedClients.length > 0) {
-    archive = captureArchivedClientUsage(archive, localArchiveSourceDevice(), removedClients);
+    // Before this run's first complete record, localDevice may be a first-scan
+    // preview whose unscanned windows would archive as zero. Only the seed, or
+    // nothing, stands for the client then.
+    const source = mode === 'local' && !lastCollectedDevice ? anchorSeedDevice : localArchiveSourceDevice();
+    archive = captureArchivedClientUsage(archive, source, removedClients);
   }
   settings.archivedClientUsage = archive;
 }
@@ -3282,6 +3288,9 @@ const usageRuntimeReconciler = createLatestWinsReconciler({
 });
 let localDevice = null;
 let localStats = null;
+// The cold-start seed as projected, kept until this run's first complete record
+// so each preview of the first scan is laid over it rather than over the last.
+let anchorSeedDevice = null;
 let sseAbortController = null;
 let sseRetryTimer = null;
 let streamConnected = false;
@@ -5463,6 +5472,7 @@ function stopLocalCollector(options = {}) {
   if (limitProbes.length) publishLimitProbes([]);
   localDevice = null;
   localStats = null;
+  anchorSeedDevice = null;
 }
 
 // Show the last full scan's totals while the first one of this run is still
@@ -5483,6 +5493,8 @@ function primeLocalStatsFromAnchor(usageOptions, widgetProducerOwner) {
       customScanPaths: usageOptions.customScanPaths,
       wslScanEnabled: usageOptions.wslScanEnabled,
       wslSupported: process.platform === 'win32',
+      historyEnabled: usageOptions.historyEnabled,
+      dailyHistoryArchiveEnabled: usageOptions.dailyHistoryArchiveEnabled,
       hostname: os.hostname(),
       platform: `${process.platform}-${process.arch}`
     }
@@ -5504,6 +5516,7 @@ function primeLocalStatsFromAnchor(usageOptions, widgetProducerOwner) {
     sendStatus(false, { reason: `session-archive:${error.message}` });
     return;
   }
+  anchorSeedDevice = visible;
   localDevice = visible;
   localStats = withHistoryPreview(aggregateDevices([visible], 0), [visible]);
   // Through the normal publisher, not straight to the renderer: the tray reads
@@ -5517,6 +5530,21 @@ function primeLocalStatsFromAnchor(usageOptions, widgetProducerOwner) {
     event: 'stats',
     data: { type: 'stats', reason: 'anchor', stats: localStats, at: deviceRecord.receivedAt }
   }, { skipExport: true, deferToRenderer: true, widgetProducerOwner });
+}
+
+// The first scan holds its record back until all-time is in, which on a long
+// history is minutes after Today was ready. Show each window as it lands, over
+// the seed's last known values when there is one. Display only: nothing here is
+// exported, because a record missing windows reads as zero wherever it lands.
+function publishColdPreview(preview, reason, widgetProducerOwner) {
+  if (lastCollectedDevice) return;
+  const device = seedWithColdPreview(anchorSeedDevice || preview, preview);
+  localDevice = device;
+  localStats = withHistoryPreview(aggregateDevices([device], 0), [device]);
+  sendPush({
+    event: 'stats',
+    data: { type: 'stats', reason, stats: localStats, at: new Date().toISOString() }
+  }, { skipExport: true, widgetProducerOwner });
 }
 
 function startLocalCollector() {
@@ -5536,7 +5564,9 @@ function startLocalCollector() {
     usageOptions,
     progressive: true,
     onSessionActivity: publishLocalSessionActivity,
+    onColdPreview: (preview, meta) => publishColdPreview(preview, meta.reason, widgetProducerOwner),
     onRecord: (summary, meta) => {
+      anchorSeedDevice = null;
       seedInitialLimitProviders(summary);
       const reason = meta.reason;
       const visibleSummary = summary;
@@ -10051,6 +10081,38 @@ app.whenReady().then(() => {
   ipcMain.handle('codex:removeAccount', async (_event, id) => removeCodexManagedAccount(id));
   ipcMain.handle('codex:switchSystemAccount', async (_event, id) => switchCodexSystemAccount(id));
   ipcMain.handle('codex:refreshAccountLimits', async (_event, id) => refreshCodexManagedAccountLimits(id));
+  const copilotAccounts = createCopilotAccounts({
+    getSettings: () => settings, saveSettings,
+    probeDeps: () => electronProviderDeps({ env: {}, signal: AbortSignal.timeout(15_000) }),
+    changed: (accountKey, refresh) => {
+      if (!accountKey) {
+        const knownKeys = new Set(Object.values(copilotLimits.copilotProfiles(settings)).map(account => account.accountKey).filter(Boolean));
+        const legacyRows = (deviceRuntimeHandle?.getSnapshot()?.limits?.providers || [])
+          .filter(row => row.provider === 'copilot' && row.accountKey && !knownKeys.has(row.accountKey));
+        if (legacyRows.length === 1) accountKey = legacyRows[0].accountKey;
+      }
+      const resolved = Object.values(copilotLimits.copilotProfiles(settings)).find(account => account.accountKey === accountKey);
+      if (resolved) {
+        const fallbackKey = copilotLimits.copilotAccountKey(resolved.token, resolved.enterpriseHost);
+        const provisional = (deviceRuntimeHandle?.getSnapshot()?.limits?.providers || [])
+          .some(row => row.provider === 'copilot' && row.accountKey === fallbackKey);
+        if (provisional && fallbackKey !== accountKey) {
+          void queueLimitInvalidation({ provider: 'copilot', accountKey: fallbackKey }, 'identity-resolved', { clear: true, refresh: false });
+        }
+      }
+      deviceRuntimeHandle?.reconfigureLimits(electronLimitsConfig());
+      pushSettingsToRenderer();
+      const scope = accountKey ? { provider: 'copilot', accountKey } : { provider: 'copilot' };
+      void queueLimitInvalidation(scope, 'account-change', { clear: Boolean(accountKey), refresh });
+    }
+  });
+  ipcMain.handle('copilot:getAccounts', () => copilotAccounts.getAccounts());
+  for (const method of ['addAccount', 'removeAccount', 'setEnabled']) {
+    ipcMain.handle(`copilot:${method}`, async (_event, ...args) => {
+      try { return await copilotAccounts[method](...args); }
+      catch (_) { return { ok: false, error: 'Could not update GitHub Copilot account. Please try again.' }; }
+    });
+  }
   ipcMain.handle('copilot:signIn', async (event, request = {}) => {
     if (copilotLoginController) return { ok: false, error: 'A GitHub Copilot sign-in is already in progress.', flowId: copilotLoginFlowId };
     const controller = new AbortController();
@@ -10062,8 +10124,9 @@ app.whenReady().then(() => {
       if (!event.sender.isDestroyed()) event.sender.send('copilot:loginStatus', { ...payload, flowId });
     };
     try {
+      const enterpriseHost = settings?.copilotEnterpriseHost || process.env.COPILOT_ENTERPRISE_HOST || process.env.GITHUB_ENTERPRISE_HOST || '';
       const result = await runCopilotDeviceFlowLogin({
-        enterpriseHost: settings?.copilotEnterpriseHost || process.env.COPILOT_ENTERPRISE_HOST || process.env.GITHUB_ENTERPRISE_HOST || '',
+        enterpriseHost,
         signal: controller.signal,
         onStatus: sendStatus
       }, {
@@ -10074,10 +10137,7 @@ app.whenReady().then(() => {
       if (copilotLoginController !== controller) {
         return { ok: false, error: copilotLoginErrorMessage({ status: 'cancelled' }), flowId };
       }
-      settings.copilotApiToken = normalizeAccountField('copilotApiToken', result.accessToken);
-      saveSettings({ throwOnError: true });
-      pushSettingsToRenderer();
-      void queueLimitInvalidation({ provider: 'copilot' }, 'login', { clear: true });
+      await copilotAccounts.addAccount(result.accessToken, () => copilotLoginController === controller && !controller.signal.aborted, controller.signal, enterpriseHost);
       return { ok: true, flowId };
     } catch (error) {
       const message = copilotLoginErrorMessage(error);

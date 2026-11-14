@@ -4,7 +4,9 @@ The hub exposes a small JSON HTTP API.
 
 ## Authentication
 
-All endpoints except `/api/health` require the configured shared secret.
+Authentication requirements differ between the Node hub and the Cloudflare Worker. `/api/health` is always unauthenticated, and the Worker can also serve `GET /api/public/stats` without a secret when `PUBLIC_STATS_ENABLED=1` (see [the Worker README](../worker/README.md)); every other data endpoint requires the shared secret when the runtime has one configured.
+
+A Node hub with no secret configured (neither `TOKEN_MONITOR_SECRET` nor the `secret` CLI argument) authorizes every request but binds to loopback only, so it is not reachable from other devices. A Worker without a secret refuses every other data route with `503`.
 
 Prefer a header (first-party clients already do this):
 
@@ -49,6 +51,10 @@ Example response:
 ```
 
 `version` remains the legacy Hub storage/API value and is not a deployment version. `hubBuild` is the content-derived deployment identity used by Token Monitor to compare the remote Hub with the core bundled by the app. `core*` identifies shared Node/Worker aggregation logic; `runtime*` identifies the Node Hub or Cloudflare Worker adapter. Product-only version bumps do not change either build ID. This is a build marker generated from the registered source closure, not a runtime attestation: a fork that changes source without regenerating its metadata may still report the marker it started from. A health response without `hubBuild` is a legacy Hub and remains otherwise compatible; present but malformed metadata is unrecognized instead of being treated as legacy.
+
+## `GET /api/public/stats`
+
+Cloudflare Worker only. Served without authentication when `PUBLIC_STATS_ENABLED` is `1`, `true`, `yes`, or `on` (case-insensitive, surrounding whitespace ignored); otherwise responds `404`. The response is the shared aggregate with the `devices` list removed and identity-bearing fields stripped: account hashes, labels and plan fields under `limits.providers`, and project identity and session titles under `periods`. Session entries keep their `sessionId` and per-session usage totals. It carries no subscription version, sync-settings revisions, conversation titles or client health. See [the Worker README](../worker/README.md) for deployment settings.
 
 ## `POST /api/ingest`
 
@@ -402,7 +408,7 @@ Codex sessions may carry `waitingForInput: true | false`, derived from outstandi
 
 Returns an SSE stream. Every connection begins with a complete `snapshot` event and receives `: hb` comments every 30 seconds. Reconnecting therefore restores a complete state without relying on an earlier event.
 
-The Node Hub pauses writes to a backpressured connection, including heartbeats, until its transport drains. Updates received while blocked are coalesced into one complete `stats` event with the latest state on recovery; intermediate frames are not queued. Other connections continue independently.
+When a connection is backpressured, both Hubs stop sending it heartbeats and queue later frames in order behind the write in flight, up to about 1 MiB of unsent output. Beyond that budget, frames are skipped until the transport drains, and the skipped updates are recovered with one complete `stats` event holding the latest state the Hub has sent. A large snapshot that takes several seconds to reach a slow client therefore does not turn the small updates that follow it into more snapshots. Other connections continue independently.
 
 Ingests within a 100 ms window are coalesced. If usage, limits, sessions, projects, History, subscriptions, or derived stale/period state changed, the hub sends one complete `stats` event containing the newest state. An ingest that changed only the device's transport timestamps or its client-health observation time (`clientHealth.observedAt`) does not send another complete snapshot.
 
@@ -410,9 +416,9 @@ Clients using `x-token-monitor-stream: 3` retain the freshness protocol. A times
 
 Official widgets request `x-token-monitor-stream: 4`. The Hub sends complete `snapshot` / `stats` events to establish or recover a baseline, then smaller `delta` events for content updates. Pure renewal updates retain compact `freshness` events, which also carry `baseRevision` / `revision` in v4 and advance the same revision chain. A delta contains `{ "type": "delta", "baseRevision": 12, "revision": 13, "patch": [...], "reason": "ingest", "at": "<ISO timestamp>" }`. `patch` uses RFC 6902 `add`, `remove` and `replace`, with RFC 6901 paths relative to the complete `stats` object. Arrays may be replaced as a whole when membership changes. This preserves explicit nulls, zeroes, deleted fields and session/device removals without changing the DeviceRecord upload contract.
 
-Revisioned full events include `revision` alongside `stats`. Each connection must retain its own unmodified baseline independently of REST reads and local presentation overlays. Apply a versioned delta or freshness event only when `baseRevision` matches that baseline and `revision` is exactly one greater. An invalid patch or missing/duplicate/out-of-order revision requires reconnecting for a complete snapshot; do not apply a partial result. Initial/recovery snapshots can be unrevisioned, in which case the next update bootstraps the shared revision with a full `stats` event. Reconnects never depend on a previous connection's baseline. Older Hubs ignore the v4 request and send full snapshots.
+Revisioned full events include `revision` alongside `stats`. Each connection must retain its own unmodified baseline independently of REST reads and local presentation overlays. Apply a versioned delta or freshness event only when `baseRevision` matches that baseline and `revision` is exactly one greater. An invalid patch or missing/duplicate/out-of-order revision requires reconnecting for a complete snapshot; do not apply a partial result. A backpressure recovery snapshot carries the current `revision`, so the next update can be a delta or freshness event. An initial snapshot can be unrevisioned, in which case the next update bootstraps the shared revision with a full `stats` event. Reconnects never depend on a previous connection's baseline. Older Hubs ignore the v4 request and send full snapshots.
 
-The Hub computes/encodes each distinct frame once per fan-out and sends a full frame when a patch would be no smaller. Explicit mutations (including privacy changes, device deletion and shared settings/subscriptions) force full snapshots. Slow Node and Worker connections retain at most one accepted write plus a flag indicating newer state; heartbeats do not accumulate behind it. Once writable, a skipped update is recovered with a complete current snapshot before deltas resume. Other subscribers continue independently. Updates are not rate-limited on healthy connections.
+The Hub computes/encodes each distinct frame once per fan-out and sends a full frame when a patch would be no smaller. Explicit mutations (including privacy changes, device deletion and shared settings/subscriptions) force full snapshots. Slow Node and Worker connections retain the write in flight plus the bounded backlog described above; heartbeats do not accumulate behind it. A skipped update is recovered with one revisioned snapshot, after which deltas resume. Other subscribers continue independently. Updates are not rate-limited on healthy connections.
 
 Clients with stream v2 or without a supported header receive complete `stats` events for each coalesced ingest window. This fallback keeps older widgets correct when they cannot apply session clocks, at the cost of their previous timestamp-only bandwidth saving. A v3 client also works with an older Hub through its existing full-snapshot fallback. The initial `snapshot` and subsequent complete `stats` shapes are unchanged.
 
