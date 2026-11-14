@@ -2,7 +2,7 @@
    <strong>EN</strong> | <a href="./README.zh-CN.md">简</a> | <a href="./README.zh-TW.md">繁</a> | <a href="./README.ko.md">KO</a> | <a href="./README.ja.md">JA</a> | <a href="./README.pt-BR.md">PT</a>
 </p>
 
-> This fork adds [online Antigravity / Codex conversations for Android](docs/session-conversations.md) (read only when requested and never persisted by the Hub), [live session output rates](docs/session-realtime.md), and optional non-blocking [Codex / Antigravity approval alerts](docs/approval-alerts.md) for Android. See [release setup](docs/releasing-fork.md) and [0.93.1 notes](docs/releases/0.93.1.md).
+> This fork adds [online Antigravity / Codex conversations for Android](docs/session-conversations.md) (read only when requested and never persisted by the Hub), [live session output rates](docs/session-realtime.md), and optional non-blocking [Codex / Antigravity approval alerts](docs/approval-alerts.md) for Android. See [release setup](docs/releasing-fork.md) and [0.94.0 notes](docs/releases/0.94.0.md).
 
 <div align="center">
     <img src=".github/assets/app.png" alt="Token Monitor logo" width="120">

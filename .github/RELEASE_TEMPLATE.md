@@ -3,18 +3,21 @@
 ## What's changed
 
 <!-- app-update-notes:en:start -->
+### Added
+- GitHub Copilot supports multiple accounts with separate quotas, sign-in and account refresh.
+### Improved
+- Local startup shows the last collected usage and archived history while the first scan runs. Live updates preserve focus, tooltips and scroll position.
 ### Fixed
-- Probe active Windows named pipes when starting the local approval alert IPC bridge so competing instances cleanly receive `already_owned` instead of opening duplicate pipe listeners.
-- Clean up idle probe timers on socket close and give subprocess hook dispatch assertions headroom on busy Windows runners while still asserting non-blocking return.
+- Node Hub and Cloudflare Worker avoid repeatedly sending full snapshots to slow stream clients. Full-history collection can run for up to five minutes.
 ### Notes
-- Carries forward all 0.93.0 read-only Codex (`PermissionRequest`) and Antigravity (`PreToolUse`) approval alert features; alerts remain disabled by default and confirmations always stay on the desktop.
+- Synced [Javis603/token-monitor v0.92.0](https://github.com/Javis603/token-monitor/releases/tag/v0.92.0) at `001f1d47`. This fork includes online conversations, session output rates and read-only approval alerts for Android.
 <!-- app-update-notes:en:end -->
 ## Download
 
-- **Windows Installer** — [Token-Monitor-Setup-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-Setup-0.93.1.exe) (recommended)
-- **Windows Portable** — [Token-Monitor-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1.exe) (no install required)
-- **Linux amd64** — [Token-Monitor-0.93.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.93.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-x86_64.AppImage)
+- **Windows Installer** — [Token-Monitor-Setup-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-Setup-0.94.0.exe) (recommended)
+- **Windows Portable** — [Token-Monitor-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0.exe) (no install required)
+- **Linux amd64** — [Token-Monitor-0.94.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.94.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-x86_64.AppImage)
 
 <details>
 <summary><strong>First launch and other notes</strong></summary>
@@ -23,7 +26,7 @@
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.93.1-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.93.1-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.94.0-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.94.0-x86_64.AppImage` then run it.
 
 ### Other notes
 
@@ -42,19 +45,22 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 ## 更新内容
 
 <!-- app-update-notes:zh:start -->
+### 新增
+- GitHub Copilot 支持多个账号，可分别查看额度、登录和刷新。
+### 改进
+- 本机启动时在首次扫描期间显示上次采集的用量和归档历史。实时更新保留焦点、提示和滚动位置。
 ### 修复
-- 启动本地审批提醒 IPC 桥时在 Windows 命名管道上先执行存活探测，避免并发实例打开重复监听并确保返回 `already_owned`。
-- 在连接关闭时及时清理读取超时定时器，并在高负载 Windows 运行环境下保持钩子子进程非阻塞时序检查的稳定余量。
+- Node Hub 和 Cloudflare Worker 避免向慢连接的流式客户端反复发送完整快照。全量历史采集最多可运行五分钟。
 ### 说明
-- 包含 0.93.0 全部只读 Codex（`PermissionRequest`）与 Antigravity（`PreToolUse`）审批提醒功能；开关默认关闭，允许与拒绝操作始终留在电脑端完成。
+- 同步 [Javis603/token-monitor v0.92.0](https://github.com/Javis603/token-monitor/releases/tag/v0.92.0)（`001f1d47`）。本分支提供安卓在线对话、会话输出速率和只读审批提醒。
 <!-- app-update-notes:zh:end -->
 
 ## 下载
 
-- **Windows 安装版** — [Token-Monitor-Setup-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-Setup-0.93.1.exe)（推荐）
-- **Windows 便携版** — [Token-Monitor-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1.exe)（免安装）
-- **Linux amd64** — [Token-Monitor-0.93.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.93.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-x86_64.AppImage)
+- **Windows 安装版** — [Token-Monitor-Setup-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-Setup-0.94.0.exe)（推荐）
+- **Windows 便携版** — [Token-Monitor-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0.exe)（免安装）
+- **Linux amd64** — [Token-Monitor-0.94.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.94.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-x86_64.AppImage)
 
 <details>
 <summary><strong>首次启动与其他说明</strong></summary>
@@ -63,7 +69,7 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.93.1-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.93.1-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.94.0-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.94.0-x86_64.AppImage` then run it.
 
 ### 其他说明
 
@@ -78,7 +84,7 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ---
 
 <details>
-<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.93.0...v0.93.1">v0.93.0...v0.93.1</a></summary>
+<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.93.1...v0.94.0">v0.93.1...v0.94.0</a></summary>
 
 <!-- github-generated-release-notes -->
 
@@ -95,19 +101,22 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ## 更新內容
 
 <!-- app-update-notes:zh-TW:start -->
+### 新增
+- GitHub Copilot 支援多個帳號，可分別查看額度、登入和重新整理。
+### 改進
+- 本機啟動時，在首次掃描期間顯示上次收集的用量和封存歷史。即時更新保留焦點、提示和捲動位置。
 ### 修復
-- 啟動本機審批提醒 IPC 橋時於 Windows 命名管道先執行存活探測，確保重複實例返回 `already_owned` 而非建立重複監聽。
-- 連線關閉時即時清除逾時計時器，並為高負載 Windows 測試環境保留足夠的非阻塞行程啟動餘裕。
+- Node Hub 和 Cloudflare Worker 避免向連線較慢的串流用戶端重複傳送完整快照。完整歷史收集最多可執行五分鐘。
 ### 說明
-- 保留 0.93.0 全部 Codex（`PermissionRequest`）與 Antigravity（`PreToolUse`）唯讀審批提醒功能；預設維持關閉，所有允許或拒絕操作均在電腦端完成。
+- 同步 [Javis603/token-monitor v0.92.0](https://github.com/Javis603/token-monitor/releases/tag/v0.92.0)（`001f1d47`）。本分支提供 Android 線上對話、工作階段輸出速率和唯讀審批提醒。
 <!-- app-update-notes:zh-TW:end -->
 
 ## 下載
 
-- **Windows 安裝版** — [Token-Monitor-Setup-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-Setup-0.93.1.exe)（推薦）
-- **Windows 便攜版** — [Token-Monitor-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1.exe)（免安裝）
-- **Linux amd64** — [Token-Monitor-0.93.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.93.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-x86_64.AppImage)
+- **Windows 安裝版** — [Token-Monitor-Setup-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-Setup-0.94.0.exe)（推薦）
+- **Windows 便攜版** — [Token-Monitor-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0.exe)（免安裝）
+- **Linux amd64** — [Token-Monitor-0.94.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.94.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-x86_64.AppImage)
 
 </details>
 
@@ -119,19 +128,22 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ## 업데이트 내용
 
 <!-- app-update-notes:ko:start -->
+### 추가
+- GitHub Copilot에서 여러 계정의 한도 확인, 로그인 및 새로 고침을 각각 지원합니다.
+### 개선
+- 첫 스캔 중에도 마지막으로 수집한 사용량과 보관된 기록을 표시합니다. 실시간 업데이트는 포커스, 툴팁 및 스크롤 위치를 유지합니다.
 ### 수정
-- 로컬 승인 알림 IPC 브리지 시작 시 Windows 명명된 파이프의 활성 상태를 먼저 확인해 중복 인스턴스가 리스너를 겹쳐 열지 않고 `already_owned`를 반환하도록 수정했습니다.
-- 소켓 종료 시 대기 타이머를 즉시 정리하고 부하가 높은 Windows 실행 환경에서도 비차단 훅 프로세스 검증이 안정적으로 통과하도록 여유 시간을 조정했습니다.
+- Node Hub와 Cloudflare Worker는 느린 스트림 클라이언트에 전체 스냅샷을 반복해서 보내지 않습니다. 전체 기록 수집은 최대 5분 동안 실행됩니다.
 ### 참고
-- 0.93.0의 모든 Codex(`PermissionRequest`) 및 Antigravity(`PreToolUse`) 읽기 전용 승인 알림 기능을 포함하며, 기본값은 비활성화이고 허용/거부 결정은 항상 데스크톱에서 진행됩니다.
+- [Javis603/token-monitor v0.92.0](https://github.com/Javis603/token-monitor/releases/tag/v0.92.0)의 `001f1d47`을 반영했습니다. 이 포크는 Android의 온라인 대화, 세션 출력 속도 및 읽기 전용 승인 알림을 제공합니다.
 <!-- app-update-notes:ko:end -->
 
 ## 다운로드
 
-- **Windows 설치 버전** — [Token-Monitor-Setup-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-Setup-0.93.1.exe) (권장)
-- **Windows 포터블 버전** — [Token-Monitor-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1.exe) (설치 필요 없음)
-- **Linux amd64** — [Token-Monitor-0.93.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.93.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-x86_64.AppImage)
+- **Windows 설치 버전** — [Token-Monitor-Setup-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-Setup-0.94.0.exe) (권장)
+- **Windows 포터블 버전** — [Token-Monitor-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0.exe) (설치 필요 없음)
+- **Linux amd64** — [Token-Monitor-0.94.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.94.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-x86_64.AppImage)
 
 </details>
 
@@ -143,19 +155,22 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ## 更新内容
 
 <!-- app-update-notes:ja:start -->
+### 追加
+- GitHub Copilot の複数アカウントに対応し、アカウントごとに使用量上限を確認し、ログインや更新ができます。
+### 改善
+- 初回スキャン中も前回収集した使用量とアーカイブ済みの履歴を表示します。リアルタイム更新ではフォーカス、ツールチップ、スクロール位置を維持します。
 ### 修正
-- ローカル承認通知 IPC ブリッジの起動時に Windows 名前付きパイプの生存確認を行い、競合インスタンスが重複リスナーを開かず `already_owned` を返すよう修正しました。
-- ソケット切断時に待機タイマーを確実に解放し、高負荷な Windows 環境でもサブプロセスフックの非ブロッキング検証が安定して動作するよう調整しました。
+- Node Hub と Cloudflare Worker は、低速なストリーム接続に完全なスナップショットを繰り返し送信しません。全履歴の収集は最大5分間実行されます。
 ### 注意
-- 0.93.0 の Codex（`PermissionRequest`）および Antigravity（`PreToolUse`）向け読み取り専用承認通知機能をすべて引き継ぎます。既定では無効であり、許可・拒否の操作は常にデスクトップ側で行います。
+- [Javis603/token-monitor v0.92.0](https://github.com/Javis603/token-monitor/releases/tag/v0.92.0) の `001f1d47` を取り込みました。このフォークは Android のオンライン会話、セッション出力速度、読み取り専用の承認通知を提供します。
 <!-- app-update-notes:ja:end -->
 
 ## ダウンロード
 
-- **Windows インストーラー** — [Token-Monitor-Setup-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-Setup-0.93.1.exe)（推奨）
-- **Windows ポータブル版** — [Token-Monitor-0.93.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1.exe)（インストール不要）
-- **Linux amd64** — [Token-Monitor-0.93.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.93.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.93.1/Token-Monitor-0.93.1-x86_64.AppImage)
+- **Windows インストーラー** — [Token-Monitor-Setup-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-Setup-0.94.0.exe)（推奨）
+- **Windows ポータブル版** — [Token-Monitor-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0.exe)（インストール不要）
+- **Linux amd64** — [Token-Monitor-0.94.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.94.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-x86_64.AppImage)
 
 </details>
 
