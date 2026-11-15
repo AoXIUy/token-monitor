@@ -4,20 +4,33 @@
 
 <!-- app-update-notes:en:start -->
 ### Added
-- GitHub Copilot supports multiple accounts with separate quotas, sign-in and account refresh.
+- **Qoder international usage:** Tracks the international Qoder edition alongside Qoder CN. Both appear in one Qoder row, with an option to show the versions separately.
+- **Saved Hubs:** Saves several Hubs, each with its own name, URL, secret and Device ID, and switches between them from the sync status card without retyping.
+- **Mica backdrops:** Windows Glass Style adds Mica and Mica Alt for the widget and quota history windows on Windows 11 22H2 or later. Older Windows builds keep using Acrylic.
+
+### Changed
+- **Qoder CN usage:** Usage that exists only in the legacy local database is no longer counted. Project transcripts remain the source.
+
 ### Improved
-- Local startup shows the last collected usage and archived history while the first scan runs. Live updates preserve focus, tooltips and scroll position.
+- **Limits diagnostics:** The diagnostics report names the stage and cause of a quota failure, such as a timeout, a challenge page or an HTTP error.
+
 ### Fixed
-- Node Hub and Cloudflare Worker avoid repeatedly sending full snapshots to slow stream clients. Full-history collection can run for up to five minutes.
+- **Windows main window:** Reopening the window no longer flashes an empty backdrop or an opaque grey Acrylic background.
+- **Hub connection:** A Hub that showed Connected while usage and quota stopped updating, for example after a Worker redeploy, now recovers on its own.
+- **Multi-device quota history:** Accounts watched from several devices no longer show a broken trend line or usage that is “Not allocated to time buckets”.
+- **Qoder quota history:** History stays on one timeline when the Qoder cookie refreshes or the account signs in again.
+- **OMP totals:** Month and all-time totals no longer double-count OMP forks recorded before the Pi and OMP split.
+- **Project ranking:** Projects are ranked by token usage instead of cost, matching the totals and bars shown.
+
 ### Notes
-- Synced [Javis603/token-monitor v0.92.0](https://github.com/Javis603/token-monitor/releases/tag/v0.92.0) at `001f1d47`. This fork includes online conversations, session output rates and read-only approval alerts for Android.
+- Synced [Javis603/token-monitor v0.93.0](https://github.com/Javis603/token-monitor/releases/tag/v0.93.0) at `a88c6950`. This fork includes online conversations, session output rates and read-only approval alerts for Android.
 <!-- app-update-notes:en:end -->
 ## Download
 
-- **Windows Installer** — [Token-Monitor-Setup-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-Setup-0.94.0.exe) (recommended)
-- **Windows Portable** — [Token-Monitor-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0.exe) (no install required)
-- **Linux amd64** — [Token-Monitor-0.94.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.94.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-x86_64.AppImage)
+- **Windows Installer** — [Token-Monitor-Setup-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-Setup-0.95.0.exe) (recommended)
+- **Windows Portable** — [Token-Monitor-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0.exe) (no install required)
+- **Linux amd64** — [Token-Monitor-0.95.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.95.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-x86_64.AppImage)
 
 <details>
 <summary><strong>First launch and other notes</strong></summary>
@@ -26,7 +39,7 @@
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.94.0-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.94.0-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.95.0-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.95.0-x86_64.AppImage` then run it.
 
 ### Other notes
 
@@ -46,21 +59,34 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 <!-- app-update-notes:zh:start -->
 ### 新增
-- GitHub Copilot 支持多个账号，可分别查看额度、登录和刷新。
+- **Qoder 国际版用量：** 支持追踪 Qoder 国际版，与 Qoder CN 合并显示为一个 Qoder 行，也可选择分开显示版本。
+- **多个 Hub：** 可保存多个 Hub，各自拥有名称、URL、密钥和设备 ID，并在同步状态卡片中一键切换，无需重新输入。
+- **Mica 背景：** Windows 玻璃样式新增 Mica 与 Mica Alt，适用于小组件和额度历史窗口，需要 Windows 11 22H2 或更高版本；较旧的 Windows 继续使用 Acrylic。
+
+### 变更
+- **Qoder CN 用量：** 仅存在于旧版本地数据库中的用量不再计入，项目会话记录仍是统计来源。
+
 ### 改进
-- 本机启动时在首次扫描期间显示上次采集的用量和归档历史。实时更新保留焦点、提示和滚动位置。
+- **额度诊断：** 诊断报告会指出额度失败所处的阶段和原因，例如超时、验证页面或 HTTP 错误。
+
 ### 修复
-- Node Hub 和 Cloudflare Worker 避免向慢连接的流式客户端反复发送完整快照。全量历史采集最多可运行五分钟。
+- **Windows 主窗口：** 重新打开窗口时，不再闪现空白背景或不透明的灰色 Acrylic 背景。
+- **Hub 连接：** Hub 显示“已连接”但用量和额度停止更新的问题（例如 Worker 重新部署之后）现在会自动恢复。
+- **多设备额度历史：** 从多台设备监看同一账号时，不再出现中断的趋势线或“未能分配至时段”的用量。
+- **Qoder 额度历史：** Qoder Cookie 刷新或账号重新登录后，历史仍保持在同一条时间线上。
+- **OMP 合计：** 本月与总计用量不再重复计算在 Pi 與 OMP 拆分之前记录的 OMP 分支会话。
+- **项目排序：** 项目改为按 Token 用量排序而非费用，与显示的合计和条形图一致。
+
 ### 说明
-- 同步 [Javis603/token-monitor v0.92.0](https://github.com/Javis603/token-monitor/releases/tag/v0.92.0)（`001f1d47`）。本分支提供安卓在线对话、会话输出速率和只读审批提醒。
+- 同步 [Javis603/token-monitor v0.93.0](https://github.com/Javis603/token-monitor/releases/tag/v0.93.0)（`a88c6950`）。本分支提供安卓在线对话、会话输出速率和只读审批提醒。
 <!-- app-update-notes:zh:end -->
 
 ## 下载
 
-- **Windows 安装版** — [Token-Monitor-Setup-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-Setup-0.94.0.exe)（推荐）
-- **Windows 便携版** — [Token-Monitor-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0.exe)（免安装）
-- **Linux amd64** — [Token-Monitor-0.94.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.94.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-x86_64.AppImage)
+- **Windows 安装版** — [Token-Monitor-Setup-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-Setup-0.95.0.exe)（推荐）
+- **Windows 便携版** — [Token-Monitor-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0.exe)（免安装）
+- **Linux amd64** — [Token-Monitor-0.95.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.95.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-x86_64.AppImage)
 
 <details>
 <summary><strong>首次启动与其他说明</strong></summary>
@@ -69,7 +95,7 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.94.0-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.94.0-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.95.0-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.95.0-x86_64.AppImage` then run it.
 
 ### 其他说明
 
@@ -84,7 +110,7 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ---
 
 <details>
-<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.93.1...v0.94.0">v0.93.1...v0.94.0</a></summary>
+<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.94.0...v0.95.0">v0.94.0...v0.95.0</a></summary>
 
 <!-- github-generated-release-notes -->
 
@@ -102,21 +128,34 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 <!-- app-update-notes:zh-TW:start -->
 ### 新增
-- GitHub Copilot 支援多個帳號，可分別查看額度、登入和重新整理。
+- **Qoder 國際版用量：** 支援追蹤 Qoder 國際版，與 Qoder CN 合併顯示為單一 Qoder 列，也可選擇分開顯示版本。
+- **多個 Hub：** 可儲存多個 Hub，各自擁有名稱、URL、金鑰與裝置 ID，並在同步狀態卡片中一鍵切換，無需重新輸入。
+- **Mica 背景：** Windows 玻璃樣式新增 Mica 與 Mica Alt，適用於小工具與額度歷史視窗，需要 Windows 11 22H2 或更新版本；較舊的 Windows 繼續使用 Acrylic。
+
+### 變更
+- **Qoder CN 用量：** 僅存在於舊版本機資料庫中的用量不再計入，專案對話紀錄仍是統計來源。
+
 ### 改進
-- 本機啟動時，在首次掃描期間顯示上次收集的用量和封存歷史。即時更新保留焦點、提示和捲動位置。
+- **額度診斷：** 診斷報告會指出額度失敗所處的階段與原因，例如逾時、驗證頁面或 HTTP 錯誤。
+
 ### 修復
-- Node Hub 和 Cloudflare Worker 避免向連線較慢的串流用戶端重複傳送完整快照。完整歷史收集最多可執行五分鐘。
+- **Windows 主視窗：** 重新開啟視窗時，不再閃現空白背景或不透明的灰色 Acrylic 背景。
+- **Hub 連線：** Hub 顯示「已連線」但用量與額度停止更新的問題（例如 Worker 重新部署之後）現在會自動恢復。
+- **多裝置額度歷史：** 從多台裝置監看同一帳號時，不再出現中斷的趨勢線或「未能分配至時段」的用量。
+- **Qoder 額度歷史：** Qoder Cookie 更新或帳號重新登入後，歷史仍維持在同一條時間線上。
+- **OMP 合計：** 本月與總計用量不再重複計算在 Pi 與 OMP 拆分之前記錄的 OMP 分支工作階段。
+- **專案排序：** 專案改為依 Token 用量排序而非費用，與顯示的合計和長條圖一致。
+
 ### 說明
-- 同步 [Javis603/token-monitor v0.92.0](https://github.com/Javis603/token-monitor/releases/tag/v0.92.0)（`001f1d47`）。本分支提供 Android 線上對話、工作階段輸出速率和唯讀審批提醒。
+- 同步 [Javis603/token-monitor v0.93.0](https://github.com/Javis603/token-monitor/releases/tag/v0.93.0)（`a88c6950`）。本分支提供 Android 線上對話、工作階段輸出速率和唯讀審批提醒。
 <!-- app-update-notes:zh-TW:end -->
 
 ## 下載
 
-- **Windows 安裝版** — [Token-Monitor-Setup-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-Setup-0.94.0.exe)（推薦）
-- **Windows 便攜版** — [Token-Monitor-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0.exe)（免安裝）
-- **Linux amd64** — [Token-Monitor-0.94.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.94.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-x86_64.AppImage)
+- **Windows 安裝版** — [Token-Monitor-Setup-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-Setup-0.95.0.exe)（推薦）
+- **Windows 便攜版** — [Token-Monitor-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0.exe)（免安裝）
+- **Linux amd64** — [Token-Monitor-0.95.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.95.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-x86_64.AppImage)
 
 </details>
 
@@ -129,21 +168,34 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 <!-- app-update-notes:ko:start -->
 ### 추가
-- GitHub Copilot에서 여러 계정의 한도 확인, 로그인 및 새로 고침을 각각 지원합니다.
+- **Qoder 국제 버전 사용량:** Qoder 국제 버전을 Qoder CN과 함께 추적합니다. 두 버전은 하나의 Qoder 행으로 표시되며, 버전별로 나누어 표시할 수도 있습니다.
+- **여러 Hub 저장:** 이름, URL, 시크릿, 기기 ID가 각각 있는 Hub를 여러 개 저장하고, 동기화 상태 카드에서 다시 입력하지 않고 바로 전환할 수 있습니다.
+- **Mica 배경:** Windows 글래스 스타일에 Mica와 Mica Alt가 추가되어 위젯과 한도 기록 창에 적용할 수 있습니다. Windows 11 22H2 이상이 필요하며, 이전 Windows에서는 계속 Acrylic을 사용합니다.
+
+### 변경
+- **Qoder CN 사용량:** 예전 로컬 데이터베이스에만 있는 사용량은 더 이상 집계되지 않으며, 프로젝트 대화 기록이 집계 기준으로 유지됩니다.
+
 ### 개선
-- 첫 스캔 중에도 마지막으로 수집한 사용량과 보관된 기록을 표시합니다. 실시간 업데이트는 포커스, 툴팁 및 스크롤 위치를 유지합니다.
+- **한도 진단:** 진단 보고서가 시간 초과, 인증 확인 페이지, HTTP 오류 등 할당량 조회 실패의 단계와 원인을 알려 줍니다.
+
 ### 수정
-- Node Hub와 Cloudflare Worker는 느린 스트림 클라이언트에 전체 스냅샷을 반복해서 보내지 않습니다. 전체 기록 수집은 최대 5분 동안 실행됩니다.
+- **Windows 메인 창:** 창을 다시 열 때 빈 배경이 깜빡이거나 Acrylic 배경이 불투명한 회색으로 보이던 문제를 수정했습니다.
+- **Hub 연결:** Hub가 연결됨으로 표시되는데 사용량과 한도가 갱신되지 않던 문제(예: Worker 재배포 이후)가 이제 자동으로 복구됩니다.
+- **여러 기기의 한도 기록:** 여러 기기에서 같은 계정을 볼 때 추세선이 끊기거나 “시간 구간에 배분되지 않은 양”이 나타나던 문제를 수정했습니다.
+- **Qoder 한도 기록:** Qoder 쿠키가 갱신되거나 계정에 다시 로그인해도 기록이 하나의 타임라인으로 유지됩니다.
+- **OMP 합계:** Pi와 OMP가 분리되기 전에 기록된 OMP 포크가 이번 달과 전체 합계에 중복 집계되던 문제를 수정했습니다.
+- **프로젝트 정렬:** 프로젝트를 비용이 아닌 토큰 사용량 순으로 정렬해, 표시되는 합계와 막대와 일치합니다.
+
 ### 참고
-- [Javis603/token-monitor v0.92.0](https://github.com/Javis603/token-monitor/releases/tag/v0.92.0)의 `001f1d47`을 반영했습니다. 이 포크는 Android의 온라인 대화, 세션 출력 속도 및 읽기 전용 승인 알림을 제공합니다.
+- [Javis603/token-monitor v0.93.0](https://github.com/Javis603/token-monitor/releases/tag/v0.93.0)의 `a88c6950`을 반영했습니다. 이 포크는 Android의 온라인 대화, 세션 출력 속도 및 읽기 전용 승인 알림을 제공합니다.
 <!-- app-update-notes:ko:end -->
 
 ## 다운로드
 
-- **Windows 설치 버전** — [Token-Monitor-Setup-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-Setup-0.94.0.exe) (권장)
-- **Windows 포터블 버전** — [Token-Monitor-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0.exe) (설치 필요 없음)
-- **Linux amd64** — [Token-Monitor-0.94.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.94.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-x86_64.AppImage)
+- **Windows 설치 버전** — [Token-Monitor-Setup-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-Setup-0.95.0.exe) (권장)
+- **Windows 포터블 버전** — [Token-Monitor-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0.exe) (설치 필요 없음)
+- **Linux amd64** — [Token-Monitor-0.95.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.95.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-x86_64.AppImage)
 
 </details>
 
@@ -156,21 +208,34 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 <!-- app-update-notes:ja:start -->
 ### 追加
-- GitHub Copilot の複数アカウントに対応し、アカウントごとに使用量上限を確認し、ログインや更新ができます。
+- **Qoder国際版の使用量:** Qoder国際版をQoder CNと並べて追跡します。両方が1つのQoder行に表示され、バージョン別に分けて表示することもできます。
+- **複数Hubの保存:** 名前、URL、シークレット、デバイスIDを持つHubを複数保存し、同期ステータスカードから入力し直さずに切り替えられます。
+- **Mica背景:** WindowsガラススタイルにMicaとMica Altを追加しました。ウィジェットと上限履歴のウィンドウで使え、Windows 11 22H2以降が必要です。それより前のWindowsでは引き続きAcrylicを使用します。
+
+### 変更
+- **Qoder CNの使用量:** 旧ローカルデータベースにしかない使用量は集計されなくなりました。集計元はプロジェクトの会話記録です。
+
 ### 改善
-- 初回スキャン中も前回収集した使用量とアーカイブ済みの履歴を表示します。リアルタイム更新ではフォーカス、ツールチップ、スクロール位置を維持します。
+- **上限の診断:** 診断レポートに、タイムアウト、確認ページ、HTTPエラーなど、上限取得の失敗が起きた段階と原因が表示されます。
+
 ### 修正
-- Node Hub と Cloudflare Worker は、低速なストリーム接続に完全なスナップショットを繰り返し送信しません。全履歴の収集は最大5分間実行されます。
+- **Windowsのメインウィンドウ:** ウィンドウを開き直したときに、空の背景が一瞬表示されたり、Acrylic背景が不透明なグレーになったりする問題を修正しました。
+- **Hub接続:** Hubが接続済みと表示されているのに使用量と上限が更新されなくなる問題（Workerの再デプロイ後など）から、自動で回復するようになりました。
+- **複数端末の上限履歴:** 複数の端末から同じアカウントを監視しても、推移の線が途切れたり、「時間帯に配分できない変化」が表示されたりしなくなりました。
+- **Qoderの上限履歴:** QoderのCookieが更新されたりアカウントに再ログインしたりしても、履歴が1本のタイムラインにまとまったままになります。
+- **OMPの合計:** PiとOMPの分離前に記録されたOMPのフォークが、今月と合計で二重に集計される問題を修正しました。
+- **プロジェクトの並び順:** プロジェクトをコストではなくトークン使用量の順に並べ、表示される合計やバーと一致するようにしました。
+
 ### 注意
-- [Javis603/token-monitor v0.92.0](https://github.com/Javis603/token-monitor/releases/tag/v0.92.0) の `001f1d47` を取り込みました。このフォークは Android のオンライン会話、セッション出力速度、読み取り専用の承認通知を提供します。
+- [Javis603/token-monitor v0.93.0](https://github.com/Javis603/token-monitor/releases/tag/v0.93.0) の `a88c6950` を取り込みました。このフォークは Android のオンライン会話、セッション出力速度、読み取り専用の承認通知を提供します。
 <!-- app-update-notes:ja:end -->
 
 ## ダウンロード
 
-- **Windows インストーラー** — [Token-Monitor-Setup-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-Setup-0.94.0.exe)（推奨）
-- **Windows ポータブル版** — [Token-Monitor-0.94.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0.exe)（インストール不要）
-- **Linux amd64** — [Token-Monitor-0.94.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.94.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.94.0/Token-Monitor-0.94.0-x86_64.AppImage)
+- **Windows インストーラー** — [Token-Monitor-Setup-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-Setup-0.95.0.exe)（推奨）
+- **Windows ポータブル版** — [Token-Monitor-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0.exe)（インストール不要）
+- **Linux amd64** — [Token-Monitor-0.95.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.95.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-x86_64.AppImage)
 
 </details>
 
