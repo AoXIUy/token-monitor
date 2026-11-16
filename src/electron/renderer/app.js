@@ -552,6 +552,20 @@ Object.assign(els, {
   approvalAlertsMatcherInput: document.getElementById('approvalAlertsMatcherInput'),
   approvalAlertsMatcherSave: document.getElementById('approvalAlertsMatcherSave'),
   approvalAlertsHookError: document.getElementById('approvalAlertsHookError'),
+  reportsSettingsGroup: document.getElementById('reportsSettingsGroup'),
+  reportsHostRequiredNote: document.getElementById('reportsHostRequiredNote'),
+  reportsHostControls: document.getElementById('reportsHostControls'),
+  reportsScheduleList: document.getElementById('reportsScheduleList'),
+  reportsEnabledInput: document.getElementById('reportsEnabledInput'),
+  reportsDailyInput: document.getElementById('reportsDailyInput'),
+  reportsWeeklyInput: document.getElementById('reportsWeeklyInput'),
+  reportsMonthlyInput: document.getElementById('reportsMonthlyInput'),
+  reportsDirLabel: document.getElementById('reportsDirLabel'),
+  reportsPickDirButton: document.getElementById('reportsPickDirButton'),
+  reportsOpenDirButton: document.getElementById('reportsOpenDirButton'),
+  reportsActionsRow: document.getElementById('reportsActionsRow'),
+  reportsGenerateNowButton: document.getElementById('reportsGenerateNowButton'),
+  reportsStatusText: document.getElementById('reportsStatusText'),
   collectionCadenceInput: document.getElementById('collectionCadenceInput'),
   sessionUsageArchiveInput: document.getElementById('sessionUsageArchiveInput'),
   sessionUsageArchiveStatus: document.getElementById('sessionUsageArchiveStatus'),
@@ -9341,6 +9355,7 @@ function syncHubModeUi() {
   renderHubBuildStatus();
   syncHubConnectionUi();
   syncHubSaveButton();
+  if (typeof renderReportsSettings === 'function') renderReportsSettings();
 }
 
 function renderIcloudStatus() {
@@ -14615,6 +14630,140 @@ els.exportNowButton?.addEventListener('click', async () => {
     }
   } finally {
     els.exportNowButton.disabled = false;
+  }
+});
+
+let reportsGenerating = false;
+let reportsStatusFeedback = null;
+
+function formatReportsError(errorCode) {
+  if (errorCode === 'hub_required') return t('settings.reports.hubRequiredNote');
+  if (errorCode === 'hub_not_running') return t('settings.reports.hubNotRunning');
+  return String(errorCode || t('settings.reports.generateFailed'));
+}
+
+function renderReportsSettings() {
+  const mode = state.settings?.hubMode || 'local';
+  const isHost = mode === 'host';
+  const isClient = mode === 'client';
+  const hubCapable = isHost || isClient;
+  const reportsEnabled = state.settings?.reportsEnabled === true;
+  if (els.reportsHostRequiredNote) els.reportsHostRequiredNote.hidden = hubCapable;
+  if (els.reportsHostControls) {
+    els.reportsHostControls.hidden = !isHost;
+    els.reportsHostControls.inert = !isHost;
+  }
+  if (els.reportsActionsRow) {
+    els.reportsActionsRow.hidden = !hubCapable;
+    els.reportsActionsRow.inert = !hubCapable;
+  }
+  if (els.reportsEnabledInput) els.reportsEnabledInput.checked = reportsEnabled;
+  if (els.reportsDailyInput) {
+    els.reportsDailyInput.checked = state.settings?.reportsDaily !== false;
+    els.reportsDailyInput.disabled = !reportsEnabled;
+  }
+  if (els.reportsWeeklyInput) {
+    els.reportsWeeklyInput.checked = state.settings?.reportsWeekly !== false;
+    els.reportsWeeklyInput.disabled = !reportsEnabled;
+  }
+  if (els.reportsMonthlyInput) {
+    els.reportsMonthlyInput.checked = state.settings?.reportsMonthly !== false;
+    els.reportsMonthlyInput.disabled = !reportsEnabled;
+  }
+  if (els.reportsScheduleList) els.reportsScheduleList.classList.toggle('is-disabled', !reportsEnabled);
+  const reportsDir = String(state.settings?.reportsDir || '').trim();
+  if (els.reportsDirLabel) els.reportsDirLabel.textContent = reportsDir || t('settings.reports.defaultFolder');
+  if (els.reportsOpenDirButton) els.reportsOpenDirButton.disabled = !isHost;
+  if (els.reportsGenerateNowButton) {
+    els.reportsGenerateNowButton.disabled = reportsGenerating || !hubCapable;
+    els.reportsGenerateNowButton.textContent = reportsGenerating
+      ? t('settings.reports.generating')
+      : t('settings.reports.generateNow');
+  }
+  if (els.reportsStatusText) {
+    const activeFeedback = reportsStatusFeedback && reportsStatusFeedback.mode === mode ? reportsStatusFeedback : null;
+    if (activeFeedback?.kind === 'error') {
+      els.reportsStatusText.textContent = activeFeedback.message;
+    } else if (activeFeedback?.kind === 'generated') {
+      els.reportsStatusText.textContent = t('settings.reports.generatedCount', { count: activeFeedback.count });
+    } else if (isHost) {
+      const port = Number(state.settings?.hubHostPort || 17321);
+      els.reportsStatusText.textContent = t('settings.reports.mcpEndpoint', {
+        url: `http://127.0.0.1:${port}/api/mcp`
+      });
+    } else if (isClient) {
+      els.reportsStatusText.textContent = t('settings.reports.clientHint');
+    } else {
+      els.reportsStatusText.textContent = '';
+    }
+  }
+}
+
+for (const [elKey, settingKey, defaultValue] of [
+  ['reportsEnabledInput', 'reportsEnabled', false],
+  ['reportsDailyInput', 'reportsDaily', true],
+  ['reportsWeeklyInput', 'reportsWeekly', true],
+  ['reportsMonthlyInput', 'reportsMonthly', true]
+]) {
+  els[elKey]?.addEventListener('change', async () => {
+    const input = els[elKey];
+    input.disabled = true;
+    reportsStatusFeedback = null;
+    try {
+      await saveSettings({ [settingKey]: input.checked });
+    } catch (_) {
+      input.checked = defaultValue ? state.settings?.[settingKey] !== false : state.settings?.[settingKey] === true;
+    } finally {
+      input.disabled = false;
+      renderReportsSettings();
+    }
+  });
+}
+els.reportsPickDirButton?.addEventListener('click', async () => {
+  const result = await window.tokenMonitor?.pickReportsDir?.();
+  if (result?.ok && result.dir) {
+    reportsStatusFeedback = null;
+    await saveSettings({ reportsDir: result.dir });
+  }
+});
+els.reportsOpenDirButton?.addEventListener('click', async () => {
+  const mode = state.settings?.hubMode || 'local';
+  const result = await window.tokenMonitor?.openReportsDir?.();
+  if (result && !result.ok) {
+    reportsStatusFeedback = {
+      kind: 'error',
+      mode,
+      message: result.error === 'hub_required' ? t('settings.reports.hubRequiredNote') : (result.error || t('settings.reports.openFailed'))
+    };
+    renderReportsSettings();
+  }
+});
+els.reportsGenerateNowButton?.addEventListener('click', async () => {
+  const mode = state.settings?.hubMode || 'local';
+  reportsGenerating = true;
+  reportsStatusFeedback = null;
+  renderReportsSettings();
+  try {
+    const result = await window.tokenMonitor?.generateReportsNow?.({ force: true });
+    if (result?.ok) {
+      const count = Array.isArray(result.reports) ? result.reports.length : 0;
+      reportsStatusFeedback = { kind: 'generated', mode, count };
+    } else {
+      reportsStatusFeedback = {
+        kind: 'error',
+        mode,
+        message: formatReportsError(result?.error)
+      };
+    }
+  } catch (error) {
+    reportsStatusFeedback = {
+      kind: 'error',
+      mode,
+      message: error?.message || t('settings.reports.generateFailed')
+    };
+  } finally {
+    reportsGenerating = false;
+    renderReportsSettings();
   }
 });
 els.resetClientDisplayOrderButton?.addEventListener('click', resetClientDisplayOrder);

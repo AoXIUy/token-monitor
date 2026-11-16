@@ -1736,6 +1736,46 @@
                 </div>
               </div>
             </div>
+            <div id="reportsSettingsGroup" class="settings-subgroup settings-export-block">
+              <div class="settings-group-header"><span data-i18n="settings.reports.title">Project usage reports</span></div>
+              <p id="reportsHostRequiredNote" class="settings-note" data-i18n="settings.reports.hubRequiredNote" hidden>Available when hosting or connected to a Main Hub.</p>
+              <div id="reportsHostControls" class="export-auto-details">
+                <label class="checkbox-label settings-item">
+                  <span class="settings-item-text">
+                    <span class="settings-item-title" data-i18n="settings.reports.enabled">Project usage reports (Main Hub)</span>
+                  </span>
+                  <input id="reportsEnabledInput" type="checkbox" aria-describedby="reportsEnabledNote" />
+                  <span id="reportsEnabledNote" class="settings-note settings-item-desc" data-i18n="settings.reports.enabledDesc">Automatically generate JSON and Markdown project reports on the Main Hub and expose them via /api/mcp.</span>
+                </label>
+                <div id="reportsScheduleList" class="settings-nested-list">
+                  <label class="checkbox-label settings-item">
+                    <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.daily">Daily</span></span>
+                    <input id="reportsDailyInput" type="checkbox" checked />
+                  </label>
+                  <label class="checkbox-label settings-item">
+                    <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.weekly">Weekly</span></span>
+                    <input id="reportsWeeklyInput" type="checkbox" checked />
+                  </label>
+                  <label class="checkbox-label settings-item">
+                    <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.monthly">Monthly</span></span>
+                    <input id="reportsMonthlyInput" type="checkbox" checked />
+                  </label>
+                </div>
+                <div class="export-dir-row">
+                  <span id="reportsDirLabel" class="export-dir-path"></span>
+                  <div class="settings-actions export-dir-actions">
+                    <button id="reportsPickDirButton" type="button" data-i18n="settings.reports.pickDir">Choose folder…</button>
+                    <button id="reportsOpenDirButton" type="button" data-i18n="settings.reports.openDir">Open folder</button>
+                  </div>
+                </div>
+              </div>
+              <div id="reportsActionsRow" class="export-manual-row">
+                <span id="reportsStatusText" class="settings-note export-manual-note"></span>
+                <div class="settings-actions">
+                  <button id="reportsGenerateNowButton" type="button" data-i18n="settings.reports.generateNow">Generate now</button>
+                </div>
+              </div>
+            </div>
             <div id="syncDevicePanel" class="sync-panel" hidden>
               <div class="sync-panel-heading">
                 <span data-i18n="settings.sync.panel.devices">Devices</span>

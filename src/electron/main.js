@@ -666,6 +666,11 @@ function defaultSettings() {
     sessionConversationsEnabled: parseBoolean(process.env.TOKEN_MONITOR_SESSION_CONVERSATIONS, true),
     approvalAlertsEnabled: parseBoolean(process.env.TOKEN_MONITOR_APPROVAL_ALERTS, false),
     approvalAlertsAntigravityMatcher: normalizeAntigravityMatcher(process.env.TOKEN_MONITOR_APPROVAL_ALERTS_MATCHER),
+    reportsEnabled: parseBoolean(process.env.TOKEN_MONITOR_REPORTS_ENABLED, false),
+    reportsDaily: parseBoolean(process.env.TOKEN_MONITOR_REPORTS_DAILY, true),
+    reportsWeekly: parseBoolean(process.env.TOKEN_MONITOR_REPORTS_WEEKLY, true),
+    reportsMonthly: parseBoolean(process.env.TOKEN_MONITOR_REPORTS_MONTHLY, true),
+    reportsDir: String(process.env.TOKEN_MONITOR_REPORTS_DIR || '').trim(),
     syncContentState: normalizeSyncContentState(null),
     windowBehavior,
     alwaysOnTop: windowBehavior === 'floating',
@@ -2876,6 +2881,11 @@ function readSettings() {
     merged.sessionConversationsEnabled = parseBoolean(merged.sessionConversationsEnabled, true);
     merged.approvalAlertsEnabled = parseBoolean(merged.approvalAlertsEnabled, false);
     merged.approvalAlertsAntigravityMatcher = normalizeAntigravityMatcher(merged.approvalAlertsAntigravityMatcher);
+    merged.reportsEnabled = parseBoolean(merged.reportsEnabled, false);
+    merged.reportsDaily = parseBoolean(merged.reportsDaily, true);
+    merged.reportsWeekly = parseBoolean(merged.reportsWeekly, true);
+    merged.reportsMonthly = parseBoolean(merged.reportsMonthly, true);
+    merged.reportsDir = typeof merged.reportsDir === 'string' ? merged.reportsDir.trim() : '';
     merged.modelAliasGrouping = normalizeModelAliasGrouping(merged.modelAliasGrouping);
     merged.textSize = fontSettingsApi.normalizeTextSize(merged.textSize);
     merged.interfaceFontFamily = fontSettingsApi.normalizeFontFamily(merged.interfaceFontFamily);
@@ -3719,6 +3729,27 @@ function hubDataFile() {
   return path.join(app.getPath('userData'), 'hub-devices.json');
 }
 
+function reportsConfigFromSettings(source = settings) {
+  return {
+    enabled: source?.reportsEnabled === true,
+    daily: source?.reportsDaily !== false,
+    weekly: source?.reportsWeekly !== false,
+    monthly: source?.reportsMonthly !== false
+  };
+}
+
+function defaultReportsDir() {
+  return path.join(path.dirname(hubDataFile()), 'data', 'reports');
+}
+
+function effectiveReportsDir() {
+  const configured = String(settings?.reportsDir || '').trim();
+  if (configured) return configured;
+  const hubDir = embeddedHub?.hub?.getReportConfig?.()?.reportsDir;
+  if (typeof hubDir === 'string' && hubDir.trim()) return hubDir.trim();
+  return defaultReportsDir();
+}
+
 function sendHubPush(payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try { mainWindow.webContents.send('hub:push', payload); } catch (_) {}
@@ -3780,6 +3811,8 @@ async function startEmbeddedHub() {
       syncSessionTitles: settings.hubSyncSessionTitles === true,
       sessionConversations: settings.sessionConversationsEnabled !== false,
       approvalAlerts: settings.approvalAlertsEnabled === true,
+      reports: reportsConfigFromSettings(settings),
+      reportsDir: settings.reportsDir || '',
       dataFile: hubDataFile(),
       logger: { error: (err) => console.log(`[hub] ${err?.message || err}`) }
     });
@@ -8591,6 +8624,13 @@ app.whenReady().then(() => {
       approvalAlertsAntigravityMatcher: normalizeAntigravityMatcher(
         patch.approvalAlertsAntigravityMatcher ?? settings.approvalAlertsAntigravityMatcher
       ),
+      reportsEnabled: parseBoolean(patch.reportsEnabled ?? settings.reportsEnabled, false),
+      reportsDaily: parseBoolean(patch.reportsDaily ?? settings.reportsDaily, true),
+      reportsWeekly: parseBoolean(patch.reportsWeekly ?? settings.reportsWeekly, true),
+      reportsMonthly: parseBoolean(patch.reportsMonthly ?? settings.reportsMonthly, true),
+      reportsDir: typeof (patch.reportsDir !== undefined ? patch.reportsDir : settings.reportsDir) === 'string'
+        ? String(patch.reportsDir !== undefined ? patch.reportsDir : settings.reportsDir).trim()
+        : '',
       syncContentState: normalizeSyncContentState(settings.syncContentState),
       deviceId: (patch.deviceId !== undefined ? String(patch.deviceId).trim() : settings.deviceId) || defaultDeviceId(),
       clients: patch.clients !== undefined ? clientsCsvForSetting(patch.clients, '') : clientsCsvForSetting(settings.clients, DEFAULT_CLIENTS),
@@ -8799,6 +8839,14 @@ app.whenReady().then(() => {
     if (approvalAlertsChanged) {
       embeddedHub?.hub.setApprovalAlertsEnabled(settings.approvalAlertsEnabled === true);
     }
+    const reportsConfigChanged = (settings.reportsEnabled === true) !== (previousSettingsState.reportsEnabled === true)
+      || (settings.reportsDaily !== false) !== (previousSettingsState.reportsDaily !== false)
+      || (settings.reportsWeekly !== false) !== (previousSettingsState.reportsWeekly !== false)
+      || (settings.reportsMonthly !== false) !== (previousSettingsState.reportsMonthly !== false);
+    const reportsDirChanged = String(settings.reportsDir || '') !== String(previousSettingsState.reportsDir || '');
+    if (reportsConfigChanged && !reportsDirChanged && settings.hubMode === 'host') {
+      embeddedHub?.hub?.setReportConfig?.(reportsConfigFromSettings(settings));
+    }
     if (antigravityMatcherChanged) {
       try {
         if (inspectApprovalHooks().antigravity.installed) {
@@ -8856,7 +8904,7 @@ app.whenReady().then(() => {
       refreshMacWidgetHistorySource();
     }
     const limitInvalidations = settingsLimitInvalidationPlan(runtimeChange, limitContext.ensureLimitProvider);
-    if (runtimeChange.modeStructural || (receiverPermissionChanged && settings.hubMode === 'host')) {
+    if (runtimeChange.modeStructural || ((receiverPermissionChanged || reportsDirChanged) && settings.hubMode === 'host')) {
       for (const { scope, reason, options } of limitInvalidations) {
         rememberPendingLimitInvalidation(scope, reason, options);
         limitContext.onLimitsRefresh?.(scope, Promise.resolve({ queued: true }));
@@ -9119,6 +9167,88 @@ app.whenReady().then(() => {
     });
     if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true };
     return { ok: true, dir: result.filePaths[0] };
+  });
+  ipcMain.handle('reports:pickDir', async () => {
+    const fallbackDir = effectiveReportsDir();
+    const defaultPath = settings.reportsDir || (fs.existsSync(fallbackDir) ? fallbackDir : app.getPath('userData'));
+    const result = await dialog.showOpenDialog({
+      properties: ['openDirectory', 'createDirectory'],
+      defaultPath
+    });
+    if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true };
+    return { ok: true, dir: result.filePaths[0] };
+  });
+  ipcMain.handle('reports:openDir', async () => {
+    if (settings?.hubMode !== 'host') return { ok: false, error: 'hub_required' };
+    const dir = effectiveReportsDir();
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const error = await shell.openPath(dir);
+      if (error) return { ok: false, error };
+      return { ok: true, dir };
+    } catch (error) {
+      return { ok: false, error: error?.message || 'open_failed' };
+    }
+  });
+  ipcMain.handle('reports:generateNow', async (_event, options = {}) => {
+    if (settings?.hubMode === 'host') {
+      if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+      try {
+        return await embeddedHub.hub.generateReport(options || {});
+      } catch (error) {
+        return { ok: false, error: error?.message || 'generate_failed' };
+      }
+    }
+    if (settings?.hubMode === 'client') {
+      const { url: hubUrl, secret } = effectiveHubConfig();
+      if (!hubUrl) return { ok: false, error: 'hub_required' };
+      try {
+        const response = await fetch(`${hubUrl.replace(/\/$/, '')}/api/reports/generate`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(secret ? { authorization: `Bearer ${secret}` } : {})
+          },
+          body: JSON.stringify(options || {}),
+          signal: AbortSignal.timeout(15_000)
+        });
+        const data = await response.json().catch(() => null);
+        if (!response.ok) return { ok: false, error: data?.error || `Hub ${response.status}` };
+        return data || { ok: true, reports: [] };
+      } catch (error) {
+        return { ok: false, error: error?.message || 'request_failed' };
+      }
+    }
+    return { ok: false, error: 'hub_required' };
+  });
+  ipcMain.handle('reports:list', async (_event, options = {}) => {
+    if (settings?.hubMode === 'host') {
+      if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+      try {
+        return await embeddedHub.hub.listReports(options || {});
+      } catch (error) {
+        return { ok: false, error: error?.message || 'list_failed' };
+      }
+    }
+    if (settings?.hubMode === 'client') {
+      const { url: hubUrl, secret } = effectiveHubConfig();
+      if (!hubUrl) return { ok: false, error: 'hub_required' };
+      try {
+        const url = new URL(`${hubUrl.replace(/\/$/, '')}/api/reports`);
+        if (options?.granularity) url.searchParams.set('granularity', String(options.granularity));
+        if (options?.limit) url.searchParams.set('limit', String(options.limit));
+        const response = await fetch(url.toString(), {
+          headers: secret ? { authorization: `Bearer ${secret}` } : {},
+          signal: AbortSignal.timeout(15_000)
+        });
+        const data = await response.json().catch(() => null);
+        if (!response.ok) return { ok: false, error: data?.error || `Hub ${response.status}` };
+        return data || { ok: true, reports: [] };
+      } catch (error) {
+        return { ok: false, error: error?.message || 'request_failed' };
+      }
+    }
+    return { ok: false, error: 'hub_required' };
   });
   ipcMain.handle('session:getDetail', (_event, args) => {
     const { client, sessionId, period, sessionCost } = args || {};
