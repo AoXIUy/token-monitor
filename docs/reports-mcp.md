@@ -69,7 +69,7 @@ In the desktop app, open **Settings → Multi-device Sync → Project usage repo
 1. Set the sync mode to **Host hub on this device** (or **Connect to a hub** to trigger manual generation on a remote Main Hub).
 2. Enable **Project usage reports (Main Hub)** (`reportsEnabled`).
 3. Choose which granularities to generate automatically: **Daily**, **Weekly**, and **Monthly**.
-4. Optionally click **Choose folder…** to pick a custom output folder (defaults to `<userData>/data/reports`), or **Open folder** to inspect generated `.json` and `.md` files.
+4. Optionally click **Choose folder…** to pick a custom output folder (defaults to `<userData>/reports`), or **Open folder** to inspect generated `.json` and `.md` files.
 5. Click **Generate now** to build and write reports immediately. In Host Mode, the status line also shows the local HTTP MCP endpoint (`http://127.0.0.1:<port>/api/mcp`).
 
 The desktop app reads `TOKEN_MONITOR_REPORTS_ENABLED`, `TOKEN_MONITOR_REPORTS_DAILY`, `TOKEN_MONITOR_REPORTS_WEEKLY`, `TOKEN_MONITOR_REPORTS_MONTHLY`, and `TOKEN_MONITOR_REPORTS_DIR` as first-run defaults; once changed in the UI, saved settings take precedence.
@@ -183,7 +183,7 @@ The MCP report server is implemented by [`src/shared/mcpReportProtocol.js`](../s
 | --- | --- | --- |
 | `list_usage_reports` | `granularity?` (`daily` \| `weekly` \| `monthly`), `limit?` (integer `>= 1`) | Lists persisted reports and current Hub report config. |
 | `get_usage_report` | `granularity` (**required**), `periodKey?` (`latest` \| `current` \| `YYYY-MM-DD` \| `YYYY-Www` \| `YYYY-MM`), `format?` (`json` \| `markdown`, default `json`) | Fetches a report in JSON (with `structuredContent`) or Markdown text. |
-| `generate_usage_report` | `granularity?` (`daily` \| `weekly` \| `monthly`), `periodKey?`, `force?` (boolean) | Generates or refreshes reports on the Hub or local store. |
+| `generate_usage_report` | `granularity?` (`daily` \| `weekly` \| `monthly`), `periodKey?`, `force?` (boolean) | Generates or refreshes reports on the Hub or local store (omitting `granularity` defaults to `'all'`, generating daily, weekly, and monthly). |
 | `analyze_project_usage` | `granularity?` (default `weekly`), `periodKey?`, `project?` (name or canonical key filter), `limit?` (integer `>= 1`) | Returns ranked project shares, dominant client/model per project, top-1/top-3 concentration metrics, period comparison, and signals. |
 
 ### Exposed Resources
@@ -322,7 +322,7 @@ Stdio alternative:
 
 ### Local direct mode (`--data-file` / `--reports-dir`)
 
-When the Hub HTTP server is not running (or when reading a desktop app's `hub-devices.json` and `data/reports` directory directly from disk), pass `--data-file` and `--reports-dir` to `src/mcp/server.js`:
+When the Hub HTTP server is not running (or when reading a desktop app's `hub-devices.json` and `reports` directory directly from disk), pass `--data-file` and `--reports-dir` to `src/mcp/server.js`:
 
 ```json
 {
