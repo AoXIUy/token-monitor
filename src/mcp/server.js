@@ -24,6 +24,11 @@ const {
 const DEFAULT_HUB_URL = 'http://127.0.0.1:17321';
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
 const MAX_CONTENT_LENGTH_BYTES = 64 * 1024 * 1024;
+const PERIOD_KEY_PATTERNS = Object.freeze({
+  daily: /^\d{4}-\d{2}-\d{2}$/,
+  weekly: /^\d{4}-W\d{2}$/,
+  monthly: /^\d{4}-\d{2}$/
+});
 
 /**
  * @returns {string}
@@ -402,12 +407,21 @@ function createLocalBackendAdapter(options = {}) {
      *   report: any
      * }>} */
     const out = [];
+    const pattern = Object.hasOwn(PERIOD_KEY_PATTERNS, granularity)
+      ? PERIOD_KEY_PATTERNS[/** @type {'daily' | 'weekly' | 'monthly'} */ (granularity)]
+      : null;
+    if (!pattern) return out;
+
     for (const fileName of entries) {
       if (!fileName.endsWith('.json')) continue;
+      const baseKey = path.basename(fileName, '.json');
+      if (!pattern.test(baseKey)) continue;
       const jsonPath = path.join(dirPath, fileName);
       const report = readJson(jsonPath, null);
       if (!report || typeof report !== 'object') continue;
-      const periodKey = String(report.period?.key || path.basename(fileName, '.json'));
+      const rawPeriodKey = typeof report.period?.key === 'string' ? report.period.key.trim() : '';
+      if (rawPeriodKey && !pattern.test(rawPeriodKey)) continue;
+      const periodKey = rawPeriodKey || baseKey;
       const mdPath = path.join(dirPath, `${periodKey}.md`);
       out.push({
         reportId: String(report.reportId || `${granularity}:${periodKey}`),
@@ -642,17 +656,30 @@ function createLocalBackendAdapter(options = {}) {
       const timeZone = nonEmptyString(args.timeZone) || defaultTimeZone || undefined;
       const { rawDevices, stats, history, dailySnapshots } = loadSnapshot();
 
+      /** @type {Array<{ granularity: 'daily' | 'weekly' | 'monthly', report: any }>} */
+      const builtReports = [];
+      try {
+        for (const g of targets) {
+          const report = buildUsageReport({
+            granularity: g,
+            periodKey,
+            stats,
+            history,
+            devices: rawDevices,
+            dailySnapshots,
+            timeZone
+          });
+          builtReports.push({ granularity: g, report });
+        }
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err)
+        };
+      }
+
       const generated = [];
-      for (const g of targets) {
-        const report = buildUsageReport({
-          granularity: g,
-          periodKey,
-          stats,
-          history,
-          devices: rawDevices,
-          dailySnapshots,
-          timeZone
-        });
+      for (const { granularity: g, report } of builtReports) {
         const jsonPath = path.join(reportsDir, g, `${report.period.key}.json`);
         const mdPath = path.join(reportsDir, g, `${report.period.key}.md`);
         const sig = reportContentSignature(report);

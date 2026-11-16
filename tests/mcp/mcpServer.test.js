@@ -12,6 +12,7 @@ const test = require('node:test');
 const {
   DEFAULT_HUB_URL,
   resolveMcpServerOptions,
+  createLocalBackendAdapter,
   createStdioMcpTransport,
   startMcpServer
 } = require('../../src/mcp/server');
@@ -843,4 +844,52 @@ test('spawned node src/mcp/server.js works against Hub HTTP API using Content-Le
   assert.equal(parsed.messages.length, 1);
   assert.equal(parsed.messages[0].id, 'lsp-1');
   assert.equal(JSON.parse(parsed.messages[0].result.content[0].text).reportId, `daily:${todayKey}`);
+});
+
+test('createLocalBackendAdapter returns structured error on invalid generateReport params and rejects unsafe disk periodKey', async (t) => {
+  const tmpDir = makeTempDir('tm-mcp-guard-');
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  const dataFile = path.join(tmpDir, 'devices.json');
+  const reportsDir = path.join(tmpDir, 'reports');
+  const dailyDir = path.join(reportsDir, 'daily');
+  fs.mkdirSync(dailyDir, { recursive: true });
+  fs.writeFileSync(dataFile, JSON.stringify({ version: 1, devices: {} }));
+  fs.writeFileSync(path.join(tmpDir, 'outside.md'), 'SECRET_OUTSIDE');
+
+  // Untrusted JSON attempting path traversal via period.key and non-matching filename
+  fs.writeFileSync(path.join(dailyDir, '2026-11-10.json'), JSON.stringify({
+    schema: REPORT_SCHEMA,
+    reportId: 'daily:2026-11-10',
+    granularity: 'daily',
+    period: { key: '../../outside', startDate: '2026-11-10', endDate: '2026-11-10' },
+    summary: { totalTokens: 100 }
+  }));
+  fs.writeFileSync(path.join(dailyDir, 'weird-name.json'), JSON.stringify({
+    schema: REPORT_SCHEMA,
+    period: { key: '2026-11-11' },
+    summary: { totalTokens: 100 }
+  }));
+  fs.writeFileSync(path.join(dailyDir, '2026-11-12.json'), JSON.stringify({
+    schema: REPORT_SCHEMA,
+    reportId: 'daily:2026-11-12',
+    granularity: 'daily',
+    period: { key: '2026-11-12', label: '2026-11-12', startDate: '2026-11-12', endDate: '2026-11-12' },
+    summary: { totalTokens: 500, knownCostUsd: 0.01, projectCount: 0 }
+  }));
+
+  const adapter = createLocalBackendAdapter({ dataFile, reportsDir, timeZone: 'UTC' });
+
+  const badKeyRes = await adapter.generateReport({ granularity: 'daily', periodKey: 'not-a-date' });
+  assert.equal(badKeyRes.ok, false);
+  assert.match(badKeyRes.error, /Invalid daily periodKey/);
+
+  const badTzRes = await adapter.generateReport({ timeZone: 'Invalid/Timezone' });
+  assert.equal(badTzRes.ok, false);
+  assert.match(badTzRes.error, /Invalid IANA timeZone/);
+
+  const listed = await adapter.listReports({ granularity: 'daily' });
+  assert.equal(listed.ok, true);
+  assert.deepEqual(listed.reports.map((r) => r.periodKey), ['2026-11-12']);
+  assert.equal(listed.reports[0].files.markdown, null);
 });
