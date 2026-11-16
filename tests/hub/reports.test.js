@@ -589,4 +589,3 @@ test('Node CLI parses --reports / --reports-dir flags and TOKEN_MONITOR_REPORTS 
   assert.equal(cfg.monthly, false);
   assert.equal(cfg.reportsDir, reportsDir);
 });
-

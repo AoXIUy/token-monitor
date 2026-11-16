@@ -131,7 +131,7 @@ function extractTodayKey(stats, nowDate, timeZone) {
  */
 function copyNumericMap(map, isFloat = false) {
   /** @type {Record<string, number>} */
-  const out = {};
+  const out = Object.create(null);
   if (!isPlainObject(map)) return out;
   for (const key of Object.keys(map).sort()) {
     const val = Math.max(0, num(map[key]));
@@ -147,7 +147,7 @@ function copyNumericMap(map, isFloat = false) {
  */
 function copySnapshotProjects(projectsInput, sessionCountsByProject) {
   /** @type {Record<string, any>} */
-  const out = {};
+  const out = Object.create(null);
   if (!isPlainObject(projectsInput)) return out;
 
   for (const [rawKey, src] of Object.entries(projectsInput)) {
@@ -158,15 +158,15 @@ function copySnapshotProjects(projectsInput, sessionCountsByProject) {
     const tokens = Math.max(0, Math.round(num(src.tokens ?? src.totalTokens)));
     const costUsd = round6(Math.max(0, num(src.costUsd ?? src.cost)));
     const unpricedTokens = Math.min(tokens, Math.max(0, Math.round(num(src.unpricedTokens))));
-    const prev = out[key];
+    const prev = Object.hasOwn(out, key) ? out[key] : null;
     const entry = prev || {
       label: label || key,
       tokens: 0,
       costUsd: 0,
       unpricedTokens: 0,
       sessionCount: sessionCountsByProject.get(key) || 0,
-      clients: /** @type {Record<string, number>} */ ({}),
-      models: /** @type {Record<string, number>} */ ({})
+      clients: /** @type {Record<string, number>} */ (Object.create(null)),
+      models: /** @type {Record<string, number>} */ (Object.create(null))
     };
     if (prev) {
       entry.label = deterministicProjectLabel(prev.label, label || key);
@@ -181,28 +181,32 @@ function copySnapshotProjects(projectsInput, sessionCountsByProject) {
       for (const [rawClient, val] of Object.entries(src.clients)) {
         const client = normalizeClientName(rawClient) || String(rawClient || '').trim();
         const cTokens = Math.max(0, Math.round(num(val)));
-        if (client && cTokens > 0) entry.clients[client] = (entry.clients[client] || 0) + cTokens;
+        if (client && cTokens > 0) {
+          entry.clients[client] = (Object.hasOwn(entry.clients, client) ? entry.clients[client] : 0) + cTokens;
+        }
       }
     }
     if (isPlainObject(src.models)) {
       for (const [rawModel, val] of Object.entries(src.models)) {
         const model = normalizeModelName(rawModel) || String(rawModel || '').trim();
         const mTokens = Math.max(0, Math.round(num(val)));
-        if (model && mTokens > 0) entry.models[model] = (entry.models[model] || 0) + mTokens;
+        if (model && mTokens > 0) {
+          entry.models[model] = (Object.hasOwn(entry.models, model) ? entry.models[model] : 0) + mTokens;
+        }
       }
     }
     out[key] = entry;
   }
 
   /** @type {Record<string, any>} */
-  const sorted = {};
+  const sorted = Object.create(null);
   for (const key of Object.keys(out).sort()) {
     const p = out[key];
     /** @type {Record<string, number>} */
-    const clients = {};
+    const clients = Object.create(null);
     for (const cKey of Object.keys(p.clients).sort()) clients[cKey] = p.clients[cKey];
     /** @type {Record<string, number>} */
-    const models = {};
+    const models = Object.create(null);
     for (const mKey of Object.keys(p.models).sort()) models[mKey] = p.models[mKey];
     sorted[key] = {
       label: p.label,
@@ -263,12 +267,12 @@ function buildDailySnapshotEntry(stats, todayKey, nowDate) {
   const modelCosts = copyNumericMap(period.modelCosts, true);
 
   /** @type {Record<string, any>} */
-  const perClient = {};
+  const perClient = Object.create(null);
   const clientKeys = new Set([...Object.keys(clients), ...Object.keys(clientCosts)]);
   for (const rawClient of Array.from(clientKeys).sort()) {
     const client = normalizeClientName(rawClient) || rawClient;
     const cTokens = Math.max(0, Math.round(num(clients[rawClient])));
-    const prev = perClient[client];
+    const prev = Object.hasOwn(perClient, client) ? perClient[client] : null;
     perClient[client] = {
       tokens: (prev?.tokens || 0) + cTokens,
       cost: round6((prev?.cost || 0) + Math.max(0, num(clientCosts[rawClient]))),
@@ -281,12 +285,12 @@ function buildDailySnapshotEntry(stats, todayKey, nowDate) {
   }
 
   /** @type {Record<string, any>} */
-  const perModel = {};
+  const perModel = Object.create(null);
   const modelKeys = new Set([...Object.keys(models), ...Object.keys(modelCosts)]);
   for (const rawModel of Array.from(modelKeys).sort()) {
     const model = normalizeModelName(rawModel) || rawModel;
     const mTokens = Math.max(0, Math.round(num(models[rawModel])));
-    const prev = perModel[model];
+    const prev = Object.hasOwn(perModel, model) ? perModel[model] : null;
     perModel[model] = {
       tokens: (prev?.tokens || 0) + mTokens,
       cost: round6((prev?.cost || 0) + Math.max(0, num(modelCosts[rawModel]))),
