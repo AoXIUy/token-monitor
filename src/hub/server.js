@@ -42,6 +42,7 @@ const { APPROVAL_ALERT_BASE, MAX_APPROVAL_BODY_BYTES } = require('../shared/appr
 const { createApprovalAlertStore } = require('./approvalAlerts');
 const { REPORT_GRANULARITIES } = require('../shared/usageReport');
 const { createMcpReportServer } = require('../shared/mcpReportProtocol');
+const { createIntegrationManager } = require('./integrations');
 const { createReportManager } = require('./reports');
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
@@ -93,6 +94,9 @@ function createHub({
   approvalAlerts = false,
   reports = undefined,
   reportsDir = '',
+  integrations = undefined,
+  integrationSecrets = null,
+  integrationFetch = undefined,
   staleAfterMs = DEFAULT_STALE_AFTER_MS,
   broadcastDelayMs = 100,
   persistIntervalMs = 0,
@@ -119,6 +123,7 @@ function createHub({
     getDevice: (id) => store.devices[id] });
   const approvalAlertStore = createApprovalAlertStore({ enabled: approvalAlerts === true,
     getDevice: (id) => store.devices[id] });
+  let integrationManager = null;
   const reportManager = createReportManager({
     dataFile,
     reportsDir,
@@ -127,13 +132,38 @@ function createHub({
     getHistory,
     getDevices,
     hubRuntime: 'node-hub',
+    onReportArchived: (event) => integrationManager?.onReportArchived(event),
+    logger
+  });
+  integrationManager = createIntegrationManager({
+    dataFile,
+    reportsDir,
+    reportManager,
+    getStats,
+    initialConfig: integrations,
+    initialSecrets: integrationSecrets,
+    fetchImpl: integrationFetch,
     logger
   });
   const mcpServer = createMcpReportServer({
     listReports: (args) => reportManager.listReports(args),
-    getReport: (args) => reportManager.getReport(args),
+    getReport: (args) => {
+      const res = reportManager.getReport(args);
+      if (res?.ok && res.report && args?.format !== 'markdown') {
+        const aiAnalysis = integrationManager.readCachedAnalysis(
+          res.report.granularity,
+          res.report.period?.key,
+          res.report
+        );
+        if (aiAnalysis) return { ...res, aiAnalysis };
+      }
+      return res;
+    },
     generateReport: (args) => reportManager.generateReport(args),
     analyzeProjects: (args) => reportManager.analyzeProjects(args),
+    getStats: () => getStats(),
+    analyzeWithAi: (args) => integrationManager.analyzeReport(args),
+    pushToOpenClaw: (args) => integrationManager.pushToOpenClaw(args),
     serverInfo: { name: 'token-monitor-hub', version: '1.0.0' }
   });
   let persistTimer = null;
@@ -682,6 +712,128 @@ function createHub({
         ...(limit !== undefined ? { limit } : {})
       });
       if (result.ok === false) return sendJson(res, 400, result);
+      const reports = Array.isArray(result.reports)
+        ? result.reports.map((item) => ({
+            ...item,
+            hasAiAnalysis: Boolean(integrationManager.readCachedAnalysis(item.granularity, item.periodKey))
+          }))
+        : [];
+      return sendJson(res, 200, {
+        ...result,
+        reports,
+        integrations: integrationManager.getStatus()
+      });
+    }
+
+    if (url.pathname === '/api/reports/integrations') {
+      if (req.method === 'GET') {
+        return sendJson(res, 200, { ok: true, ...integrationManager.getStatus() });
+      }
+      if (req.method === 'PUT') {
+        try {
+          const payload = await readJsonBody(req);
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            return sendJson(res, 400, { error: 'bad_request', message: 'Integrations payload must be an object' });
+          }
+          const updated = integrationManager.updateConfig(payload);
+          if (updated.ok === false) return sendJson(res, 400, updated);
+          return sendJson(res, 200, updated);
+        } catch (error) {
+          if (error.code === 'payload_too_large') {
+            res.shouldKeepAlive = false;
+            return sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+          }
+          return sendJson(res, 400, { error: 'bad_request', message: error.message });
+        }
+      }
+      return sendJson(res, 405, { error: 'invalid_request' });
+    }
+
+    if (url.pathname === '/api/reports/ai-analyze' && req.method === 'POST') {
+      try {
+        const payload = await readJsonBody(req);
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          return sendJson(res, 400, { error: 'invalid_request', message: 'Request body must be an object' });
+        }
+        const result = await integrationManager.analyzeReport({
+          granularity: payload.granularity,
+          periodKey: payload.periodKey,
+          question: payload.question,
+          language: payload.language,
+          refresh: Boolean(payload.refresh)
+        });
+        if (!result.ok) {
+          const status = result.error === 'not_found'
+            ? 404
+            : result.error === 'ai_http_error' || result.error === 'ai_network_error' || result.error === 'ai_empty_response'
+              ? 502
+              : 400;
+          return sendJson(res, status, result);
+        }
+        return sendJson(res, 200, result);
+      } catch (error) {
+        if (error.code === 'payload_too_large') {
+          res.shouldKeepAlive = false;
+          return sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+        }
+        return sendJson(res, 400, { error: 'bad_request', message: error.message });
+      }
+    }
+
+    if (url.pathname === '/api/reports/push' && req.method === 'POST') {
+      try {
+        const payload = await readJsonBody(req);
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          return sendJson(res, 400, { error: 'invalid_request', message: 'Request body must be an object' });
+        }
+        const result = await integrationManager.pushToOpenClaw({
+          target: payload.target,
+          granularity: payload.granularity,
+          periodKey: payload.periodKey,
+          includeAi: payload.includeAi,
+          includeLimits: payload.includeLimits,
+          refreshAi: Boolean(payload.refreshAi),
+          question: payload.question,
+          customMessage: payload.customMessage,
+          idempotencyKey: payload.idempotencyKey
+        });
+        if (!result.ok) {
+          const status = result.error === 'not_found'
+            ? 404
+            : result.error === 'openclaw_http_error' || result.error === 'openclaw_network_error'
+              ? 502
+              : 400;
+          return sendJson(res, status, result);
+        }
+        return sendJson(res, 200, result);
+      } catch (error) {
+        if (error.code === 'payload_too_large') {
+          res.shouldKeepAlive = false;
+          return sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+        }
+        return sendJson(res, 400, { error: 'bad_request', message: error.message });
+      }
+    }
+
+    if (url.pathname === '/api/integrations/openclaw/brief' && req.method === 'GET') {
+      const granularity = url.searchParams.get('granularity') || 'daily';
+      const periodKey = url.searchParams.get('periodKey') || 'latest';
+      const includeAi = url.searchParams.get('includeAi') !== 'false';
+      const includeLimits = url.searchParams.get('includeLimits') !== 'false';
+      const format = (url.searchParams.get('format') || 'json').toLowerCase();
+      const result = integrationManager.buildWeChatBrief({
+        granularity,
+        periodKey,
+        includeAi,
+        includeLimits
+      });
+      if (!result.ok) {
+        const status = result.error === 'not_found' ? 404 : 400;
+        return sendJson(res, status, result);
+      }
+      if (format === 'text' || format === 'markdown') {
+        return sendText(res, 200, result.text || '');
+      }
       return sendJson(res, 200, result);
     }
 
@@ -758,6 +910,14 @@ function createHub({
       const result = reportManager.getReport(granularity, periodKey, { format, timeZone });
       if (result?.error === 'not_found') return sendJson(res, 404, { error: 'not_found' });
       if (result?.error === 'invalid_request') return sendJson(res, 400, result);
+      if (result?.ok && result.report && format !== 'markdown') {
+        const aiAnalysis = integrationManager.readCachedAnalysis(
+          result.report.granularity,
+          result.report.period?.key,
+          result.report
+        );
+        if (aiAnalysis) return sendJson(res, 200, { ...result, aiAnalysis });
+      }
       return sendJson(res, 200, result);
     }
 
@@ -840,7 +1000,7 @@ function createHub({
           reject(error);
         }
       });
-    });
+    }).finally(() => integrationManager.stop().catch(() => {}));
     stopPromise = operation.finally(() => { stopPromise = null; });
     return stopPromise;
   }
@@ -854,7 +1014,13 @@ function createHub({
     setReportConfig: (patch) => reportManager.setConfig(patch),
     listReports: (options) => reportManager.listReports(options),
     getReport: (granularity, periodKey, options) => reportManager.getReport(granularity, periodKey, options),
-    generateReport: (options) => reportManager.generateReport(options)
+    generateReport: (options) => reportManager.generateReport(options),
+    getIntegrationsStatus: () => integrationManager.getStatus(),
+    updateIntegrationsConfig: (patch) => integrationManager.updateConfig(patch),
+    setIntegrationSecrets: (secrets) => integrationManager.setSecrets(secrets),
+    analyzeReportWithAi: (options) => integrationManager.analyzeReport(options),
+    pushReportToOpenClaw: (options) => integrationManager.pushToOpenClaw(options),
+    buildWeChatBrief: (options) => integrationManager.buildWeChatBrief(options)
   };
 }
 

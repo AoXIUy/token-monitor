@@ -45,13 +45,16 @@ const CORE_SOURCE_FILES = WORKER_SHARED_MODULES.map((name) => `src/shared/${name
 const NODE_RUNTIME_SOURCE_FILES = Object.freeze([
   'src/hub/server.js',
   'src/hub/reports.js',
+  'src/hub/integrations.js',
   'src/shared/usageReport.js',
+  'src/shared/aiReportAnalyzer.js',
   'src/shared/mcpReportProtocol.js',
   'src/hub/sessionConversations.js',
   'src/shared/sessionConversationProtocol.js',
   'src/hub/approvalAlerts.js',
   'src/shared/approvalProtocol.js',
   'src/shared/http.js',
+  'src/shared/outboundFetch.js',
   'src/shared/config.js'
 ]);
 const WORKER_RUNTIME_SOURCE_FILES = Object.freeze([

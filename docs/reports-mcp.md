@@ -185,6 +185,9 @@ The MCP report server is implemented by [`src/shared/mcpReportProtocol.js`](../s
 | `get_usage_report` | `granularity` (**required**), `periodKey?` (`latest` \| `current` \| `YYYY-MM-DD` \| `YYYY-Www` \| `YYYY-MM`), `format?` (`json` \| `markdown`, default `json`) | Fetches a report in JSON (with `structuredContent`) or Markdown text. |
 | `generate_usage_report` | `granularity?` (`daily` \| `weekly` \| `monthly`), `periodKey?`, `force?` (boolean) | Generates or refreshes reports on the Hub or local store (omitting `granularity` defaults to `'all'`, generating daily, weekly, and monthly). |
 | `analyze_project_usage` | `granularity?` (default `weekly`), `periodKey?`, `project?` (name or canonical key filter), `limit?` (integer `>= 1`) | Returns ranked project shares, dominant client/model per project, top-1/top-3 concentration metrics, period comparison, and signals. |
+| `get_realtime_usage_and_limits` | `thirdPartyOnly?` (boolean), `maxProviders?` (1..100) | Fetches live today/month/all-time tokens, active devices, and sanitized provider & third-party API quota balances (New API, Sub2API, Custom). |
+| `analyze_report_with_ai` | `granularity?`, `periodKey?`, `question?`, `language?`, `refresh?` | Invokes the configured third-party AI API (`openai-compatible` / `anthropic-messages`) on the report + live quotas, or answers a custom question. |
+| `push_report_to_openclaw` | `granularity?`, `periodKey?`, `includeAi?`, `includeLimits?`, `question?` | Formats a WeChat-ready digest and sends it via OpenClaw Gateway Webhook (`/hooks/agent`, `/hooks/wake`, or generic webhook). |
 
 ### Exposed Resources
 
@@ -203,6 +206,9 @@ The MCP report server is implemented by [`src/shared/mcpReportProtocol.js`](../s
 | `analyze-weekly-report` | `periodKey?` (`YYYY-Www` or `latest`) | Summarize weekly project, tool, model, and multi-device distribution. |
 | `analyze-monthly-report` | `periodKey?` (`YYYY-MM` or `latest`) | Review monthly cost trends, model mix, and project share. |
 | `project-deep-dive` | `project` (**required**), `granularity?`, `periodKey?` | Deep-dive analysis of one project's token share, cost, client/model mix, and signals. |
+| `wechat-digest` | `granularity?`, `periodKey?` | Generate a compact WeChat-ready digest combining usage, projects, and third-party API quotas. |
+
+For third-party AI report analysis and OpenClaw WeChat integration setup, see [the OpenClaw & WeChat guide](openclaw-wechat.md) and the bundled skill under [`skills/openclaw-token-monitor/`](../skills/openclaw-token-monitor/SKILL.md).
 
 ---
 

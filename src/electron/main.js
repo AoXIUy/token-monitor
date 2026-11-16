@@ -32,6 +32,10 @@ const { appVersion } = require('../shared/appVersion');
 const { macWidgetRuntimeSupport } = require('../shared/macSystemRequirements');
 const { exportFileSet, exportSignature, EXPORT_FILENAMES } = require('../shared/exporter');
 const { createDefaultTrayLayout, normalizeTrayLayout } = require('../shared/trayLayout');
+const {
+  normalizeAiIntegrationConfig,
+  normalizeOpenClawIntegrationConfig
+} = require('../shared/aiReportAnalyzer');
 const fontSettingsApi = require('../shared/fontSettings');
 const motionPreferenceApi = require('./motionPreference');
 const tokenNumberAnimationApi = require('./tokenNumberAnimation');
@@ -671,6 +675,10 @@ function defaultSettings() {
     reportsWeekly: parseBoolean(process.env.TOKEN_MONITOR_REPORTS_WEEKLY, true),
     reportsMonthly: parseBoolean(process.env.TOKEN_MONITOR_REPORTS_MONTHLY, true),
     reportsDir: String(process.env.TOKEN_MONITOR_REPORTS_DIR || '').trim(),
+    reportIntegrations: {
+      ai: normalizeAiIntegrationConfig({}),
+      openclaw: normalizeOpenClawIntegrationConfig({})
+    },
     syncContentState: normalizeSyncContentState(null),
     windowBehavior,
     alwaysOnTop: windowBehavior === 'floating',
@@ -2886,6 +2894,10 @@ function readSettings() {
     merged.reportsWeekly = parseBoolean(merged.reportsWeekly, true);
     merged.reportsMonthly = parseBoolean(merged.reportsMonthly, true);
     merged.reportsDir = typeof merged.reportsDir === 'string' ? merged.reportsDir.trim() : '';
+    merged.reportIntegrations = {
+      ai: normalizeAiIntegrationConfig(merged.reportIntegrations?.ai),
+      openclaw: normalizeOpenClawIntegrationConfig(merged.reportIntegrations?.openclaw)
+    };
     merged.modelAliasGrouping = normalizeModelAliasGrouping(merged.modelAliasGrouping);
     merged.textSize = fontSettingsApi.normalizeTextSize(merged.textSize);
     merged.interfaceFontFamily = fontSettingsApi.normalizeFontFamily(merged.interfaceFontFamily);
@@ -3804,6 +3816,9 @@ async function startEmbeddedHub() {
       }
       getSyncContentRuntime().invalidate();
     }
+    const integrationSecrets = typeof ensureCredentialStore === 'function'
+      ? ensureCredentialStore().readIntegrationSecrets()
+      : null;
     const hub = createHub({
       port,
       host: '0.0.0.0',
@@ -3818,6 +3833,8 @@ async function startEmbeddedHub() {
         monthly: settings.reportsMonthly !== false
       },
       reportsDir: settings.reportsDir || '',
+      integrations: settings.reportIntegrations,
+      integrationSecrets,
       dataFile: hubDataFile(),
       logger: { error: (err) => console.log(`[hub] ${err?.message || err}`) }
     });
@@ -5921,6 +5938,22 @@ function assertPluginSkinRequest(event, patch) {
     || !event.senderFrame || event.senderFrame !== event.sender.mainFrame) throw new Error('plugin skin selection requires the main window');
 }
 
+function reportIntegrationsForRenderer(currentSettings = settings) {
+  if (settings?.hubMode === 'host' && embeddedHub?.hub?.getIntegrationsStatus) {
+    return embeddedHub.hub.getIntegrationsStatus();
+  }
+  const storedSecrets = (() => {
+    try { return ensureCredentialStore().readIntegrationSecrets(); } catch (_) { return { aiApiKey: '', openclawHookToken: '' }; }
+  })();
+  const ai = normalizeAiIntegrationConfig(currentSettings?.reportIntegrations?.ai);
+  const openclaw = normalizeOpenClawIntegrationConfig(currentSettings?.reportIntegrations?.openclaw);
+  return {
+    ai: { ...ai, apiKeyConfigured: Boolean(storedSecrets.aiApiKey) },
+    openclaw: { ...openclaw, hookTokenConfigured: Boolean(storedSecrets.openclawHookToken) },
+    lastPush: null
+  };
+}
+
 function settingsForRenderer() {
   // Default-deny every credential field added to the canonical store. The two
   // hub secrets remain explicit exceptions because the existing sync UI must
@@ -5969,7 +6002,10 @@ function settingsForRenderer() {
     currencyRatesEffective: effectiveRates || resolveEffectiveRates(rateCache?.rates || {}, settings?.currencyRates || {}),
     currencyRateInfo: rateCache ? { source: rateCache.source, date: rateCache.date, fetchedAt: rateCache.fetchedAt } : null,
     windowToggleShortcutStatus: currentWindowToggleShortcutStatus(),
-    networkProxySource: networkProxySource(settings, process.env)
+    networkProxySource: networkProxySource(settings, process.env),
+    reportIntegrations: typeof reportIntegrationsForRenderer === 'function'
+      ? reportIntegrationsForRenderer(settings)
+      : undefined
   };
 }
 
@@ -8636,6 +8672,10 @@ app.whenReady().then(() => {
       reportsDir: typeof (patch.reportsDir !== undefined ? patch.reportsDir : settings.reportsDir) === 'string'
         ? String(patch.reportsDir !== undefined ? patch.reportsDir : settings.reportsDir).trim()
         : '',
+      reportIntegrations: {
+        ai: normalizeAiIntegrationConfig(patch.reportIntegrations?.ai ?? settings.reportIntegrations?.ai),
+        openclaw: normalizeOpenClawIntegrationConfig(patch.reportIntegrations?.openclaw ?? settings.reportIntegrations?.openclaw)
+      },
       syncContentState: normalizeSyncContentState(settings.syncContentState),
       deviceId: (patch.deviceId !== undefined ? String(patch.deviceId).trim() : settings.deviceId) || defaultDeviceId(),
       clients: patch.clients !== undefined ? clientsCsvForSetting(patch.clients, '') : clientsCsvForSetting(settings.clients, DEFAULT_CLIENTS),
@@ -9249,6 +9289,141 @@ app.whenReady().then(() => {
         const data = await response.json().catch(() => null);
         if (!response.ok) return { ok: false, error: data?.error || `Hub ${response.status}` };
         return data || { ok: true, reports: [] };
+      } catch (error) {
+        return { ok: false, error: error?.message || 'request_failed' };
+      }
+    }
+    return { ok: false, error: 'hub_required' };
+  });
+  ipcMain.handle('reports:getIntegrations', async () => {
+    if (settings?.hubMode === 'host') {
+      if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+      try {
+        return { ok: true, ...embeddedHub.hub.getIntegrationsStatus() };
+      } catch (error) {
+        return { ok: false, error: error?.message || 'integrations_failed' };
+      }
+    }
+    if (settings?.hubMode === 'client') {
+      const { url: hubUrl, secret } = effectiveHubConfig();
+      if (!hubUrl) return { ok: false, error: 'hub_required' };
+      try {
+        const response = await fetch(`${hubUrl.replace(/\/$/, '')}/api/reports/integrations`, {
+          headers: secret ? { authorization: `Bearer ${secret}` } : {},
+          signal: AbortSignal.timeout(15_000)
+        });
+        const data = await response.json().catch(() => null);
+        if (!response.ok) return { ok: false, error: data?.error || `Hub ${response.status}`, message: data?.message };
+        return data || { ok: true };
+      } catch (error) {
+        return { ok: false, error: error?.message || 'request_failed' };
+      }
+    }
+    return { ok: false, error: 'hub_required' };
+  });
+  ipcMain.handle('reports:saveIntegrations', async (_event, patch = {}) => {
+    if (settings?.hubMode === 'host') {
+      try {
+        const secretPatch = {};
+        if (patch?.ai?.clearApiKey === true) secretPatch.aiApiKey = '';
+        else if (typeof patch?.ai?.apiKey === 'string' && patch.ai.apiKey.trim()) secretPatch.aiApiKey = patch.ai.apiKey.trim();
+        if (patch?.openclaw?.clearHookToken === true) secretPatch.openclawHookToken = '';
+        else if (typeof patch?.openclaw?.hookToken === 'string' && patch.openclaw.hookToken.trim()) secretPatch.openclawHookToken = patch.openclaw.hookToken.trim();
+        if (Object.keys(secretPatch).length > 0) {
+          ensureCredentialStore().writeIntegrationSecrets(secretPatch);
+        }
+        const nextConfig = {
+          ai: normalizeAiIntegrationConfig(patch?.ai ?? settings.reportIntegrations?.ai),
+          openclaw: normalizeOpenClawIntegrationConfig(patch?.openclaw ?? settings.reportIntegrations?.openclaw)
+        };
+        applySettingsPatch({ reportIntegrations: nextConfig });
+        if (embeddedHub?.hub) {
+          embeddedHub.hub.updateIntegrationsConfig(patch);
+        }
+        const status = embeddedHub?.hub?.getIntegrationsStatus?.() || reportIntegrationsForRenderer();
+        return { ok: true, ...status };
+      } catch (error) {
+        return { ok: false, error: error?.message || 'save_failed' };
+      }
+    }
+    if (settings?.hubMode === 'client') {
+      const { url: hubUrl, secret } = effectiveHubConfig();
+      if (!hubUrl) return { ok: false, error: 'hub_required' };
+      try {
+        const response = await fetch(`${hubUrl.replace(/\/$/, '')}/api/reports/integrations`, {
+          method: 'PUT',
+          headers: {
+            'content-type': 'application/json',
+            ...(secret ? { authorization: `Bearer ${secret}` } : {})
+          },
+          body: JSON.stringify(patch || {}),
+          signal: AbortSignal.timeout(15_000)
+        });
+        const data = await response.json().catch(() => null);
+        if (!response.ok) return { ok: false, error: data?.error || `Hub ${response.status}`, message: data?.message };
+        return data || { ok: true };
+      } catch (error) {
+        return { ok: false, error: error?.message || 'request_failed' };
+      }
+    }
+    return { ok: false, error: 'hub_required' };
+  });
+  ipcMain.handle('reports:analyzeWithAi', async (_event, options = {}) => {
+    if (settings?.hubMode === 'host') {
+      if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+      try {
+        return await embeddedHub.hub.analyzeReportWithAi(options || {});
+      } catch (error) {
+        return { ok: false, error: error?.message || 'analyze_failed' };
+      }
+    }
+    if (settings?.hubMode === 'client') {
+      const { url: hubUrl, secret } = effectiveHubConfig();
+      if (!hubUrl) return { ok: false, error: 'hub_required' };
+      try {
+        const response = await fetch(`${hubUrl.replace(/\/$/, '')}/api/reports/ai-analyze`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(secret ? { authorization: `Bearer ${secret}` } : {})
+          },
+          body: JSON.stringify(options || {}),
+          signal: AbortSignal.timeout(50_000)
+        });
+        const data = await response.json().catch(() => null);
+        if (!response.ok) return { ok: false, error: data?.error || `Hub ${response.status}`, message: data?.message };
+        return data || { ok: true };
+      } catch (error) {
+        return { ok: false, error: error?.message || 'request_failed' };
+      }
+    }
+    return { ok: false, error: 'hub_required' };
+  });
+  ipcMain.handle('reports:pushToOpenClaw', async (_event, options = {}) => {
+    if (settings?.hubMode === 'host') {
+      if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+      try {
+        return await embeddedHub.hub.pushReportToOpenClaw(options || {});
+      } catch (error) {
+        return { ok: false, error: error?.message || 'push_failed' };
+      }
+    }
+    if (settings?.hubMode === 'client') {
+      const { url: hubUrl, secret } = effectiveHubConfig();
+      if (!hubUrl) return { ok: false, error: 'hub_required' };
+      try {
+        const response = await fetch(`${hubUrl.replace(/\/$/, '')}/api/reports/push`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(secret ? { authorization: `Bearer ${secret}` } : {})
+          },
+          body: JSON.stringify({ target: 'openclaw', ...(options || {}) }),
+          signal: AbortSignal.timeout(55_000)
+        });
+        const data = await response.json().catch(() => null);
+        if (!response.ok) return { ok: false, error: data?.error || `Hub ${response.status}`, message: data?.message };
+        return data || { ok: true };
       } catch (error) {
         return { ok: false, error: error?.message || 'request_failed' };
       }

@@ -331,6 +331,49 @@ function createHubBackendAdapter(options = {}) {
         project: args.project,
         limit: args.limit
       });
+    },
+
+    async getStats() {
+      const res = await requestJson('GET', '/api/stats');
+      if (!res.ok) {
+        return { ok: false, error: formatHttpError(res, `Failed to load live stats (HTTP ${res.status})`) };
+      }
+      return res.data || {};
+    },
+
+    /**
+     * @param {{ granularity?: string, periodKey?: string, question?: string, language?: string, refresh?: boolean }} [args]
+     */
+    async analyzeWithAi(args = {}) {
+      const res = await requestJson('POST', '/api/reports/ai-analyze', {
+        ...(args.granularity !== undefined ? { granularity: String(args.granularity) } : {}),
+        ...(args.periodKey !== undefined ? { periodKey: String(args.periodKey) } : {}),
+        ...(args.question !== undefined ? { question: String(args.question) } : {}),
+        ...(args.language !== undefined ? { language: String(args.language) } : {}),
+        ...(args.refresh !== undefined ? { refresh: Boolean(args.refresh) } : {})
+      });
+      if (!res.ok) {
+        return { ok: false, error: formatHttpError(res, `AI analysis failed (HTTP ${res.status})`) };
+      }
+      return res.data || { ok: false, error: 'Empty AI response' };
+    },
+
+    /**
+     * @param {{ granularity?: string, periodKey?: string, includeAi?: boolean, includeLimits?: boolean, question?: string }} [args]
+     */
+    async pushToOpenClaw(args = {}) {
+      const res = await requestJson('POST', '/api/reports/push', {
+        target: 'openclaw',
+        ...(args.granularity !== undefined ? { granularity: String(args.granularity) } : {}),
+        ...(args.periodKey !== undefined ? { periodKey: String(args.periodKey) } : {}),
+        ...(args.includeAi !== undefined ? { includeAi: Boolean(args.includeAi) } : {}),
+        ...(args.includeLimits !== undefined ? { includeLimits: Boolean(args.includeLimits) } : {}),
+        ...(args.question !== undefined ? { question: String(args.question) } : {})
+      });
+      if (!res.ok) {
+        return { ok: false, error: formatHttpError(res, `OpenClaw push failed (HTTP ${res.status})`) };
+      }
+      return res.data || { ok: false, error: 'Empty push response' };
     }
   };
 }
@@ -737,6 +780,18 @@ function createLocalBackendAdapter(options = {}) {
         project: args.project,
         limit: args.limit
       });
+    },
+
+    async getStats() {
+      return loadSnapshot().stats || {};
+    },
+
+    async analyzeWithAi() {
+      return { ok: false, error: 'analyze_report_with_ai requires Hub HTTP mode or configured Main Hub.' };
+    },
+
+    async pushToOpenClaw() {
+      return { ok: false, error: 'push_report_to_openclaw requires Hub HTTP mode or configured Main Hub.' };
     }
   };
 }
@@ -1116,6 +1171,9 @@ function startMcpServer(options = {}) {
     getReport: (args) => backend.getReport(args),
     generateReport: (args) => backend.generateReport(args),
     analyzeProjects: (args) => backend.analyzeProjects(args),
+    getStats: () => backend.getStats(),
+    analyzeWithAi: (args) => backend.analyzeWithAi(args),
+    pushToOpenClaw: (args) => backend.pushToOpenClaw(args),
     serverInfo: {
       name: 'token-monitor-reports',
       version: readPackageVersion(),

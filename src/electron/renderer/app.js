@@ -566,6 +566,34 @@ Object.assign(els, {
   reportsActionsRow: document.getElementById('reportsActionsRow'),
   reportsGenerateNowButton: document.getElementById('reportsGenerateNowButton'),
   reportsStatusText: document.getElementById('reportsStatusText'),
+  reportsIntegrationsControls: document.getElementById('reportsIntegrationsControls'),
+  reportsAiEnabledInput: document.getElementById('reportsAiEnabledInput'),
+  reportsAiProtocolInput: document.getElementById('reportsAiProtocolInput'),
+  reportsAiProviderLabelInput: document.getElementById('reportsAiProviderLabelInput'),
+  reportsAiBaseUrlInput: document.getElementById('reportsAiBaseUrlInput'),
+  reportsAiModelInput: document.getElementById('reportsAiModelInput'),
+  reportsAiApiKeyInput: document.getElementById('reportsAiApiKeyInput'),
+  reportsAiClearKeyButton: document.getElementById('reportsAiClearKeyButton'),
+  reportsAiLanguageInput: document.getElementById('reportsAiLanguageInput'),
+  reportsAiAutoAnalyzeInput: document.getElementById('reportsAiAutoAnalyzeInput'),
+  reportsAiStatusText: document.getElementById('reportsAiStatusText'),
+  reportsAiSaveButton: document.getElementById('reportsAiSaveButton'),
+  reportsAiAnalyzeNowButton: document.getElementById('reportsAiAnalyzeNowButton'),
+  reportsAiPreview: document.getElementById('reportsAiPreview'),
+  reportsOpenClawEnabledInput: document.getElementById('reportsOpenClawEnabledInput'),
+  reportsOpenClawModeInput: document.getElementById('reportsOpenClawModeInput'),
+  reportsOpenClawWebhookUrlInput: document.getElementById('reportsOpenClawWebhookUrlInput'),
+  reportsOpenClawHookTokenInput: document.getElementById('reportsOpenClawHookTokenInput'),
+  reportsOpenClawClearTokenButton: document.getElementById('reportsOpenClawClearTokenButton'),
+  reportsOpenClawChannelInput: document.getElementById('reportsOpenClawChannelInput'),
+  reportsOpenClawToInput: document.getElementById('reportsOpenClawToInput'),
+  reportsOpenClawAgentIdInput: document.getElementById('reportsOpenClawAgentIdInput'),
+  reportsOpenClawPushOnRolloverInput: document.getElementById('reportsOpenClawPushOnRolloverInput'),
+  reportsOpenClawIncludeAiInput: document.getElementById('reportsOpenClawIncludeAiInput'),
+  reportsOpenClawIncludeLimitsInput: document.getElementById('reportsOpenClawIncludeLimitsInput'),
+  reportsOpenClawStatusText: document.getElementById('reportsOpenClawStatusText'),
+  reportsOpenClawSaveButton: document.getElementById('reportsOpenClawSaveButton'),
+  reportsOpenClawPushNowButton: document.getElementById('reportsOpenClawPushNowButton'),
   collectionCadenceInput: document.getElementById('collectionCadenceInput'),
   sessionUsageArchiveInput: document.getElementById('sessionUsageArchiveInput'),
   sessionUsageArchiveStatus: document.getElementById('sessionUsageArchiveStatus'),
@@ -14635,6 +14663,115 @@ els.exportNowButton?.addEventListener('click', async () => {
 
 let reportsGenerating = false;
 let reportsStatusFeedback = null;
+let reportsAiBusy = false;
+let reportsOpenClawBusy = false;
+let reportsAiStatusFeedback = null;
+let reportsOpenClawStatusFeedback = null;
+let reportsIntegrationsSnapshot = null;
+let reportsIntegrationsModeSynced = '';
+
+function currentReportIntegrations() {
+  if (reportsIntegrationsSnapshot && (state.settings?.hubMode || 'local') === 'client') {
+    return reportsIntegrationsSnapshot;
+  }
+  return reportsIntegrationsSnapshot || state.settings?.reportIntegrations || {};
+}
+
+function populateIntegrationsFields(integrations) {
+  const ai = integrations?.ai || {};
+  const oc = integrations?.openclaw || {};
+  if (els.reportsAiEnabledInput) els.reportsAiEnabledInput.checked = ai.enabled === true;
+  if (els.reportsAiProtocolInput && !els.reportsAiProtocolInput.matches?.(':focus')) {
+    els.reportsAiProtocolInput.value = ai.protocol || 'openai-compatible';
+  }
+  if (els.reportsAiProviderLabelInput && !els.reportsAiProviderLabelInput.matches?.(':focus')) {
+    els.reportsAiProviderLabelInput.value = ai.providerLabel || '';
+  }
+  if (els.reportsAiBaseUrlInput && !els.reportsAiBaseUrlInput.matches?.(':focus')) {
+    els.reportsAiBaseUrlInput.value = ai.baseUrl || '';
+  }
+  if (els.reportsAiModelInput && !els.reportsAiModelInput.matches?.(':focus')) {
+    els.reportsAiModelInput.value = ai.model || '';
+  }
+  if (els.reportsAiLanguageInput && !els.reportsAiLanguageInput.matches?.(':focus')) {
+    els.reportsAiLanguageInput.value = ai.language || 'zh-CN';
+  }
+  if (els.reportsAiAutoAnalyzeInput) els.reportsAiAutoAnalyzeInput.checked = ai.autoAnalyzeOnRollover === true;
+  if (els.reportsAiApiKeyInput) {
+    els.reportsAiApiKeyInput.placeholder = ai.apiKeyConfigured
+      ? t('settings.reports.secretConfiguredPlaceholder')
+      : t('settings.reports.secretPlaceholder');
+  }
+  if (els.reportsAiClearKeyButton) els.reportsAiClearKeyButton.hidden = ai.apiKeyConfigured !== true;
+
+  if (els.reportsOpenClawEnabledInput) els.reportsOpenClawEnabledInput.checked = oc.enabled === true;
+  if (els.reportsOpenClawModeInput && !els.reportsOpenClawModeInput.matches?.(':focus')) {
+    els.reportsOpenClawModeInput.value = oc.mode || 'openclaw-agent';
+  }
+  if (els.reportsOpenClawWebhookUrlInput && !els.reportsOpenClawWebhookUrlInput.matches?.(':focus')) {
+    els.reportsOpenClawWebhookUrlInput.value = oc.webhookUrl || '';
+  }
+  if (els.reportsOpenClawChannelInput && !els.reportsOpenClawChannelInput.matches?.(':focus')) {
+    els.reportsOpenClawChannelInput.value = oc.channel || 'openclaw-weixin';
+  }
+  if (els.reportsOpenClawToInput && !els.reportsOpenClawToInput.matches?.(':focus')) {
+    els.reportsOpenClawToInput.value = oc.to || '';
+  }
+  if (els.reportsOpenClawAgentIdInput && !els.reportsOpenClawAgentIdInput.matches?.(':focus')) {
+    els.reportsOpenClawAgentIdInput.value = oc.agentId || 'main';
+  }
+  if (els.reportsOpenClawPushOnRolloverInput) els.reportsOpenClawPushOnRolloverInput.checked = oc.pushOnRollover === true;
+  if (els.reportsOpenClawIncludeAiInput) els.reportsOpenClawIncludeAiInput.checked = oc.includeAiAnalysis !== false;
+  if (els.reportsOpenClawIncludeLimitsInput) els.reportsOpenClawIncludeLimitsInput.checked = oc.includeLimits !== false;
+  if (els.reportsOpenClawHookTokenInput) {
+    els.reportsOpenClawHookTokenInput.placeholder = oc.hookTokenConfigured
+      ? t('settings.reports.secretConfiguredPlaceholder')
+      : t('settings.reports.secretPlaceholder');
+  }
+  if (els.reportsOpenClawClearTokenButton) els.reportsOpenClawClearTokenButton.hidden = oc.hookTokenConfigured !== true;
+}
+
+async function refreshReportIntegrations(force = false) {
+  const mode = state.settings?.hubMode || 'local';
+  if (mode !== 'host' && mode !== 'client') {
+    reportsIntegrationsSnapshot = null;
+    reportsIntegrationsModeSynced = mode;
+    return;
+  }
+  if (!force && reportsIntegrationsModeSynced === mode && reportsIntegrationsSnapshot) return;
+  reportsIntegrationsModeSynced = mode;
+  try {
+    const res = await window.tokenMonitor?.getReportIntegrations?.();
+    if (res?.ok) {
+      reportsIntegrationsSnapshot = { ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null };
+      populateIntegrationsFields(reportsIntegrationsSnapshot);
+      renderReportsSettingsStatusOnly();
+    }
+  } catch (_) {}
+}
+
+function renderReportsSettingsStatusOnly() {
+  const integrations = currentReportIntegrations();
+  const lastPush = integrations?.lastPush || null;
+  if (els.reportsAiStatusText) {
+    if (reportsAiStatusFeedback) {
+      els.reportsAiStatusText.textContent = reportsAiStatusFeedback;
+    } else {
+      els.reportsAiStatusText.textContent = '';
+    }
+  }
+  if (els.reportsOpenClawStatusText) {
+    if (reportsOpenClawStatusFeedback) {
+      els.reportsOpenClawStatusText.textContent = reportsOpenClawStatusFeedback;
+    } else if (lastPush?.at) {
+      els.reportsOpenClawStatusText.textContent = lastPush.ok
+        ? t('settings.reports.openclawLastPushOk', { at: String(lastPush.at).slice(0, 19).replace('T', ' ') })
+        : t('settings.reports.openclawLastPushFail', { error: lastPush.message || lastPush.error || 'failed' });
+    } else {
+      els.reportsOpenClawStatusText.textContent = '';
+    }
+  }
+}
 
 function formatReportsError(errorCode) {
   if (errorCode === 'hub_required') return t('settings.reports.hubRequiredNote');
@@ -14697,6 +14834,35 @@ function renderReportsSettings() {
       els.reportsStatusText.textContent = '';
     }
   }
+  if (els.reportsIntegrationsControls) {
+    els.reportsIntegrationsControls.hidden = !hubCapable;
+    els.reportsIntegrationsControls.inert = !hubCapable;
+  }
+  if (hubCapable) {
+    if (isHost && state.settings?.reportIntegrations) {
+      reportsIntegrationsSnapshot = {
+        ...state.settings.reportIntegrations,
+        lastPush: reportsIntegrationsSnapshot?.lastPush || state.settings.reportIntegrations?.lastPush || null
+      };
+    }
+    populateIntegrationsFields(currentReportIntegrations());
+    void refreshReportIntegrations(false);
+  }
+  if (els.reportsAiSaveButton) els.reportsAiSaveButton.disabled = reportsAiBusy || !hubCapable;
+  if (els.reportsAiAnalyzeNowButton) {
+    els.reportsAiAnalyzeNowButton.disabled = reportsAiBusy || !hubCapable;
+    els.reportsAiAnalyzeNowButton.textContent = reportsAiBusy
+      ? t('settings.reports.aiAnalyzing')
+      : t('settings.reports.aiAnalyzeNow');
+  }
+  if (els.reportsOpenClawSaveButton) els.reportsOpenClawSaveButton.disabled = reportsOpenClawBusy || !hubCapable;
+  if (els.reportsOpenClawPushNowButton) {
+    els.reportsOpenClawPushNowButton.disabled = reportsOpenClawBusy || !hubCapable;
+    els.reportsOpenClawPushNowButton.textContent = reportsOpenClawBusy
+      ? t('settings.reports.openclawPushing')
+      : t('settings.reports.openclawPushNow');
+  }
+  renderReportsSettingsStatusOnly();
 }
 
 for (const [elKey, settingKey, defaultValue] of [
@@ -14763,6 +14929,166 @@ els.reportsGenerateNowButton?.addEventListener('click', async () => {
     };
   } finally {
     reportsGenerating = false;
+    renderReportsSettings();
+  }
+});
+
+function collectAiIntegrationPatch(options = {}) {
+  const apiKeyRaw = String(els.reportsAiApiKeyInput?.value || '').trim();
+  return {
+    ai: {
+      enabled: els.reportsAiEnabledInput?.checked === true,
+      protocol: els.reportsAiProtocolInput?.value || 'openai-compatible',
+      providerLabel: String(els.reportsAiProviderLabelInput?.value || '').trim(),
+      baseUrl: String(els.reportsAiBaseUrlInput?.value || '').trim(),
+      model: String(els.reportsAiModelInput?.value || '').trim(),
+      language: els.reportsAiLanguageInput?.value || 'zh-CN',
+      autoAnalyzeOnRollover: els.reportsAiAutoAnalyzeInput?.checked === true,
+      ...(options.clearApiKey ? { clearApiKey: true } : apiKeyRaw ? { apiKey: apiKeyRaw } : {})
+    }
+  };
+}
+
+function collectOpenClawIntegrationPatch(options = {}) {
+  const tokenRaw = String(els.reportsOpenClawHookTokenInput?.value || '').trim();
+  return {
+    openclaw: {
+      enabled: els.reportsOpenClawEnabledInput?.checked === true,
+      mode: els.reportsOpenClawModeInput?.value || 'openclaw-agent',
+      webhookUrl: String(els.reportsOpenClawWebhookUrlInput?.value || '').trim(),
+      channel: String(els.reportsOpenClawChannelInput?.value || '').trim() || 'openclaw-weixin',
+      to: String(els.reportsOpenClawToInput?.value || '').trim(),
+      agentId: String(els.reportsOpenClawAgentIdInput?.value || '').trim() || 'main',
+      pushOnRollover: els.reportsOpenClawPushOnRolloverInput?.checked === true,
+      includeAiAnalysis: els.reportsOpenClawIncludeAiInput?.checked !== false,
+      includeLimits: els.reportsOpenClawIncludeLimitsInput?.checked !== false,
+      ...(options.clearHookToken ? { clearHookToken: true } : tokenRaw ? { hookToken: tokenRaw } : {})
+    }
+  };
+}
+
+els.reportsAiSaveButton?.addEventListener('click', async () => {
+  reportsAiBusy = true;
+  reportsAiStatusFeedback = null;
+  renderReportsSettings();
+  try {
+    const res = await window.tokenMonitor?.saveReportIntegrations?.(collectAiIntegrationPatch());
+    if (res?.ok) {
+      reportsIntegrationsSnapshot = { ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null };
+      if (els.reportsAiApiKeyInput) els.reportsAiApiKeyInput.value = '';
+      reportsAiStatusFeedback = t('settings.reports.aiSaved');
+    } else {
+      reportsAiStatusFeedback = formatReportsError(res?.message || res?.error);
+    }
+  } catch (error) {
+    reportsAiStatusFeedback = error?.message || t('settings.reports.generateFailed');
+  } finally {
+    reportsAiBusy = false;
+    renderReportsSettings();
+  }
+});
+
+els.reportsAiClearKeyButton?.addEventListener('click', async () => {
+  reportsAiBusy = true;
+  reportsAiStatusFeedback = null;
+  renderReportsSettings();
+  try {
+    const res = await window.tokenMonitor?.saveReportIntegrations?.(collectAiIntegrationPatch({ clearApiKey: true }));
+    if (res?.ok) {
+      reportsIntegrationsSnapshot = { ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null };
+      if (els.reportsAiApiKeyInput) els.reportsAiApiKeyInput.value = '';
+      reportsAiStatusFeedback = t('settings.reports.aiSaved');
+    } else {
+      reportsAiStatusFeedback = formatReportsError(res?.message || res?.error);
+    }
+  } finally {
+    reportsAiBusy = false;
+    renderReportsSettings();
+  }
+});
+
+els.reportsAiAnalyzeNowButton?.addEventListener('click', async () => {
+  reportsAiBusy = true;
+  reportsAiStatusFeedback = null;
+  renderReportsSettings();
+  try {
+    const res = await window.tokenMonitor?.analyzeReportWithAi?.({ granularity: 'daily', periodKey: 'latest', refresh: true });
+    if (res?.ok && res.aiAnalysis) {
+      reportsAiStatusFeedback = t('settings.reports.aiAnalyzed', { model: res.aiAnalysis.model || 'AI' });
+      if (els.reportsAiPreview) {
+        els.reportsAiPreview.textContent = res.aiAnalysis.summaryMarkdown || '';
+        els.reportsAiPreview.classList.toggle('hidden', !res.aiAnalysis.summaryMarkdown);
+      }
+    } else {
+      reportsAiStatusFeedback = formatReportsError(res?.message || res?.error);
+    }
+  } catch (error) {
+    reportsAiStatusFeedback = error?.message || t('settings.reports.generateFailed');
+  } finally {
+    reportsAiBusy = false;
+    renderReportsSettings();
+  }
+});
+
+els.reportsOpenClawSaveButton?.addEventListener('click', async () => {
+  reportsOpenClawBusy = true;
+  reportsOpenClawStatusFeedback = null;
+  renderReportsSettings();
+  try {
+    const res = await window.tokenMonitor?.saveReportIntegrations?.(collectOpenClawIntegrationPatch());
+    if (res?.ok) {
+      reportsIntegrationsSnapshot = { ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null };
+      if (els.reportsOpenClawHookTokenInput) els.reportsOpenClawHookTokenInput.value = '';
+      reportsOpenClawStatusFeedback = t('settings.reports.openclawSaved');
+    } else {
+      reportsOpenClawStatusFeedback = formatReportsError(res?.message || res?.error);
+    }
+  } catch (error) {
+    reportsOpenClawStatusFeedback = error?.message || t('settings.reports.generateFailed');
+  } finally {
+    reportsOpenClawBusy = false;
+    renderReportsSettings();
+  }
+});
+
+els.reportsOpenClawClearTokenButton?.addEventListener('click', async () => {
+  reportsOpenClawBusy = true;
+  reportsOpenClawStatusFeedback = null;
+  renderReportsSettings();
+  try {
+    const res = await window.tokenMonitor?.saveReportIntegrations?.(collectOpenClawIntegrationPatch({ clearHookToken: true }));
+    if (res?.ok) {
+      reportsIntegrationsSnapshot = { ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null };
+      if (els.reportsOpenClawHookTokenInput) els.reportsOpenClawHookTokenInput.value = '';
+      reportsOpenClawStatusFeedback = t('settings.reports.openclawSaved');
+    } else {
+      reportsOpenClawStatusFeedback = formatReportsError(res?.message || res?.error);
+    }
+  } finally {
+    reportsOpenClawBusy = false;
+    renderReportsSettings();
+  }
+});
+
+els.reportsOpenClawPushNowButton?.addEventListener('click', async () => {
+  reportsOpenClawBusy = true;
+  reportsOpenClawStatusFeedback = null;
+  renderReportsSettings();
+  try {
+    const res = await window.tokenMonitor?.pushReportToOpenClaw?.({ target: 'openclaw', granularity: 'daily', periodKey: 'latest' });
+    if (res?.lastPush) {
+      const current = currentReportIntegrations();
+      reportsIntegrationsSnapshot = { ...current, lastPush: res.lastPush };
+    }
+    if (res?.ok) {
+      reportsOpenClawStatusFeedback = t('settings.reports.openclawPushed', { channel: res.channel || 'openclaw-weixin' });
+    } else {
+      reportsOpenClawStatusFeedback = formatReportsError(res?.message || res?.error);
+    }
+  } catch (error) {
+    reportsOpenClawStatusFeedback = error?.message || t('settings.reports.generateFailed');
+  } finally {
+    reportsOpenClawBusy = false;
     renderReportsSettings();
   }
 });

@@ -421,6 +421,40 @@ class CredentialStore {
     return !this.readWorkbuddyCredential(accountId);
   }
 
+  readIntegrationSecrets(document = this.readDocument()) {
+    const aiApiKey = valueAt(document.credentials, ['integrations', 'reports', 'aiApiKey']);
+    const openclawHookToken = valueAt(document.credentials, ['integrations', 'reports', 'openclawHookToken']);
+    return {
+      aiApiKey: typeof aiApiKey === 'string' ? aiApiKey : '',
+      openclawHookToken: typeof openclawHookToken === 'string' ? openclawHookToken : ''
+    };
+  }
+
+  writeIntegrationSecrets(patch = {}) {
+    const document = this.readDocument();
+    let changed = false;
+    if (Object.hasOwn(patch, 'aiApiKey')) {
+      const value = typeof patch.aiApiKey === 'string' ? patch.aiApiKey.trim() : '';
+      if (value) {
+        setValueAt(document.credentials, ['integrations', 'reports', 'aiApiKey'], value);
+      } else {
+        deleteValueAt(document.credentials, ['integrations', 'reports', 'aiApiKey']);
+      }
+      changed = true;
+    }
+    if (Object.hasOwn(patch, 'openclawHookToken')) {
+      const value = typeof patch.openclawHookToken === 'string' ? patch.openclawHookToken.trim() : '';
+      if (value) {
+        setValueAt(document.credentials, ['integrations', 'reports', 'openclawHookToken'], value);
+      } else {
+        deleteValueAt(document.credentials, ['integrations', 'reports', 'openclawHookToken']);
+      }
+      changed = true;
+    }
+    if (changed) this.writeDocument(document);
+    return this.readIntegrationSecrets(document);
+  }
+
   migrateLegacyMimoCredentials(entries) {
     const document = this.readDocument();
     if (Number(document.migrations.mimoFiles || 0) >= MIMO_MIGRATION_VERSION) {

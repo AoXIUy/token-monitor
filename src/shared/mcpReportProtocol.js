@@ -7,6 +7,10 @@ const {
   analyzeProjectUsage,
   renderReportMarkdown
 } = require('./usageReport');
+const {
+  buildRealtimeOverviewSnapshot,
+  extractLimitsSummary
+} = require('./aiReportAnalyzer');
 
 const MCP_SUPPORTED_VERSIONS = Object.freeze(['2025-06-18', '2025-03-26', '2024-11-05']);
 
@@ -121,6 +125,89 @@ const MCP_TOOLS = Object.freeze([
       },
       additionalProperties: false
     }
+  },
+  {
+    name: 'get_realtime_usage_and_limits',
+    description: 'Fetch live today/month/all-time usage telemetry, active devices, and third-party API & provider quota balances.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        thirdPartyOnly: {
+          type: 'boolean',
+          description: 'When true, filter limits to third-party API providers (New API, Sub2API, Custom).'
+        },
+        maxProviders: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 100,
+          description: 'Maximum provider/quota entries to return.'
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'analyze_report_with_ai',
+    description: 'Analyze a usage report and live quota snapshot using the configured third-party AI API, or answer a focused question about the data.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        granularity: {
+          type: 'string',
+          enum: ['daily', 'weekly', 'monthly'],
+          description: 'Report granularity (defaults to daily).'
+        },
+        periodKey: {
+          type: 'string',
+          description: 'Period key or "latest" / "current".'
+        },
+        question: {
+          type: 'string',
+          description: 'Optional focused question about project cost, trends, or third-party quotas.'
+        },
+        language: {
+          type: 'string',
+          enum: ['zh-CN', 'en', 'auto'],
+          description: 'Preferred analysis output language.'
+        },
+        refresh: {
+          type: 'boolean',
+          description: 'Bypass cached AI analysis and regenerate from the third-party AI API.'
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'push_report_to_openclaw',
+    description: 'Format a usage report, live third-party API balances, and optional AI summary and deliver it via OpenClaw Gateway Webhook (e.g. to WeChat).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        granularity: {
+          type: 'string',
+          enum: ['daily', 'weekly', 'monthly'],
+          description: 'Report granularity (defaults to daily).'
+        },
+        periodKey: {
+          type: 'string',
+          description: 'Period key or "latest" / "current".'
+        },
+        includeAi: {
+          type: 'boolean',
+          description: 'Include third-party AI analysis summary when available.'
+        },
+        includeLimits: {
+          type: 'boolean',
+          description: 'Include provider & third-party API quota balances.'
+        },
+        question: {
+          type: 'string',
+          description: 'Optional custom focus before delivery.'
+        }
+      },
+      additionalProperties: false
+    }
   }
 ]);
 
@@ -197,6 +284,22 @@ const MCP_PROMPTS = Object.freeze([
         description: 'Project name or canonical key.',
         required: true
       },
+      {
+        name: 'granularity',
+        description: 'Report granularity: daily, weekly, or monthly.',
+        required: false
+      },
+      {
+        name: 'periodKey',
+        description: 'Period key or "latest".',
+        required: false
+      }
+    ]
+  },
+  {
+    name: 'wechat-digest',
+    description: 'Produce a concise mobile/WeChat-ready digest combining today/period usage, top projects, third-party API balances, and AI insights.',
+    arguments: [
       {
         name: 'granularity',
         description: 'Report granularity: daily, weekly, or monthly.',
@@ -337,6 +440,9 @@ function parseReportUri(uriString) {
  * @param {(args: { granularity: string, periodKey?: string, format?: string }) => Promise<any> | any} [options.getReport]
  * @param {(args: { granularity?: string, periodKey?: string, force?: boolean }) => Promise<any> | any} [options.generateReport]
  * @param {(args: { granularity?: string, periodKey?: string, project?: string, limit?: number }) => Promise<any> | any} [options.analyzeProjects]
+ * @param {() => Promise<any> | any} [options.getStats]
+ * @param {(args: { granularity?: string, periodKey?: string, question?: string, language?: string, refresh?: boolean }) => Promise<any> | any} [options.analyzeWithAi]
+ * @param {(args: { granularity?: string, periodKey?: string, includeAi?: boolean, includeLimits?: boolean, question?: string }) => Promise<any> | any} [options.pushToOpenClaw]
  * @param {{ name?: string, version?: string }} [options.serverInfo]
  * @returns {{ handleMessage: (message: any) => Promise<JsonRpcResponse | null>, handlePayload: (payload: any) => Promise<JsonRpcResponse | JsonRpcResponse[] | null> }}
  */
@@ -345,6 +451,9 @@ function createMcpReportServer({
   getReport,
   generateReport,
   analyzeProjects,
+  getStats,
+  analyzeWithAi,
+  pushToOpenClaw,
   serverInfo
 } = {}) {
   const resolvedServerInfo = {
@@ -411,13 +520,16 @@ function createMcpReportServer({
       }
 
       const reportObj = unwrapReportObject(result) || result;
+      const payloadObj = reportObj && typeof reportObj === 'object' && !Array.isArray(reportObj) && result.aiAnalysis && !reportObj.aiAnalysis
+        ? { ...reportObj, aiAnalysis: result.aiAnalysis }
+        : reportObj;
       return {
         content: [{
           type: 'text',
-          text: typeof reportObj === 'string' ? reportObj : JSON.stringify(reportObj, null, 2)
+          text: typeof payloadObj === 'string' ? payloadObj : JSON.stringify(payloadObj, null, 2)
         }],
-        ...(reportObj && typeof reportObj === 'object' && !Array.isArray(reportObj)
-          ? { structuredContent: reportObj }
+        ...(payloadObj && typeof payloadObj === 'object' && !Array.isArray(payloadObj)
+          ? { structuredContent: payloadObj }
           : {})
       };
     }
@@ -475,6 +587,76 @@ function createMcpReportServer({
         ...(analysis && typeof analysis === 'object' && !Array.isArray(analysis)
           ? { structuredContent: analysis }
           : {})
+      };
+    }
+
+    if (name === 'get_realtime_usage_and_limits') {
+      if (typeof getStats !== 'function') {
+        return toolErrorResult('get_realtime_usage_and_limits backend is not configured.');
+      }
+      if (args.maxProviders !== undefined && (!Number.isInteger(args.maxProviders) || args.maxProviders < 1 || args.maxProviders > 100)) {
+        return toolErrorResult('maxProviders must be an integer between 1 and 100.');
+      }
+      const stats = await getStats();
+      const backendErr = extractBackendError(stats);
+      if (backendErr) return toolErrorResult(backendErr);
+      const limitsSummary = extractLimitsSummary(stats, {
+        thirdPartyOnly: Boolean(args.thirdPartyOnly),
+        maxProviders: args.maxProviders
+      });
+      const overview = buildRealtimeOverviewSnapshot(stats, limitsSummary);
+      return {
+        content: [{ type: 'text', text: JSON.stringify(overview, null, 2) }],
+        structuredContent: overview
+      };
+    }
+
+    if (name === 'analyze_report_with_ai') {
+      if (typeof analyzeWithAi !== 'function') {
+        return toolErrorResult('analyze_report_with_ai backend is not configured.');
+      }
+      const granularity = args.granularity !== undefined ? String(args.granularity).trim() : 'daily';
+      if (!REPORT_GRANULARITIES.includes(granularity)) {
+        return toolErrorResult(`Invalid granularity: ${granularity}`);
+      }
+      const result = await analyzeWithAi({
+        granularity,
+        periodKey: args.periodKey !== undefined ? String(args.periodKey) : 'latest',
+        ...(args.question !== undefined ? { question: String(args.question) } : {}),
+        ...(args.language !== undefined ? { language: String(args.language) } : {}),
+        ...(args.refresh !== undefined ? { refresh: Boolean(args.refresh) } : {})
+      });
+      const backendErr = extractBackendError(result);
+      if (backendErr) return toolErrorResult(backendErr);
+      return {
+        content: [{
+          type: 'text',
+          text: result?.aiAnalysis?.summaryMarkdown || JSON.stringify(result, null, 2)
+        }],
+        ...(result && typeof result === 'object' && !Array.isArray(result) ? { structuredContent: result } : {})
+      };
+    }
+
+    if (name === 'push_report_to_openclaw') {
+      if (typeof pushToOpenClaw !== 'function') {
+        return toolErrorResult('push_report_to_openclaw backend is not configured.');
+      }
+      const granularity = args.granularity !== undefined ? String(args.granularity).trim() : 'daily';
+      if (!REPORT_GRANULARITIES.includes(granularity)) {
+        return toolErrorResult(`Invalid granularity: ${granularity}`);
+      }
+      const result = await pushToOpenClaw({
+        granularity,
+        periodKey: args.periodKey !== undefined ? String(args.periodKey) : 'latest',
+        ...(args.includeAi !== undefined ? { includeAi: Boolean(args.includeAi) } : {}),
+        ...(args.includeLimits !== undefined ? { includeLimits: Boolean(args.includeLimits) } : {}),
+        ...(args.question !== undefined ? { question: String(args.question) } : {})
+      });
+      const backendErr = extractBackendError(result);
+      if (backendErr) return toolErrorResult(backendErr);
+      return {
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        ...(result && typeof result === 'object' && !Array.isArray(result) ? { structuredContent: result } : {})
       };
     }
 
@@ -653,6 +835,27 @@ function createMcpReportServer({
                 content: {
                   type: 'text',
                   text: `Analyze Token Monitor usage for project "${project}" during ${granularity} period "${periodKey}". Call analyze_project_usage with { granularity: "${granularity}", periodKey: "${periodKey}", project: "${project}" } and inspect report://${granularity}/${periodKey} to summarize token share, known cost, unpriced tokens, dominant clients and models, cache efficiency, and automated signals.`
+                }
+              }
+            ]
+          });
+        }
+
+        if (promptName === 'wechat-digest') {
+          const granularity = typeof args.granularity === 'string' && REPORT_GRANULARITIES.includes(args.granularity)
+            ? args.granularity
+            : 'daily';
+          const periodKey = typeof args.periodKey === 'string' && args.periodKey.trim()
+            ? args.periodKey.trim()
+            : 'latest';
+          return jsonRpcOk(id, {
+            description: promptDef.description,
+            messages: [
+              {
+                role: 'user',
+                content: {
+                  type: 'text',
+                  text: `Prepare a concise Chinese WeChat-ready digest for Token Monitor (${granularity} period "${periodKey}"). Call get_usage_report({ granularity: "${granularity}", periodKey: "${periodKey}" }) and get_realtime_usage_and_limits({}). Summarize today/period tokens, known cost, top projects, cache hit rate, and third-party API / subscription quota balances using short bullet points (avoid wide markdown tables so it renders cleanly in WeChat).`
                 }
               }
             ]

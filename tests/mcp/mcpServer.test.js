@@ -425,7 +425,15 @@ test('Local Store direct mode serves reports, tools, resources, and prompts over
   assert.equal(batch1[1].id, 2);
   assert.deepEqual(
     batch1[1].result.tools.map((tool) => tool.name),
-    ['list_usage_reports', 'get_usage_report', 'generate_usage_report', 'analyze_project_usage']
+    [
+      'list_usage_reports',
+      'get_usage_report',
+      'generate_usage_report',
+      'analyze_project_usage',
+      'get_realtime_usage_and_limits',
+      'analyze_report_with_ai',
+      'push_report_to_openclaw'
+    ]
   );
 
   // First generate wrote daily/weekly/monthly files on disk
@@ -482,7 +490,7 @@ test('Local Store direct mode serves reports, tools, resources, and prompts over
   assert.equal(readRes.schema, REPORT_SCHEMA);
   assert.equal(readRes.reportId, `daily:${todayKey}`);
 
-  assert.equal(batch2[3].result.prompts.length, 4);
+  assert.equal(batch2[3].result.prompts.length, 5);
   assert.match(batch2[4].result.messages[0].content.text, /token-monitor/);
 
   assert.equal(batch2[5].result.isError, true);
@@ -785,7 +793,7 @@ test('spawned node src/mcp/server.js handles full MCP lifecycle over stdio in lo
   assert.equal(JSON.parse(msgs[5].result.content[0].text).projects[0].key, 'token-monitor');
   assert.equal(msgs[6].result.resources.length, 3);
   assert.equal(JSON.parse(msgs[7].result.contents[0].text).reportId, `daily:${todayKey}`);
-  assert.equal(msgs[8].result.prompts.length, 4);
+  assert.equal(msgs[8].result.prompts.length, 5);
   assert.match(msgs[9].result.messages[0].content.text, new RegExp(todayKey));
 });
 

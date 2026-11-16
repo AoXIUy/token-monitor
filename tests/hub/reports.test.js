@@ -293,7 +293,15 @@ test('HTTP routes enforce secret, validate config, generate & deduplicate report
   const toolsList = await (await mcpPost({ jsonrpc: '2.0', id: 2, method: 'tools/list' })).json();
   assert.deepEqual(
     toolsList.result.tools.map((tool) => tool.name),
-    ['list_usage_reports', 'get_usage_report', 'generate_usage_report', 'analyze_project_usage']
+    [
+      'list_usage_reports',
+      'get_usage_report',
+      'generate_usage_report',
+      'analyze_project_usage',
+      'get_realtime_usage_and_limits',
+      'analyze_report_with_ai',
+      'push_report_to_openclaw'
+    ]
   );
 
   const callList = await (await mcpPost({

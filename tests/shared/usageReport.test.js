@@ -667,7 +667,15 @@ test('createMcpReportServer implements MCP JSON-RPC 2.0 lifecycle, tools, resour
   const toolsList = await server.handleMessage({ jsonrpc: '2.0', id: 4, method: 'tools/list' });
   assert.deepEqual(
     toolsList?.result.tools.map((t) => t.name),
-    ['list_usage_reports', 'get_usage_report', 'generate_usage_report', 'analyze_project_usage']
+    [
+      'list_usage_reports',
+      'get_usage_report',
+      'generate_usage_report',
+      'analyze_project_usage',
+      'get_realtime_usage_and_limits',
+      'analyze_report_with_ai',
+      'push_report_to_openclaw'
+    ]
   );
 
   const listCall = await server.handleMessage({
@@ -746,7 +754,7 @@ test('createMcpReportServer implements MCP JSON-RPC 2.0 lifecycle, tools, resour
   const promptsList = await server.handleMessage({ jsonrpc: '2.0', id: 14, method: 'prompts/list' });
   assert.deepEqual(
     promptsList?.result.prompts.map((p) => p.name),
-    ['analyze-daily-report', 'analyze-weekly-report', 'analyze-monthly-report', 'project-deep-dive']
+    ['analyze-daily-report', 'analyze-weekly-report', 'analyze-monthly-report', 'project-deep-dive', 'wechat-digest']
   );
 
   const promptDeepDive = await server.handleMessage({

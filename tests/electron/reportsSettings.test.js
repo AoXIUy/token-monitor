@@ -62,7 +62,35 @@ function createRendererReportsHarness() {
     reportsOpenDirButton: createElementStub(),
     reportsActionsRow: createElementStub(),
     reportsGenerateNowButton: createElementStub(),
-    reportsStatusText: createElementStub()
+    reportsStatusText: createElementStub(),
+    reportsIntegrationsControls: createElementStub(),
+    reportsAiEnabledInput: createElementStub(),
+    reportsAiProtocolInput: createElementStub(),
+    reportsAiProviderLabelInput: createElementStub(),
+    reportsAiBaseUrlInput: createElementStub(),
+    reportsAiModelInput: createElementStub(),
+    reportsAiApiKeyInput: createElementStub(),
+    reportsAiClearKeyButton: createElementStub(),
+    reportsAiLanguageInput: createElementStub(),
+    reportsAiAutoAnalyzeInput: createElementStub(),
+    reportsAiStatusText: createElementStub(),
+    reportsAiSaveButton: createElementStub(),
+    reportsAiAnalyzeNowButton: createElementStub(),
+    reportsAiPreview: createElementStub(),
+    reportsOpenClawEnabledInput: createElementStub(),
+    reportsOpenClawModeInput: createElementStub(),
+    reportsOpenClawWebhookUrlInput: createElementStub(),
+    reportsOpenClawHookTokenInput: createElementStub(),
+    reportsOpenClawClearTokenButton: createElementStub(),
+    reportsOpenClawChannelInput: createElementStub(),
+    reportsOpenClawToInput: createElementStub(),
+    reportsOpenClawAgentIdInput: createElementStub(),
+    reportsOpenClawPushOnRolloverInput: createElementStub(),
+    reportsOpenClawIncludeAiInput: createElementStub(),
+    reportsOpenClawIncludeLimitsInput: createElementStub(),
+    reportsOpenClawStatusText: createElementStub(),
+    reportsOpenClawSaveButton: createElementStub(),
+    reportsOpenClawPushNowButton: createElementStub()
   };
   const state = {
     settings: {
@@ -80,6 +108,13 @@ function createRendererReportsHarness() {
   let generateResult = { ok: true, reports: [{ reportId: 'daily:2026-11-16' }, { reportId: 'weekly:2026-W47' }] };
   let pickDirResult = { ok: true, dir: '/tmp/custom-reports' };
   let openDirResult = { ok: true, dir: '/tmp/custom-reports' };
+  const savedIntegrationsPatches = [];
+  let integrationsState = {
+    ok: true,
+    ai: { enabled: false, protocol: 'openai-compatible', providerLabel: '', baseUrl: '', model: '', language: 'zh-CN', apiKeyConfigured: false },
+    openclaw: { enabled: false, mode: 'openclaw-agent', webhookUrl: '', channel: 'openclaw-weixin', to: '', agentId: 'main', hookTokenConfigured: false },
+    lastPush: null
+  };
 
   const tokenMonitor = {
     async pickReportsDir() {
@@ -90,6 +125,24 @@ function createRendererReportsHarness() {
     },
     async generateReportsNow() {
       return generateResult;
+    },
+    async getReportIntegrations() {
+      return integrationsState;
+    },
+    async saveReportIntegrations(patch) {
+      savedIntegrationsPatches.push(patch);
+      integrationsState = {
+        ...integrationsState,
+        ai: { ...integrationsState.ai, ...(patch.ai || {}), apiKeyConfigured: Boolean(patch.ai?.apiKey || (integrationsState.ai.apiKeyConfigured && !patch.ai?.clearApiKey)) },
+        openclaw: { ...integrationsState.openclaw, ...(patch.openclaw || {}), hookTokenConfigured: Boolean(patch.openclaw?.hookToken || (integrationsState.openclaw.hookTokenConfigured && !patch.openclaw?.clearHookToken)) }
+      };
+      return integrationsState;
+    },
+    async analyzeReportWithAi() {
+      return { ok: true, aiAnalysis: { model: 'deepseek-chat', summaryMarkdown: 'AI OK' } };
+    },
+    async pushReportToOpenClaw() {
+      return { ok: true, channel: 'openclaw-weixin', lastPush: { ok: true, at: '2026-11-16T22:00:00Z' } };
     }
   };
 
@@ -123,6 +176,7 @@ function createRendererReportsHarness() {
     state,
     context,
     savedPatches,
+    savedIntegrationsPatches,
     setRejectSave(value) { rejectSave = value; },
     setGenerateResult(value) { generateResult = value; },
     setPickDirResult(value) { pickDirResult = value; },
@@ -260,4 +314,40 @@ test('report toggles, directory picker, open folder, and generate now update set
   setOpenDirResult({ ok: false, error: 'permission denied' });
   await els.reportsOpenDirButton.trigger('click');
   assert.equal(els.reportsStatusText.textContent, 'permission denied');
+});
+
+test('AI API and OpenClaw WeChat integration controls save, redact secrets, analyze, and push', async () => {
+  const { els, state, context, savedIntegrationsPatches } = createRendererReportsHarness();
+  state.settings.hubMode = 'host';
+  context.renderReportsSettings();
+  assert.equal(els.reportsIntegrationsControls.hidden, false);
+
+  els.reportsAiEnabledInput.checked = true;
+  els.reportsAiProtocolInput.value = 'openai-compatible';
+  els.reportsAiProviderLabelInput.value = 'DeepSeek';
+  els.reportsAiBaseUrlInput.value = 'https://api.deepseek.com/v1';
+  els.reportsAiModelInput.value = 'deepseek-chat';
+  els.reportsAiApiKeyInput.value = 'sk-ui-secret';
+  await els.reportsAiSaveButton.trigger('click');
+  assert.equal(savedIntegrationsPatches.at(-1).ai.apiKey, 'sk-ui-secret');
+  assert.equal(els.reportsAiApiKeyInput.value, '');
+  assert.equal(els.reportsAiStatusText.textContent, 'AI settings saved');
+
+  await els.reportsAiAnalyzeNowButton.trigger('click');
+  assert.equal(els.reportsAiPreview.textContent, 'AI OK');
+  assert.equal(els.reportsAiStatusText.textContent, 'AI analysis updated (deepseek-chat)');
+
+  els.reportsOpenClawEnabledInput.checked = true;
+  els.reportsOpenClawModeInput.value = 'openclaw-agent';
+  els.reportsOpenClawWebhookUrlInput.value = 'http://127.0.0.1:19001/hooks/agent';
+  els.reportsOpenClawChannelInput.value = 'openclaw-weixin';
+  els.reportsOpenClawToInput.value = 'wxid_demo';
+  els.reportsOpenClawHookTokenInput.value = 'oc-token';
+  await els.reportsOpenClawSaveButton.trigger('click');
+  assert.equal(savedIntegrationsPatches.at(-1).openclaw.hookToken, 'oc-token');
+  assert.equal(els.reportsOpenClawHookTokenInput.value, '');
+  assert.equal(els.reportsOpenClawStatusText.textContent, 'OpenClaw settings saved');
+
+  await els.reportsOpenClawPushNowButton.trigger('click');
+  assert.equal(els.reportsOpenClawStatusText.textContent, 'Delivered to OpenClaw (openclaw-weixin)');
 });

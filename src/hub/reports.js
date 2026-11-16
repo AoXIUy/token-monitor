@@ -382,6 +382,7 @@ function pruneSnapshots(snapshots) {
  * @param {string} [options.hubRuntime]
  * @param {number} [options.debounceMs]
  * @param {() => Date} [options.now]
+ * @param {(event: { granularity: 'daily' | 'weekly' | 'monthly', periodKey: string, summary: any }) => void} [options.onReportArchived]
  * @param {{ error?: Function, warn?: Function, log?: Function }} [options.logger]
  */
 function createReportManager({
@@ -394,6 +395,7 @@ function createReportManager({
   hubRuntime = 'node-hub',
   debounceMs = DEFAULT_DEBOUNCE_MS,
   now = () => new Date(),
+  onReportArchived = undefined,
   logger = console
 } = {}) {
   const resolvedDataFile = dataFile || path.join(projectRoot(), 'data', 'devices.json');
@@ -569,6 +571,15 @@ function createReportManager({
     };
   }
 
+  function notifyArchived(granularity, periodKey, summary) {
+    if (typeof onReportArchived !== 'function') return;
+    try {
+      onReportArchived({ granularity, periodKey, summary });
+    } catch (error) {
+      logError(error, `failed onReportArchived callback for ${granularity}:${periodKey}`);
+    }
+  }
+
   /**
    * @param {string} prevDayKey
    * @param {string} nextDayKey
@@ -580,7 +591,8 @@ function createReportManager({
 
     if (currentConfig.daily) {
       try {
-        persistSingleReport('daily', prevDayKey, { force: false, nowDate: refDate });
+        const summary = persistSingleReport('daily', prevDayKey, { force: false, nowDate: refDate });
+        notifyArchived('daily', prevDayKey, summary);
       } catch (error) {
         logError(error, `failed to archive daily report ${prevDayKey}`);
       }
@@ -590,7 +602,8 @@ function createReportManager({
     const nextWeek = isoWeekKeyForDateKey(nextDayKey);
     if (currentConfig.weekly && prevWeek !== nextWeek) {
       try {
-        persistSingleReport('weekly', prevWeek, { force: false, nowDate: refDate });
+        const summary = persistSingleReport('weekly', prevWeek, { force: false, nowDate: refDate });
+        notifyArchived('weekly', prevWeek, summary);
       } catch (error) {
         logError(error, `failed to archive weekly report ${prevWeek}`);
       }
@@ -600,7 +613,8 @@ function createReportManager({
     const nextMonth = nextDayKey.slice(0, 7);
     if (currentConfig.monthly && prevMonth !== nextMonth) {
       try {
-        persistSingleReport('monthly', prevMonth, { force: false, nowDate: refDate });
+        const summary = persistSingleReport('monthly', prevMonth, { force: false, nowDate: refDate });
+        notifyArchived('monthly', prevMonth, summary);
       } catch (error) {
         logError(error, `failed to archive monthly report ${prevMonth}`);
       }

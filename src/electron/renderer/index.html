@@ -1775,6 +1775,123 @@
                   <button id="reportsGenerateNowButton" type="button" data-i18n="settings.reports.generateNow">Generate now</button>
                 </div>
               </div>
+              <div id="reportsIntegrationsControls" class="reports-integrations-wrap" hidden>
+                <div id="reportsAiPanel" class="reports-integration-panel">
+                  <div class="reports-integration-header">
+                    <span class="settings-item-title" data-i18n="settings.reports.aiTitle">Third-party AI report analysis</span>
+                    <input id="reportsAiEnabledInput" type="checkbox" aria-label="Enable third-party AI report analysis" data-i18n-aria-label="settings.reports.aiTitle" />
+                  </div>
+                  <p class="settings-note" data-i18n="settings.reports.aiDesc">Connect an OpenAI-compatible or Anthropic Messages API to summarize reports, live usage, and third-party API quotas.</p>
+                  <div class="reports-integration-grid">
+                    <label class="reports-field">
+                      <span class="settings-note" data-i18n="settings.reports.aiProtocol">API protocol</span>
+                      <select id="reportsAiProtocolInput">
+                        <option value="openai-compatible" data-i18n="settings.reports.aiProtocolOpenAI">OpenAI Compatible</option>
+                        <option value="anthropic-messages" data-i18n="settings.reports.aiProtocolAnthropic">Anthropic Messages</option>
+                      </select>
+                    </label>
+                    <label class="reports-field">
+                      <span class="settings-note" data-i18n="settings.reports.aiProviderLabel">Provider label</span>
+                      <input id="reportsAiProviderLabelInput" type="text" spellcheck="false" placeholder="DeepSeek / New API / OpenAI" />
+                    </label>
+                    <label class="reports-field">
+                      <span class="settings-note" data-i18n="settings.reports.aiBaseUrl">Base URL</span>
+                      <input id="reportsAiBaseUrlInput" type="url" spellcheck="false" placeholder="https://api.deepseek.com/v1" />
+                    </label>
+                    <label class="reports-field">
+                      <span class="settings-note" data-i18n="settings.reports.aiModel">Model</span>
+                      <input id="reportsAiModelInput" type="text" spellcheck="false" placeholder="deepseek-chat" />
+                    </label>
+                    <label class="reports-field">
+                      <span class="settings-note" data-i18n="settings.reports.aiApiKey">API key</span>
+                      <div class="reports-secret-row">
+                        <input id="reportsAiApiKeyInput" type="password" autocomplete="off" spellcheck="false" data-i18n-placeholder="settings.reports.secretPlaceholder" placeholder="Enter key (stored in Main/Hub)" />
+                        <button id="reportsAiClearKeyButton" type="button" class="settings-mini-button" data-i18n="settings.reports.clearSecret" hidden>Clear</button>
+                      </div>
+                    </label>
+                    <label class="reports-field">
+                      <span class="settings-note" data-i18n="settings.reports.aiLanguage">Output language</span>
+                      <select id="reportsAiLanguageInput">
+                        <option value="zh-CN">简体中文 (zh-CN)</option>
+                        <option value="en">English (en)</option>
+                        <option value="auto">Auto</option>
+                      </select>
+                    </label>
+                    <label class="checkbox-label settings-item">
+                      <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.aiAutoAnalyze">Auto-analyze rolled-over periods</span></span>
+                      <input id="reportsAiAutoAnalyzeInput" type="checkbox" />
+                    </label>
+                  </div>
+                  <div class="export-manual-row">
+                    <span id="reportsAiStatusText" class="settings-note export-manual-note"></span>
+                    <div class="settings-actions">
+                      <button id="reportsAiSaveButton" type="button" data-i18n="settings.common.save">Save</button>
+                      <button id="reportsAiAnalyzeNowButton" type="button" data-i18n="settings.reports.aiAnalyzeNow">Analyze latest</button>
+                    </div>
+                  </div>
+                  <pre id="reportsAiPreview" class="reports-ai-preview hidden" aria-live="polite"></pre>
+                </div>
+
+                <div id="reportsOpenClawPanel" class="reports-integration-panel">
+                  <div class="reports-integration-header">
+                    <span class="settings-item-title" data-i18n="settings.reports.openclawTitle">OpenClaw WeChat delivery</span>
+                    <input id="reportsOpenClawEnabledInput" type="checkbox" aria-label="Enable OpenClaw WeChat delivery" data-i18n-aria-label="settings.reports.openclawTitle" />
+                  </div>
+                  <p class="settings-note" data-i18n="settings.reports.openclawDesc">Push reports, AI summaries, and third-party API balances to WeChat via OpenClaw Gateway (/hooks/agent).</p>
+                  <div class="reports-integration-grid">
+                    <label class="reports-field">
+                      <span class="settings-note" data-i18n="settings.reports.openclawMode">Delivery mode</span>
+                      <select id="reportsOpenClawModeInput">
+                        <option value="openclaw-agent" data-i18n="settings.reports.openclawModeAgent">OpenClaw Agent (/hooks/agent → WeChat)</option>
+                        <option value="openclaw-wake" data-i18n="settings.reports.openclawModeWake">OpenClaw Wake (/hooks/wake)</option>
+                        <option value="generic-webhook" data-i18n="settings.reports.openclawModeWebhook">Generic Webhook</option>
+                      </select>
+                    </label>
+                    <label class="reports-field">
+                      <span class="settings-note" data-i18n="settings.reports.openclawWebhookUrl">Gateway Webhook URL</span>
+                      <input id="reportsOpenClawWebhookUrlInput" type="url" spellcheck="false" placeholder="http://127.0.0.1:19001/hooks/agent" />
+                    </label>
+                    <label class="reports-field">
+                      <span class="settings-note" data-i18n="settings.reports.openclawHookToken">Hook token</span>
+                      <div class="reports-secret-row">
+                        <input id="reportsOpenClawHookTokenInput" type="password" autocomplete="off" spellcheck="false" data-i18n-placeholder="settings.reports.secretPlaceholder" placeholder="Enter token (stored in Main/Hub)" />
+                        <button id="reportsOpenClawClearTokenButton" type="button" class="settings-mini-button" data-i18n="settings.reports.clearSecret" hidden>Clear</button>
+                      </div>
+                    </label>
+                    <label class="reports-field">
+                      <span class="settings-note" data-i18n="settings.reports.openclawChannel">WeChat channel</span>
+                      <input id="reportsOpenClawChannelInput" type="text" spellcheck="false" placeholder="openclaw-weixin" />
+                    </label>
+                    <label class="reports-field">
+                      <span class="settings-note" data-i18n="settings.reports.openclawTarget">Recipient target (to)</span>
+                      <input id="reportsOpenClawToInput" type="text" spellcheck="false" placeholder="WeChat OpenID / session target" />
+                    </label>
+                    <label class="reports-field">
+                      <span class="settings-note" data-i18n="settings.reports.openclawAgentId">OpenClaw agent ID</span>
+                      <input id="reportsOpenClawAgentIdInput" type="text" spellcheck="false" placeholder="main" />
+                    </label>
+                    <label class="checkbox-label settings-item">
+                      <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawAutoPush">Auto-push on period rollover</span></span>
+                      <input id="reportsOpenClawPushOnRolloverInput" type="checkbox" />
+                    </label>
+                    <label class="checkbox-label settings-item">
+                      <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawIncludeAi">Include AI analysis summary</span></span>
+                      <input id="reportsOpenClawIncludeAiInput" type="checkbox" checked />
+                    </label>
+                    <label class="checkbox-label settings-item">
+                      <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawIncludeLimits">Include live &amp; third-party quotas</span></span>
+                      <input id="reportsOpenClawIncludeLimitsInput" type="checkbox" checked />
+                    </label>
+                  </div>
+                  <div class="export-manual-row">
+                    <span id="reportsOpenClawStatusText" class="settings-note export-manual-note"></span>
+                    <div class="settings-actions">
+                      <button id="reportsOpenClawSaveButton" type="button" data-i18n="settings.common.save">Save</button>
+                      <button id="reportsOpenClawPushNowButton" type="button" data-i18n="settings.reports.openclawPushNow">Push to WeChat</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
             <div id="syncDevicePanel" class="sync-panel" hidden>
               <div class="sync-panel-heading">
