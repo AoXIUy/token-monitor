@@ -4,33 +4,24 @@
 
 <!-- app-update-notes:en:start -->
 ### Added
-- **Qoder international usage:** Tracks the international Qoder edition alongside Qoder CN. Both appear in one Qoder row, with an option to show the versions separately.
-- **Saved Hubs:** Saves several Hubs, each with its own name, URL, secret and Device ID, and switches between them from the sync status card without retyping.
-- **Mica backdrops:** Windows Glass Style adds Mica and Mica Alt for the widget and quota history windows on Windows 11 22H2 or later. Older Windows builds keep using Acrylic.
-
-### Changed
-- **Qoder CN usage:** Usage that exists only in the legacy local database is no longer counted. Project transcripts remain the source.
+- **Git worktree grouping:** Linked git worktrees are automatically resolved to their parent repository via `.git` and `commondir`, grouping worktree sessions under the main repository row on the Projects page.
+- **OpenClaw usage:** Tokscale 4.23.0 adds collection from OpenClaw SQLite transcript archives with deduplication across live and exported transcripts.
+- **Account declaration type checking:** Adds JSDoc `AccountDeclaration` definitions and `@satisfies` across all provider declarations, verified via `npm run typecheck` in verify and CI.
 
 ### Improved
-- **Limits diagnostics:** The diagnostics report names the stage and cause of a quota failure, such as a timeout, a challenge page or an HTTP error.
-
-### Fixed
-- **Windows main window:** Reopening the window no longer flashes an empty backdrop or an opaque grey Acrylic background.
-- **Hub connection:** A Hub that showed Connected while usage and quota stopped updating, for example after a Worker redeploy, now recovers on its own.
-- **Multi-device quota history:** Accounts watched from several devices no longer show a broken trend line or usage that is “Not allocated to time buckets”.
-- **Qoder quota history:** History stays on one timeline when the Qoder cookie refreshes or the account signs in again.
-- **OMP totals:** Month and all-time totals no longer double-count OMP forks recorded before the Pi and OMP split.
-- **Project ranking:** Projects are ranked by token usage instead of cost, matching the totals and bars shown.
+- **New API scoped tokens and error diagnostics:** Supports New API scoped and 30-day tokens, identifying expired legacy tokens (`ACCESS_TOKEN_LEGACY_RETIRED`) and missing scopes (`ACCESS_TOKEN_SCOPE_DENIED`). Tokens with only balance access can now be saved with an informational warning when period spending is unavailable.
+- **Muse web quota recovery:** Accepts Next.js `static/immutable/chunks/` layouts and automatically retries stale server actions (400, 404, 409) with rediscovered action IDs.
+- **Edge Dock animation continuity:** Retains running and waiting animation phases, hover glows, and session activity pulse effects across live updates without visual interruptions or flickering.
 
 ### Notes
-- Synced [Javis603/token-monitor v0.93.0](https://github.com/Javis603/token-monitor/releases/tag/v0.93.0) at `a88c6950`. This fork includes online conversations, session output rates and read-only approval alerts for Android.
+- Synced [Javis603/token-monitor v0.93.1](https://github.com/Javis603/token-monitor/releases/tag/v0.93.1) at `55cd6bfb`. This fork includes online conversations, session output rates and read-only approval alerts for Android.
 <!-- app-update-notes:en:end -->
 ## Download
 
-- **Windows Installer** — [Token-Monitor-Setup-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-Setup-0.95.0.exe) (recommended)
-- **Windows Portable** — [Token-Monitor-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0.exe) (no install required)
-- **Linux amd64** — [Token-Monitor-0.95.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.95.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-x86_64.AppImage)
+- **Windows Installer** — [Token-Monitor-Setup-0.95.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-Setup-0.95.1.exe) (recommended)
+- **Windows Portable** — [Token-Monitor-0.95.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-0.95.1.exe) (no install required)
+- **Linux amd64** — [Token-Monitor-0.95.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-0.95.1-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.95.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-0.95.1-x86_64.AppImage)
 
 <details>
 <summary><strong>First launch and other notes</strong></summary>
@@ -39,7 +30,7 @@
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.95.0-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.95.0-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.95.1-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.95.1-x86_64.AppImage` then run it.
 
 ### Other notes
 
@@ -59,34 +50,25 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 <!-- app-update-notes:zh:start -->
 ### 新增
-- **Qoder 国际版用量：** 支持追踪 Qoder 国际版，与 Qoder CN 合并显示为一个 Qoder 行，也可选择分开显示版本。
-- **多个 Hub：** 可保存多个 Hub，各自拥有名称、URL、密钥和设备 ID，并在同步状态卡片中一键切换，无需重新输入。
-- **Mica 背景：** Windows 玻璃样式新增 Mica 与 Mica Alt，适用于小组件和额度历史窗口，需要 Windows 11 22H2 或更高版本；较旧的 Windows 继续使用 Acrylic。
-
-### 变更
-- **Qoder CN 用量：** 仅存在于旧版本地数据库中的用量不再计入，项目会话记录仍是统计来源。
+- **Git Worktree 项目合并：** 自动通过关联 worktree 的 `.git` 与 `commondir` 解析其父仓库，在“项目”页面中将所有 worktree 的会话统一汇总至主仓库行。
+- **OpenClaw 用量支持：** 升级至 Tokscale 4.23.0，支持从 OpenClaw SQLite 会话归档中采集用量，并自动对实时会话与导出记录去重。
+- **账号声明类型检查：** 为所有额度提供商账号声明添加 JSDoc `AccountDeclaration` 与 `@satisfies` 校验，并在 `verify` 与 CI 中通过 `npm run typecheck` 执行类型检查。
 
 ### 改进
-- **额度诊断：** 诊断报告会指出额度失败所处的阶段和原因，例如超时、验证页面或 HTTP 错误。
-
-### 修复
-- **Windows 主窗口：** 重新打开窗口时，不再闪现空白背景或不透明的灰色 Acrylic 背景。
-- **Hub 连接：** Hub 显示“已连接”但用量和额度停止更新的问题（例如 Worker 重新部署之后）现在会自动恢复。
-- **多设备额度历史：** 从多台设备监看同一账号时，不再出现中断的趋势线或“未能分配至时段”的用量。
-- **Qoder 额度历史：** Qoder Cookie 刷新或账号重新登录后，历史仍保持在同一条时间线上。
-- **OMP 合计：** 本月与总计用量不再重复计算在 Pi 與 OMP 拆分之前记录的 OMP 分支会话。
-- **项目排序：** 项目改为按 Token 用量排序而非费用，与显示的合计和条形图一致。
+- **New API 分权限令牌与错误诊断：** 适配 New API 分权限与 30 天有效期令牌，明确区分已废弃的旧令牌（`ACCESS_TOKEN_LEGACY_RETIRED`）与权限不足（`ACCESS_TOKEN_SCOPE_DENIED`）；仅有余额权限的令牌现可正常保存，并在缺少周期消费权限时给出清晰提示。
+- **Muse Web 额度恢复：** 兼容 Next.js `static/immutable/chunks/` 静态分块路径，遇到过期的服务端动作（400、404、409）时自动重新发现动作 ID 并重试。
+- **Edge Dock 动效连续性：** 在实时刷新过程中保留运行中与等待中的动画阶段、悬浮光晕与会话脉冲动效，避免界面跳变或闪烁。
 
 ### 说明
-- 同步 [Javis603/token-monitor v0.93.0](https://github.com/Javis603/token-monitor/releases/tag/v0.93.0)（`a88c6950`）。本分支提供安卓在线对话、会话输出速率和只读审批提醒。
+- 同步 [Javis603/token-monitor v0.93.1](https://github.com/Javis603/token-monitor/releases/tag/v0.93.1)（`55cd6bfb`）。本分支提供安卓在线对话、会话输出速率和只读审批提醒。
 <!-- app-update-notes:zh:end -->
 
 ## 下载
 
-- **Windows 安装版** — [Token-Monitor-Setup-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-Setup-0.95.0.exe)（推荐）
-- **Windows 便携版** — [Token-Monitor-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0.exe)（免安装）
-- **Linux amd64** — [Token-Monitor-0.95.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.95.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-x86_64.AppImage)
+- **Windows 安装版** — [Token-Monitor-Setup-0.95.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-Setup-0.95.1.exe)（推荐）
+- **Windows 便携版** — [Token-Monitor-0.95.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-0.95.1.exe)（免安装）
+- **Linux amd64** — [Token-Monitor-0.95.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-0.95.1-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.95.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-0.95.1-x86_64.AppImage)
 
 <details>
 <summary><strong>首次启动与其他说明</strong></summary>
@@ -95,7 +77,7 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.95.0-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.95.0-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.95.1-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.95.1-x86_64.AppImage` then run it.
 
 ### 其他说明
 
@@ -110,7 +92,7 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ---
 
 <details>
-<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.94.0...v0.95.0">v0.94.0...v0.95.0</a></summary>
+<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.95.0...v0.95.1">v0.95.0...v0.95.1</a></summary>
 
 <!-- github-generated-release-notes -->
 
@@ -128,34 +110,25 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 <!-- app-update-notes:zh-TW:start -->
 ### 新增
-- **Qoder 國際版用量：** 支援追蹤 Qoder 國際版，與 Qoder CN 合併顯示為單一 Qoder 列，也可選擇分開顯示版本。
-- **多個 Hub：** 可儲存多個 Hub，各自擁有名稱、URL、金鑰與裝置 ID，並在同步狀態卡片中一鍵切換，無需重新輸入。
-- **Mica 背景：** Windows 玻璃樣式新增 Mica 與 Mica Alt，適用於小工具與額度歷史視窗，需要 Windows 11 22H2 或更新版本；較舊的 Windows 繼續使用 Acrylic。
-
-### 變更
-- **Qoder CN 用量：** 僅存在於舊版本機資料庫中的用量不再計入，專案對話紀錄仍是統計來源。
+- **Git Worktree 專案合併：** 自動透過關聯 worktree 的 `.git` 與 `commondir` 解析其父儲存庫，在「專案」頁面中將所有 worktree 的工作階段統一彙總至主儲存庫列。
+- **OpenClaw 用量支援：** 升級至 Tokscale 4.23.0，支援從 OpenClaw SQLite 工作階段封存中採集用量，並自動對即時工作階段與匯出紀錄去重。
+- **帳號宣告型別檢查：** 為所有額度提供者帳號宣告加入 JSDoc `AccountDeclaration` 與 `@satisfies` 校驗，並在 `verify` 與 CI 中透過 `npm run typecheck` 執行型別檢查。
 
 ### 改進
-- **額度診斷：** 診斷報告會指出額度失敗所處的階段與原因，例如逾時、驗證頁面或 HTTP 錯誤。
-
-### 修復
-- **Windows 主視窗：** 重新開啟視窗時，不再閃現空白背景或不透明的灰色 Acrylic 背景。
-- **Hub 連線：** Hub 顯示「已連線」但用量與額度停止更新的問題（例如 Worker 重新部署之後）現在會自動恢復。
-- **多裝置額度歷史：** 從多台裝置監看同一帳號時，不再出現中斷的趨勢線或「未能分配至時段」的用量。
-- **Qoder 額度歷史：** Qoder Cookie 更新或帳號重新登入後，歷史仍維持在同一條時間線上。
-- **OMP 合計：** 本月與總計用量不再重複計算在 Pi 與 OMP 拆分之前記錄的 OMP 分支工作階段。
-- **專案排序：** 專案改為依 Token 用量排序而非費用，與顯示的合計和長條圖一致。
+- **New API 分權限權杖與錯誤診斷：** 適配 New API 分權限與 30 天有效期權杖，明確區分已廢棄的舊權杖（`ACCESS_TOKEN_LEGACY_RETIRED`）與權限不足（`ACCESS_TOKEN_SCOPE_DENIED`）；僅有餘額權限的權杖現可正常儲存，並在缺少週期消費權限時給出清楚提示。
+- **Muse Web 額度恢復：** 相容 Next.js `static/immutable/chunks/` 靜態分塊路徑，遇到過期的伺服器動作（400、404、409）時自動重新探索動作 ID 並重試。
+- **Edge Dock 動效連續性：** 在即時重新整理過程中保留執行中與等待中的動畫階段、懸浮光暈與工作階段脈衝動效，避免介面跳變或閃爍。
 
 ### 說明
-- 同步 [Javis603/token-monitor v0.93.0](https://github.com/Javis603/token-monitor/releases/tag/v0.93.0)（`a88c6950`）。本分支提供 Android 線上對話、工作階段輸出速率和唯讀審批提醒。
+- 同步 [Javis603/token-monitor v0.93.1](https://github.com/Javis603/token-monitor/releases/tag/v0.93.1)（`55cd6bfb`）。本分支提供 Android 線上對話、工作階段輸出速率和唯讀審批提醒。
 <!-- app-update-notes:zh-TW:end -->
 
 ## 下載
 
-- **Windows 安裝版** — [Token-Monitor-Setup-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-Setup-0.95.0.exe)（推薦）
-- **Windows 便攜版** — [Token-Monitor-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0.exe)（免安裝）
-- **Linux amd64** — [Token-Monitor-0.95.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.95.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-x86_64.AppImage)
+- **Windows 安裝版** — [Token-Monitor-Setup-0.95.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-Setup-0.95.1.exe)（推薦）
+- **Windows 便攜版** — [Token-Monitor-0.95.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-0.95.1.exe)（免安裝）
+- **Linux amd64** — [Token-Monitor-0.95.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-0.95.1-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.95.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-0.95.1-x86_64.AppImage)
 
 </details>
 
@@ -168,34 +141,25 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 <!-- app-update-notes:ko:start -->
 ### 추가
-- **Qoder 국제 버전 사용량:** Qoder 국제 버전을 Qoder CN과 함께 추적합니다. 두 버전은 하나의 Qoder 행으로 표시되며, 버전별로 나누어 표시할 수도 있습니다.
-- **여러 Hub 저장:** 이름, URL, 시크릿, 기기 ID가 각각 있는 Hub를 여러 개 저장하고, 동기화 상태 카드에서 다시 입력하지 않고 바로 전환할 수 있습니다.
-- **Mica 배경:** Windows 글래스 스타일에 Mica와 Mica Alt가 추가되어 위젯과 한도 기록 창에 적용할 수 있습니다. Windows 11 22H2 이상이 필요하며, 이전 Windows에서는 계속 Acrylic을 사용합니다.
-
-### 변경
-- **Qoder CN 사용량:** 예전 로컬 데이터베이스에만 있는 사용량은 더 이상 집계되지 않으며, 프로젝트 대화 기록이 집계 기준으로 유지됩니다.
+- **Git Worktree 프로젝트 그룹화:** 연결된 Git worktree의 `.git` 및 `commondir`을 통해 상위 저장소를 자동으로 확인하여 프로젝트 페이지에서 worktree 세션을 상위 저장소 행에 통합합니다.
+- **OpenClaw 사용량 지원:** Tokscale 4.23.0으로 업데이트하여 OpenClaw SQLite 세션 아카이브 수집을 지원하고 실시간 및 내보낸 세션 간의 중복을 방지합니다.
+- **계정 선언 타입 검사:** 모든 한도 제공자 계정 선언에 JSDoc `AccountDeclaration` 및 `@satisfies` 검증을 추가하고 `verify` 및 CI에서 `npm run typecheck`를 실행합니다.
 
 ### 개선
-- **한도 진단:** 진단 보고서가 시간 초과, 인증 확인 페이지, HTTP 오류 등 할당량 조회 실패의 단계와 원인을 알려 줍니다.
-
-### 수정
-- **Windows 메인 창:** 창을 다시 열 때 빈 배경이 깜빡이거나 Acrylic 배경이 불투명한 회색으로 보이던 문제를 수정했습니다.
-- **Hub 연결:** Hub가 연결됨으로 표시되는데 사용량과 한도가 갱신되지 않던 문제(예: Worker 재배포 이후)가 이제 자동으로 복구됩니다.
-- **여러 기기의 한도 기록:** 여러 기기에서 같은 계정을 볼 때 추세선이 끊기거나 “시간 구간에 배분되지 않은 양”이 나타나던 문제를 수정했습니다.
-- **Qoder 한도 기록:** Qoder 쿠키가 갱신되거나 계정에 다시 로그인해도 기록이 하나의 타임라인으로 유지됩니다.
-- **OMP 합계:** Pi와 OMP가 분리되기 전에 기록된 OMP 포크가 이번 달과 전체 합계에 중복 집계되던 문제를 수정했습니다.
-- **프로젝트 정렬:** 프로젝트를 비용이 아닌 토큰 사용량 순으로 정렬해, 표시되는 합계와 막대와 일치합니다.
+- **New API 스코프 토큰 및 오류 진단:** New API의 범위 지정 및 30일 만료 토큰을 지원하며 만료된 레거시 토큰(`ACCESS_TOKEN_LEGACY_RETIRED`)과 권한 부족(`ACCESS_TOKEN_SCOPE_DENIED`)을 명확히 구분합니다. 잔액 조회 권한만 있는 토큰도 저장할 수 있으며 기간별 지출 조회가 불가능할 때 안내 메시지를 표시합니다.
+- **Muse Web 한도 복구:** Next.js `static/immutable/chunks/` 청크 경로를 지원하고 만료된 서버 액션(400, 404, 409) 발생 시 액션 ID를 자동으로 다시 검색하여 재시도합니다.
+- **Edge Dock 애니메이션 연속성:** 실시간 업데이트 중에도 실행 중/대기 중 애니메이션 단계, 호버 글로우 및 세션 활동 펄스를 유지하여 깜빡임이나 끊김을 방지합니다.
 
 ### 참고
-- [Javis603/token-monitor v0.93.0](https://github.com/Javis603/token-monitor/releases/tag/v0.93.0)의 `a88c6950`을 반영했습니다. 이 포크는 Android의 온라인 대화, 세션 출력 속도 및 읽기 전용 승인 알림을 제공합니다.
+- [Javis603/token-monitor v0.93.1](https://github.com/Javis603/token-monitor/releases/tag/v0.93.1)의 `55cd6bfb`을 반영했습니다. 이 포크는 Android의 온라인 대화, 세션 출력 속도 및 읽기 전용 승인 알림을 제공합니다.
 <!-- app-update-notes:ko:end -->
 
 ## 다운로드
 
-- **Windows 설치 버전** — [Token-Monitor-Setup-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-Setup-0.95.0.exe) (권장)
-- **Windows 포터블 버전** — [Token-Monitor-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0.exe) (설치 필요 없음)
-- **Linux amd64** — [Token-Monitor-0.95.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.95.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-x86_64.AppImage)
+- **Windows 설치 버전** — [Token-Monitor-Setup-0.95.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-Setup-0.95.1.exe) (권장)
+- **Windows 포터블 버전** — [Token-Monitor-0.95.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-0.95.1.exe) (설치 필요 없음)
+- **Linux amd64** — [Token-Monitor-0.95.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-0.95.1-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.95.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-0.95.1-x86_64.AppImage)
 
 </details>
 
@@ -208,34 +172,25 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 <!-- app-update-notes:ja:start -->
 ### 追加
-- **Qoder国際版の使用量:** Qoder国際版をQoder CNと並べて追跡します。両方が1つのQoder行に表示され、バージョン別に分けて表示することもできます。
-- **複数Hubの保存:** 名前、URL、シークレット、デバイスIDを持つHubを複数保存し、同期ステータスカードから入力し直さずに切り替えられます。
-- **Mica背景:** WindowsガラススタイルにMicaとMica Altを追加しました。ウィジェットと上限履歴のウィンドウで使え、Windows 11 22H2以降が必要です。それより前のWindowsでは引き続きAcrylicを使用します。
-
-### 変更
-- **Qoder CNの使用量:** 旧ローカルデータベースにしかない使用量は集計されなくなりました。集計元はプロジェクトの会話記録です。
+- **Git Worktree プロジェクトの統合:** リンクされた Git worktree の `.git` と `commondir` から親リポジトリを自動解決し、プロジェクトページで各 worktree のセッションを親リポジトリの行にまとめます。
+- **OpenClaw 使用量のサポート:** Tokscale 4.23.0 にアップデートし、OpenClaw の SQLite 会話アーカイブからの収集に対応し、リアルタイムおよびエクスポート済みセッションの重複排除を行います。
+- **アカウント宣言の型チェック:** すべての制限プロバイダーのアカウント宣言に JSDoc `AccountDeclaration` と `@satisfies` 検証を追加し、`verify` と CI で `npm run typecheck` を実行します。
 
 ### 改善
-- **上限の診断:** 診断レポートに、タイムアウト、確認ページ、HTTPエラーなど、上限取得の失敗が起きた段階と原因が表示されます。
-
-### 修正
-- **Windowsのメインウィンドウ:** ウィンドウを開き直したときに、空の背景が一瞬表示されたり、Acrylic背景が不透明なグレーになったりする問題を修正しました。
-- **Hub接続:** Hubが接続済みと表示されているのに使用量と上限が更新されなくなる問題（Workerの再デプロイ後など）から、自動で回復するようになりました。
-- **複数端末の上限履歴:** 複数の端末から同じアカウントを監視しても、推移の線が途切れたり、「時間帯に配分できない変化」が表示されたりしなくなりました。
-- **Qoderの上限履歴:** QoderのCookieが更新されたりアカウントに再ログインしたりしても、履歴が1本のタイムラインにまとまったままになります。
-- **OMPの合計:** PiとOMPの分離前に記録されたOMPのフォークが、今月と合計で二重に集計される問題を修正しました。
-- **プロジェクトの並び順:** プロジェクトをコストではなくトークン使用量の順に並べ、表示される合計やバーと一致するようにしました。
+- **New API スコープ付きトークンとエラー診断:** New API のスコープ付きおよび 30 日期限トークンに対応し、期限切れレガシートークン（`ACCESS_TOKEN_LEGACY_RETIRED`）と権限不足（`ACCESS_TOKEN_SCOPE_DENIED`）を明確に区別します。残高のみの権限を持つトークンも保存可能となり、期間ごとの支出が取得できない場合の案内を表示します。
+- **Muse Web 制限の回復:** Next.js の `static/immutable/chunks/` チャンク配置に対応し、失効したサーバーアクション（400, 404, 409）が発生した際にアクション ID を自動で再検出して再試行します。
+- **Edge Dock アニメーションの継続性:** リアルタイム更新時にも実行中・待機中アニメーションのフェーズ、ホバー時の光彩、セッションアクティビティパルスを維持し、表示のちらつきやリセットを防ぎます。
 
 ### 注意
-- [Javis603/token-monitor v0.93.0](https://github.com/Javis603/token-monitor/releases/tag/v0.93.0) の `a88c6950` を取り込みました。このフォークは Android のオンライン会話、セッション出力速度、読み取り専用の承認通知を提供します。
+- [Javis603/token-monitor v0.93.1](https://github.com/Javis603/token-monitor/releases/tag/v0.93.1) の `55cd6bfb` を取り込みました。このフォークは Android のオンライン会話、セッション出力速度、読み取り専用の承認通知を提供します。
 <!-- app-update-notes:ja:end -->
 
 ## ダウンロード
 
-- **Windows インストーラー** — [Token-Monitor-Setup-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-Setup-0.95.0.exe)（推奨）
-- **Windows ポータブル版** — [Token-Monitor-0.95.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0.exe)（インストール不要）
-- **Linux amd64** — [Token-Monitor-0.95.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.95.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.0/Token-Monitor-0.95.0-x86_64.AppImage)
+- **Windows インストーラー** — [Token-Monitor-Setup-0.95.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-Setup-0.95.1.exe)（推奨）
+- **Windows ポータブル版** — [Token-Monitor-0.95.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-0.95.1.exe)（インストール不要）
+- **Linux amd64** — [Token-Monitor-0.95.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-0.95.1-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.95.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.95.1/Token-Monitor-0.95.1-x86_64.AppImage)
 
 </details>
 
