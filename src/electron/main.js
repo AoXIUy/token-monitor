@@ -3811,7 +3811,12 @@ async function startEmbeddedHub() {
       syncSessionTitles: settings.hubSyncSessionTitles === true,
       sessionConversations: settings.sessionConversationsEnabled !== false,
       approvalAlerts: settings.approvalAlertsEnabled === true,
-      reports: reportsConfigFromSettings(settings),
+      reports: {
+        enabled: settings.reportsEnabled === true,
+        daily: settings.reportsDaily !== false,
+        weekly: settings.reportsWeekly !== false,
+        monthly: settings.reportsMonthly !== false
+      },
       reportsDir: settings.reportsDir || '',
       dataFile: hubDataFile(),
       logger: { error: (err) => console.log(`[hub] ${err?.message || err}`) }

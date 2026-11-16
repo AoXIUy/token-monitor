@@ -135,8 +135,8 @@ test('main.js and preload.js wire report settings, hub options, and IPC channels
   assert.match(mainSource, /reportsDaily: parseBoolean\(process\.env\.TOKEN_MONITOR_REPORTS_DAILY, true\)/);
   assert.match(mainSource, /reportsWeekly: parseBoolean\(process\.env\.TOKEN_MONITOR_REPORTS_WEEKLY, true\)/);
   assert.match(mainSource, /reportsMonthly: parseBoolean\(process\.env\.TOKEN_MONITOR_REPORTS_MONTHLY, true\)/);
-  assert.match(mainSource, /reports: reportsConfigFromSettings\(settings\)/);
-  assert.match(mainSource, /reportsDir: settings\.reportsDir \|\| ''/);
+  assert.match(mainSource, /reports:\s*\{\s*enabled:\s*settings\.reportsEnabled === true/);
+  assert.match(mainSource, /reportsDir:\s*settings\.reportsDir \|\| ''/);
   assert.match(mainSource, /embeddedHub\?\.hub\?\.setReportConfig\?\.\(reportsConfigFromSettings\(settings\)\)/);
   assert.match(mainSource, /\(receiverPermissionChanged \|\| reportsDirChanged\) && settings\.hubMode === 'host'/);
 
@@ -209,7 +209,7 @@ test('renderReportsSettings adapts visibility, disabled states, and MCP status a
   assert.equal(els.reportsWeeklyInput.disabled, true);
   assert.equal(els.reportsMonthlyInput.disabled, true);
   assert.equal(els.reportsScheduleList.classList.contains('is-disabled'), true);
-  assert.equal(els.reportsDirLabel.textContent, 'Default (Hub data/reports)');
+  assert.equal(els.reportsDirLabel.textContent, 'Default (Hub reports directory)');
   assert.equal(els.reportsStatusText.textContent, 'MCP endpoint: http://127.0.0.1:18443/api/mcp');
 
   state.settings.reportsEnabled = true;
