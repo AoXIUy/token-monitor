@@ -34,15 +34,45 @@ const {
   wantsDeltaEvents,
   wantsMinimalResponse
 } = require('../shared/hubProtocol');
-const { isAuthorized, readJsonBody, sendJson, sendText } = require('../shared/http');
+const { MAX_JSON_BODY_BYTES, isAuthorized, readJsonBody, sendJson, sendText } = require('../shared/http');
 const { loadDotEnv, parseArgs, projectRoot, readJson, writeJsonAtomic } = require('../shared/config');
 const { CONVERSATION_BASE, MAX_CONVERSATION_BYTES } = require('../shared/sessionConversationProtocol');
 const { createSessionConversationRelay } = require('./sessionConversations');
 const { APPROVAL_ALERT_BASE, MAX_APPROVAL_BODY_BYTES } = require('../shared/approvalProtocol');
 const { createApprovalAlertStore } = require('./approvalAlerts');
+const { REPORT_GRANULARITIES } = require('../shared/usageReport');
+const { createMcpReportServer } = require('../shared/mcpReportProtocol');
+const { createReportManager } = require('./reports');
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 const SHUTDOWN_DRAIN_TIMEOUT_MS = 5000;
+const ALLOWED_REPORT_CONFIG_KEYS = new Set(['enabled', 'daily', 'weekly', 'monthly']);
+
+function readRawTextBody(req, maxBytes = MAX_JSON_BODY_BYTES) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    let bytes = 0;
+    let tooLarge = false;
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => {
+      if (tooLarge) return;
+      bytes += Buffer.byteLength(chunk, 'utf8');
+      if (bytes > maxBytes) {
+        tooLarge = true;
+        body = '';
+        const error = new Error('Request body too large');
+        error.code = 'payload_too_large';
+        reject(error);
+        return;
+      }
+      body += chunk;
+    });
+    req.on('end', () => {
+      if (!tooLarge) resolve(body);
+    });
+    req.on('error', reject);
+  });
+}
 
 // Without a secret the hub cannot tell its own widget from any other caller, so it
 // must not expose account identity (email/plan/key) to the network. Binding to
@@ -61,6 +91,8 @@ function createHub({
   syncSessionTitles = false,
   sessionConversations = false,
   approvalAlerts = false,
+  reports = undefined,
+  reportsDir = '',
   staleAfterMs = DEFAULT_STALE_AFTER_MS,
   broadcastDelayMs = 100,
   persistIntervalMs = 0,
@@ -87,6 +119,23 @@ function createHub({
     getDevice: (id) => store.devices[id] });
   const approvalAlertStore = createApprovalAlertStore({ enabled: approvalAlerts === true,
     getDevice: (id) => store.devices[id] });
+  const reportManager = createReportManager({
+    dataFile,
+    reportsDir,
+    config: reports,
+    getStats,
+    getHistory,
+    getDevices,
+    hubRuntime: 'node-hub',
+    logger
+  });
+  const mcpServer = createMcpReportServer({
+    listReports: (args) => reportManager.listReports(args),
+    getReport: (args) => reportManager.getReport(args),
+    generateReport: (args) => reportManager.generateReport(args),
+    analyzeProjects: (args) => reportManager.analyzeProjects(args),
+    serverInfo: { name: 'token-monitor-hub', version: '1.0.0' }
+  });
   let persistTimer = null;
   let persistPending = false;
   let stopping = false;
@@ -267,6 +316,9 @@ function createHub({
     queuePersist();
     if (statsListeners.size > 0) notifyStatsListeners('ingest');
     queueStatsBroadcast();
+    try { reportManager.onStatsChanged(); } catch (error) {
+      (logger.error || console.error)('Hub failed to update report snapshot on ingest:', error);
+    }
     return record;
   }
 
@@ -288,6 +340,9 @@ function createHub({
     conversationRelay.remove(deviceId);
     approvalAlertStore.remove(deviceId);
     broadcastStats('delete');
+    try { reportManager.onStatsChanged(); } catch (error) {
+      (logger.error || console.error)('Hub failed to update report snapshot on delete:', error);
+    }
   }
 
   function getSyncContent() {
@@ -611,6 +666,117 @@ function createHub({
       return sendJson(res, 200, { ok: true, deviceId });
     }
 
+    if (url.pathname === '/api/reports' && req.method === 'GET') {
+      const granularityParam = url.searchParams.get('granularity');
+      const limitParam = url.searchParams.get('limit');
+      let limit;
+      if (limitParam !== null && limitParam !== '') {
+        const parsedLimit = Number(limitParam);
+        if (!Number.isInteger(parsedLimit) || parsedLimit < 1) {
+          return sendJson(res, 400, { error: 'invalid_request', message: 'limit must be a positive integer' });
+        }
+        limit = parsedLimit;
+      }
+      const result = reportManager.listReports({
+        ...(granularityParam ? { granularity: granularityParam } : {}),
+        ...(limit !== undefined ? { limit } : {})
+      });
+      if (result.ok === false) return sendJson(res, 400, result);
+      return sendJson(res, 200, result);
+    }
+
+    if (url.pathname === '/api/reports/config') {
+      if (req.method === 'GET') {
+        return sendJson(res, 200, { ok: true, ...reportManager.getConfig() });
+      }
+      if (req.method === 'PUT') {
+        try {
+          const payload = await readJsonBody(req);
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length === 0) {
+            return sendJson(res, 400, { error: 'bad_request', message: 'Report config must be a non-empty object' });
+          }
+          for (const [key, value] of Object.entries(payload)) {
+            if (!ALLOWED_REPORT_CONFIG_KEYS.has(key)) {
+              return sendJson(res, 400, { error: 'bad_request', message: `Unsupported report config field: ${key}` });
+            }
+            if (typeof value !== 'boolean') {
+              return sendJson(res, 400, { error: 'bad_request', message: `${key} must be a boolean` });
+            }
+          }
+          const updated = reportManager.setConfig(payload);
+          return sendJson(res, 200, { ok: true, ...updated });
+        } catch (error) {
+          if (error.code === 'payload_too_large') {
+            res.shouldKeepAlive = false;
+            return sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+          }
+          return sendJson(res, 400, { error: 'bad_request', message: error.message });
+        }
+      }
+      return sendJson(res, 405, { error: 'invalid_request' });
+    }
+
+    if (url.pathname === '/api/reports/generate' && req.method === 'POST') {
+      try {
+        const payload = await readJsonBody(req);
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          return sendJson(res, 400, { error: 'invalid_request', message: 'Request body must be an object' });
+        }
+        if (payload.granularity !== undefined && typeof payload.granularity !== 'string') {
+          return sendJson(res, 400, { error: 'invalid_request', message: 'granularity must be a string' });
+        }
+        if (payload.periodKey !== undefined && typeof payload.periodKey !== 'string') {
+          return sendJson(res, 400, { error: 'invalid_request', message: 'periodKey must be a string' });
+        }
+        if (payload.force !== undefined && typeof payload.force !== 'boolean') {
+          return sendJson(res, 400, { error: 'invalid_request', message: 'force must be a boolean' });
+        }
+        if (payload.timeZone !== undefined && typeof payload.timeZone !== 'string') {
+          return sendJson(res, 400, { error: 'invalid_request', message: 'timeZone must be a string' });
+        }
+        const result = reportManager.generateReport(payload);
+        if (result.ok === false) return sendJson(res, 400, result);
+        return sendJson(res, 200, result);
+      } catch (error) {
+        if (error.code === 'payload_too_large') {
+          res.shouldKeepAlive = false;
+          return sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+        }
+        return sendJson(res, 400, { error: 'bad_request', message: error.message });
+      }
+    }
+
+    const reportMatch = url.pathname.match(/^\/api\/reports\/([^/]+)\/([^/]+)$/);
+    if (reportMatch && req.method === 'GET') {
+      const granularity = decodeURIComponent(reportMatch[1]);
+      const periodKey = decodeURIComponent(reportMatch[2]);
+      if (!REPORT_GRANULARITIES.includes(granularity)) {
+        return sendJson(res, 400, { error: 'invalid_request', message: `Invalid granularity: ${granularity}` });
+      }
+      const format = url.searchParams.get('format') || 'both';
+      const timeZone = url.searchParams.get('timeZone') || undefined;
+      const result = reportManager.getReport(granularity, periodKey, { format, timeZone });
+      if (result?.error === 'not_found') return sendJson(res, 404, { error: 'not_found' });
+      if (result?.error === 'invalid_request') return sendJson(res, 400, result);
+      return sendJson(res, 200, result);
+    }
+
+    if (url.pathname === '/api/mcp') {
+      if (req.method !== 'POST') return sendJson(res, 405, { error: 'invalid_request' });
+      try {
+        const rawBody = await readRawTextBody(req);
+        const rpcResponse = await mcpServer.handlePayload(rawBody);
+        if (rpcResponse === null) return sendText(res, 204, '');
+        return sendJson(res, 200, rpcResponse);
+      } catch (error) {
+        if (error.code === 'payload_too_large') {
+          res.shouldKeepAlive = false;
+          return sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+        }
+        return sendJson(res, 400, { error: 'bad_request', message: error.message });
+      }
+    }
+
     return sendJson(res, 404, { error: 'not_found' });
   }
 
@@ -646,6 +812,7 @@ function createHub({
     stopping = true;
     conversationRelay.stop();
     approvalAlertStore.stop();
+    reportManager.stop();
     const operation = new Promise((resolve, reject) => {
       clearTimeout(persistTimer);
       persistTimer = null;
@@ -682,7 +849,12 @@ function createHub({
     start, stop, server, getStats, getHistory, getDevices, ingest, deleteDevice, onStats, bindHost,
     getSubscriptions, setSubscriptions, getSyncContent, getSyncSettings, setSyncSettings, setSyncTitlePolicy,
     setSessionConversationsEnabled: (enabled) => conversationRelay.setEnabled(enabled),
-    setApprovalAlertsEnabled: (enabled) => approvalAlertStore.setEnabled(enabled)
+    setApprovalAlertsEnabled: (enabled) => approvalAlertStore.setEnabled(enabled),
+    getReportConfig: () => reportManager.getConfig(),
+    setReportConfig: (patch) => reportManager.setConfig(patch),
+    listReports: (options) => reportManager.listReports(options),
+    getReport: (granularity, periodKey, options) => reportManager.getReport(granularity, periodKey, options),
+    generateReport: (options) => reportManager.generateReport(options)
   };
 }
 
@@ -703,7 +875,12 @@ if (require.main === module) {
   const syncSessionTitles = syncSessionTitlesEnabled(args.syncSessionTitles ?? args['sync-session-titles'] ?? process.env.TOKEN_MONITOR_SYNC_SESSION_TITLES);
   const sessionConversations = syncSessionTitlesEnabled(args.sessionConversations ?? args['session-conversations'] ?? process.env.TOKEN_MONITOR_SESSION_CONVERSATIONS);
   const approvalAlerts = syncSessionTitlesEnabled(args.approvalAlerts ?? args['approval-alerts'] ?? process.env.TOKEN_MONITOR_APPROVAL_ALERTS);
-  const hub = createHub({ port, host, secret, staleAfterMs, dataFile, syncSessionTitles, sessionConversations, approvalAlerts, persistIntervalMs });
+  const reportsArg = args.reports ?? process.env.TOKEN_MONITOR_REPORTS;
+  const reportsDir = String(args.reportsDir ?? args['reports-dir'] ?? process.env.TOKEN_MONITOR_REPORTS_DIR ?? '').trim();
+  const hub = createHub({
+    port, host, secret, staleAfterMs, dataFile, syncSessionTitles, sessionConversations, approvalAlerts,
+    persistIntervalMs, reportsDir, ...(reportsArg !== undefined ? { reports: reportsArg } : {})
+  });
   for (const signal of ['SIGINT', 'SIGTERM']) {
     process.once(signal, () => {
       hub.stop().catch((error) => {

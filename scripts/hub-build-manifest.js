@@ -44,6 +44,9 @@ const WORKER_SHARED_PACKAGE = Object.freeze({
 const CORE_SOURCE_FILES = WORKER_SHARED_MODULES.map((name) => `src/shared/${name}`);
 const NODE_RUNTIME_SOURCE_FILES = Object.freeze([
   'src/hub/server.js',
+  'src/hub/reports.js',
+  'src/shared/usageReport.js',
+  'src/shared/mcpReportProtocol.js',
   'src/hub/sessionConversations.js',
   'src/shared/sessionConversationProtocol.js',
   'src/hub/approvalAlerts.js',
