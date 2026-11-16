@@ -10,7 +10,20 @@ const os = require('node:os');
 const path = require('node:path');
 const { createHub } = require('../../src/hub/server');
 const { createReportManager, MAX_SNAPSHOT_DAYS } = require('../../src/hub/reports');
-const { REPORT_SCHEMA } = require('../../src/shared/usageReport');
+const { REPORT_SCHEMA, resolveReportPeriod } = require('../../src/shared/usageReport');
+
+function localDayKey(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function addDaysToKey(dayKey, deltaDays) {
+  const dt = new Date(`${dayKey}T12:00:00.000Z`);
+  dt.setUTCDate(dt.getUTCDate() + deltaDays);
+  return dt.toISOString().slice(0, 10);
+}
 
 function makeTempDir(prefix = 'tm-hub-reports-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -157,7 +170,7 @@ test('HTTP routes enforce secret, validate config, generate & deduplicate report
   }
 
   // 3. Ingest across multiple devices while reports are disabled; on-demand latest works
-  const todayKey = new Date().toISOString().slice(0, 10);
+  const todayKey = localDayKey();
   const monthKey = todayKey.slice(0, 7);
   await fetch(`${baseUrl}/api/ingest`, {
     method: 'POST',
@@ -383,32 +396,41 @@ test('period rollover via Hub ingest archives previous day and week, and device 
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  // Sunday 2026-11-15 (2026-W46)
+  const todayKey = localDayKey();
+  const dow = new Date(`${todayKey}T12:00:00.000Z`).getUTCDay();
+  const sinceMonday = (dow + 6) % 7;
+  const mondayKey = addDaysToKey(todayKey, -sinceMonday);
+  const sundayKey = addDaysToKey(mondayKey, -1);
+  const sundayWeekKey = resolveReportPeriod('weekly', 'current', {
+    now: new Date(`${sundayKey}T12:00:00.000Z`),
+    timeZone: 'UTC'
+  }).key;
+
+  // Sunday -> Monday -> should trigger daily & ISO weekly rollover archive
   hub.ingest(makeDevicePayload({
     deviceId: 'dev-1',
-    dayKey: '2026-11-15',
-    monthKey: '2026-11',
+    dayKey: sundayKey,
+    monthKey: sundayKey.slice(0, 7),
     tokens: 900,
     costUsd: 0.18,
     projectLabel: '/repo/sunday-work',
-    updatedAt: '2026-11-15T18:00:00.000Z'
+    updatedAt: `${sundayKey}T18:00:00.000Z`
   }));
 
-  // Monday 2026-11-16 (2026-W47) -> should trigger daily (2026-11-15) & weekly (2026-W46) rollover archive
   hub.ingest(makeDevicePayload({
     deviceId: 'dev-1',
-    dayKey: '2026-11-16',
-    monthKey: '2026-11',
+    dayKey: mondayKey,
+    monthKey: mondayKey.slice(0, 7),
     tokens: 1400,
     costUsd: 0.28,
     projectLabel: '/repo/monday-work',
-    updatedAt: '2026-11-16T10:00:00.000Z'
+    updatedAt: `${mondayKey}T10:00:00.000Z`
   }));
 
-  const archivedDailyPath = path.join(reportsDir, 'daily', '2026-11-15.json');
-  const archivedWeeklyPath = path.join(reportsDir, 'weekly', '2026-W46.json');
+  const archivedDailyPath = path.join(reportsDir, 'daily', `${sundayKey}.json`);
+  const archivedWeeklyPath = path.join(reportsDir, 'weekly', `${sundayWeekKey}.json`);
   assert.ok(fs.existsSync(archivedDailyPath), 'archived daily report should exist after rollover');
-  assert.ok(fs.existsSync(path.join(reportsDir, 'daily', '2026-11-15.md')));
+  assert.ok(fs.existsSync(path.join(reportsDir, 'daily', `${sundayKey}.md`)));
   assert.ok(fs.existsSync(archivedWeeklyPath), 'archived ISO weekly report should exist after week rollover');
 
   const archivedDaily = JSON.parse(fs.readFileSync(archivedDailyPath, 'utf8'));
@@ -416,12 +438,24 @@ test('period rollover via Hub ingest archives previous day and week, and device 
   assert.equal(archivedDaily.projects[0].label, '/repo/sunday-work');
 
   const archivedWeekly = JSON.parse(fs.readFileSync(archivedWeeklyPath, 'utf8'));
-  assert.equal(archivedWeekly.period.key, '2026-W46');
+  assert.equal(archivedWeekly.period.key, sundayWeekKey);
   assert.equal(archivedWeekly.summary.totalTokens, 900);
+
+  if (todayKey > mondayKey) {
+    hub.ingest(makeDevicePayload({
+      deviceId: 'dev-1',
+      dayKey: todayKey,
+      monthKey: todayKey.slice(0, 7),
+      tokens: 1400,
+      costUsd: 0.28,
+      projectLabel: '/repo/today-work',
+      updatedAt: new Date().toISOString()
+    }));
+  }
 
   // Deleting the device updates today's snapshot and regenerated current report
   hub.deleteDevice('dev-1');
-  const currentDaily = hub.getReport('daily', '2026-11-16', { format: 'json' });
+  const currentDaily = hub.getReport('daily', todayKey, { format: 'json' });
   assert.equal(currentDaily.ok, true);
   assert.equal(currentDaily.report.summary.totalTokens, 0);
 });
@@ -431,7 +465,7 @@ test('createReportManager persists config across restarts, rolls over across mon
   try {
     const dataFile = path.join(dir, 'devices.json');
     const reportsDir = path.join(dir, 'reports');
-    let clock = new Date('2026-11-30T15:00:00.000Z');
+    let clock = new Date(2026, 10, 30, 12, 0, 0);
     let currentStats = {
       periods: {
         today: {
@@ -476,7 +510,7 @@ test('createReportManager persists config across restarts, rolls over across mon
     mgr1.recordIngestSnapshot(currentStats);
 
     // Advance to next month 2026-12-01 (same ISO week 2026-W49, new day & new month)
-    clock = new Date('2026-12-01T09:00:00.000Z');
+    clock = new Date(2026, 11, 1, 12, 0, 0);
     currentStats = {
       ...currentStats,
       periods: {

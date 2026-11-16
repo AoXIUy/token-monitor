@@ -3951,7 +3951,7 @@ async function startEmbeddedHub() {
       reportsDir: settings.reportsDir || '',
       integrations: settings.reportIntegrations,
       integrationSecrets,
-      integrationFetch: hubReportsFetch,
+      ...(typeof hubReportsFetch === 'function' ? { integrationFetch: hubReportsFetch } : {}),
       dataFile: hubDataFile(),
       logger: { error: (err) => console.log(`[hub] ${err?.message || err}`) }
     });
