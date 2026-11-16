@@ -929,3 +929,45 @@ test('buildUsageReport covers historical daily snapshots, live monthly, usage-dr
   assert.equal(liveMonthly.projects[0].sessionCount, 1);
   assert.equal(liveMonthly.summary.cacheHitRatePct, 60);
 });
+
+test('buildUsageReport and MCP tool schema handle prototype keys safely and document generate_usage_report default', async () => {
+  const report = buildUsageReport({
+    granularity: 'daily',
+    periodKey: '2026-11-16',
+    stats: {
+      periods: {
+        today: {
+          capabilities: { tokenComponents: true, throughput: true },
+          totalTokens: 1000,
+          costUsd: 0.1,
+          outputTokens: 200,
+          timedTokens: 1000,
+          timedOutputTokens: 200,
+          timedDurationMs: 1000,
+          modelThroughput: {
+            constructor: { timedTokens: 500, timedOutputTokens: 100, timedDurationMs: 500 },
+            toString: { timedTokens: 500, timedOutputTokens: 100, timedDurationMs: 500 }
+          },
+          clients: { constructor: 500, toString: 500 },
+          clientCosts: { constructor: 0.05, toString: 0.05 },
+          clientOutputs: { constructor: 100, toString: 100 },
+          models: { constructor: 500, toString: 500 },
+          modelCosts: { constructor: 0.05, toString: 0.05 },
+          modelOutputs: { constructor: 100, toString: 100 }
+        }
+      }
+    },
+    now: '2026-11-16T12:00:00Z',
+    timeZone: 'UTC'
+  });
+
+  assert.equal(report.clients.length, 2);
+  assert.equal(report.models.length, 2);
+  assert.equal(report.models[0].avgOutputTokensPerSec, 200);
+  assert.equal(report.models[1].avgOutputTokensPerSec, 200);
+
+  const server = createMcpReportServer({});
+  const toolsList = await server.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+  const genTool = toolsList?.result.tools.find((t) => t.name === 'generate_usage_report');
+  assert.match(genTool.inputSchema.properties.granularity.description, /"all"/);
+});

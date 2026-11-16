@@ -170,6 +170,15 @@ function hasOwn(object, key) {
 }
 
 /**
+ * @param {any} object
+ * @param {string} key
+ * @returns {any}
+ */
+function ownValue(object, key) {
+  return hasOwn(object, key) ? object[key] : undefined;
+}
+
+/**
  * @param {number} value
  * @returns {number}
  */
@@ -313,7 +322,7 @@ function dayKeyInTimeZone(value, timeZone) {
       day: '2-digit'
     }).formatToParts(date);
     /** @type {Record<string, string>} */
-    const map = {};
+    const map = Object.create(null);
     for (const part of parts) map[part.type] = part.value;
     const key = `${map.year}-${map.month}-${map.day}`;
     return validateDateKey(key) ? key : '';
@@ -668,7 +677,7 @@ function pickTopName(map) {
 function livePeriodToDailyRow(period, date, historyRow) {
   const exact = period?.capabilities?.tokenComponents === true;
   /** @type {Record<string, any>} */
-  const perClient = {};
+  const perClient = Object.create(null);
   const sessionMsgsByClient = new Map();
   let totalSessionMsgs = 0;
   for (const session of Object.values(period?.sessions || {})) {
@@ -684,20 +693,20 @@ function livePeriodToDailyRow(period, date, historyRow) {
   ]);
   for (const rawClient of clientKeys) {
     const client = normalizeClientName(rawClient) || rawClient;
-    const tokens = Math.max(0, Math.round(num(period?.clients?.[rawClient])));
-    const cost = Math.max(0, num(period?.clientCosts?.[rawClient]));
+    const tokens = Math.max(0, Math.round(num(ownValue(period?.clients, rawClient))));
+    const cost = Math.max(0, num(ownValue(period?.clientCosts, rawClient)));
     const comp = computeTokenComponents({
-      cacheReadTokens: period?.clientCacheReads?.[rawClient],
-      cacheWriteTokens: period?.clientCacheWrites?.[rawClient],
-      outputTokens: period?.clientOutputs?.[rawClient],
+      cacheReadTokens: ownValue(period?.clientCacheReads, rawClient),
+      cacheWriteTokens: ownValue(period?.clientCacheWrites, rawClient),
+      outputTokens: ownValue(period?.clientOutputs, rawClient),
       ...(hasOwn(period?.clientUnclassifiedTokens, rawClient)
         ? { unclassifiedTokens: period.clientUnclassifiedTokens[rawClient] }
         : {})
     }, tokens, exact);
-    const unpriced = boundedUnpriced(tokens, period?.clientUnpricedTokens?.[rawClient]);
-    const histMsgs = Math.max(0, Math.round(num(historyRow?.perClient?.[client]?.messages)));
+    const unpriced = boundedUnpriced(tokens, ownValue(period?.clientUnpricedTokens, rawClient));
+    const histMsgs = Math.max(0, Math.round(num(ownValue(historyRow?.perClient, client)?.messages)));
     const sessMsgs = sessionMsgsByClient.get(client) || 0;
-    const prev = perClient[client];
+    const prev = ownValue(perClient, client);
     perClient[client] = {
       tokens: (prev?.tokens || 0) + tokens,
       cost: (prev?.cost || 0) + cost,
@@ -711,25 +720,25 @@ function livePeriodToDailyRow(period, date, historyRow) {
   }
 
   /** @type {Record<string, any>} */
-  const perModel = {};
+  const perModel = Object.create(null);
   const modelKeys = new Set([
     ...Object.keys(period?.models || {}),
     ...Object.keys(period?.modelCosts || {})
   ]);
   for (const rawModel of modelKeys) {
     const model = normalizeModelName(rawModel) || rawModel;
-    const tokens = Math.max(0, Math.round(num(period?.models?.[rawModel])));
-    const cost = Math.max(0, num(period?.modelCosts?.[rawModel]));
+    const tokens = Math.max(0, Math.round(num(ownValue(period?.models, rawModel))));
+    const cost = Math.max(0, num(ownValue(period?.modelCosts, rawModel)));
     const comp = computeTokenComponents({
-      cacheReadTokens: period?.modelCacheReads?.[rawModel],
-      cacheWriteTokens: period?.modelCacheWrites?.[rawModel],
-      outputTokens: period?.modelOutputs?.[rawModel],
+      cacheReadTokens: ownValue(period?.modelCacheReads, rawModel),
+      cacheWriteTokens: ownValue(period?.modelCacheWrites, rawModel),
+      outputTokens: ownValue(period?.modelOutputs, rawModel),
       ...(hasOwn(period?.modelUnclassifiedTokens, rawModel)
         ? { unclassifiedTokens: period.modelUnclassifiedTokens[rawModel] }
         : {})
     }, tokens, exact);
-    const unpriced = boundedUnpriced(tokens, period?.modelUnpricedTokens?.[rawModel]);
-    const prev = perModel[model];
+    const unpriced = boundedUnpriced(tokens, ownValue(period?.modelUnpricedTokens, rawModel));
+    const prev = ownValue(perModel, model);
     perModel[model] = {
       tokens: (prev?.tokens || 0) + tokens,
       cost: (prev?.cost || 0) + cost,
@@ -783,7 +792,7 @@ function snapshotToDailyRow(snapshot, date) {
   const exact = snapshot.tokenComponentsAvailable === true || snapshot.capabilities?.tokenComponents === true;
   const comp = computeTokenComponents(snapshot, totalTokens, exact);
   /** @type {Record<string, any>} */
-  const perClient = {};
+  const perClient = Object.create(null);
   if (snapshot.perClient && typeof snapshot.perClient === 'object') {
     for (const [k, v] of Object.entries(snapshot.perClient)) {
       const client = normalizeClientName(k) || k;
@@ -794,12 +803,12 @@ function snapshotToDailyRow(snapshot, date) {
       const client = normalizeClientName(k) || k;
       perClient[client] = {
         tokens: Math.max(0, Math.round(num(v))),
-        cost: Math.max(0, num(snapshot.clientCosts?.[k]))
+        cost: Math.max(0, num(ownValue(snapshot.clientCosts, k)))
       };
     }
   }
   /** @type {Record<string, any>} */
-  const perModel = {};
+  const perModel = Object.create(null);
   if (snapshot.perModel && typeof snapshot.perModel === 'object') {
     for (const [k, v] of Object.entries(snapshot.perModel)) {
       const model = normalizeModelName(k) || k;
@@ -810,7 +819,7 @@ function snapshotToDailyRow(snapshot, date) {
       const model = normalizeModelName(k) || k;
       perModel[model] = {
         tokens: Math.max(0, Math.round(num(v))),
-        cost: Math.max(0, num(snapshot.modelCosts?.[k]))
+        cost: Math.max(0, num(ownValue(snapshot.modelCosts, k)))
       };
     }
   }
@@ -1151,8 +1160,27 @@ function buildUsageReport({
   let timedTokens = 0;
   let timedOutputTokens = 0;
   let timedDurationMs = 0;
-  /** @type {Record<string, { timedTokens: number, timedOutputTokens: number, timedDurationMs: number }>} */
-  const modelThroughputMap = {};
+  /** @type {Map<string, { timedTokens: number, timedOutputTokens: number, timedDurationMs: number }>} */
+  const modelThroughputMap = new Map();
+
+  /**
+   * @param {any} sourceThroughput
+   */
+  const mergeModelThroughput = (sourceThroughput) => {
+    if (!sourceThroughput || typeof sourceThroughput !== 'object') return;
+    for (const [rawModel, tp] of Object.entries(sourceThroughput)) {
+      const m = normalizeModelName(rawModel) || rawModel;
+      if (!m || !tp || typeof tp !== 'object') continue;
+      let target = modelThroughputMap.get(m);
+      if (!target) {
+        target = { timedTokens: 0, timedOutputTokens: 0, timedDurationMs: 0 };
+        modelThroughputMap.set(m, target);
+      }
+      target.timedTokens += Math.max(0, Math.round(num(tp.timedTokens)));
+      target.timedOutputTokens += Math.max(0, Math.round(num(tp.timedOutputTokens)));
+      target.timedDurationMs += Math.max(0, Math.round(num(tp.timedDurationMs)));
+    }
+  };
 
   /** @type {Map<string, { client: string, tokens: number, costUsd: number, unpricedTokens: number, cacheReadTokens: number, cacheWriteTokens: number, outputTokens: number, inputTokens: number, unclassifiedTokens: number, messageCount: number }>} */
   const clientMap = new Map();
@@ -1253,16 +1281,7 @@ function buildUsageReport({
     timedTokens = Math.max(0, Math.round(num(period?.timedTokens)));
     timedOutputTokens = Math.max(0, Math.round(num(period?.timedOutputTokens)));
     timedDurationMs = Math.max(0, Math.round(num(period?.timedDurationMs)));
-    if (period?.modelThroughput && typeof period.modelThroughput === 'object') {
-      for (const [rawModel, tp] of Object.entries(period.modelThroughput)) {
-        const m = normalizeModelName(rawModel) || rawModel;
-        if (!m || !tp) continue;
-        const target = modelThroughputMap[m] || (modelThroughputMap[m] = { timedTokens: 0, timedOutputTokens: 0, timedDurationMs: 0 });
-        target.timedTokens += Math.max(0, Math.round(num(tp.timedTokens)));
-        target.timedOutputTokens += Math.max(0, Math.round(num(tp.timedOutputTokens)));
-        target.timedDurationMs += Math.max(0, Math.round(num(tp.timedDurationMs)));
-      }
-    }
+    mergeModelThroughput(period?.modelThroughput);
 
     const sessionMsgByClient = new Map();
     let sessionMsgsTotal = 0;
@@ -1338,16 +1357,7 @@ function buildUsageReport({
       timedTokens += Math.max(0, Math.round(num(row.timedTokens)));
       timedOutputTokens += Math.max(0, Math.round(num(row.timedOutputTokens)));
       timedDurationMs += Math.max(0, Math.round(num(row.timedDurationMs)));
-      if (row.modelThroughput && typeof row.modelThroughput === 'object') {
-        for (const [rawModel, tp] of Object.entries(row.modelThroughput)) {
-          const m = normalizeModelName(rawModel) || rawModel;
-          if (!m || !tp) continue;
-          const target = modelThroughputMap[m] || (modelThroughputMap[m] = { timedTokens: 0, timedOutputTokens: 0, timedDurationMs: 0 });
-          target.timedTokens += Math.max(0, Math.round(num(tp.timedTokens)));
-          target.timedOutputTokens += Math.max(0, Math.round(num(tp.timedOutputTokens)));
-          target.timedDurationMs += Math.max(0, Math.round(num(tp.timedDurationMs)));
-        }
-      }
+      mergeModelThroughput(row.modelThroughput);
       for (const [rawClient, val] of Object.entries(row.perClient || {})) {
         const cTokens = Math.max(0, Math.round(num(val?.tokens)));
         const cCost = Math.max(0, num(val?.cost));
@@ -1675,7 +1685,7 @@ function buildUsageReport({
   /** @type {ReportModelBreakdown[]} */
   const models = Array.from(modelMap.values())
     .map((m) => {
-      const tp = modelThroughputMap[m.model];
+      const tp = modelThroughputMap.get(m.model);
       const avgRate = tp && tp.timedDurationMs > 0 && tp.timedOutputTokens > 0
         ? round2((tp.timedOutputTokens * 1000) / tp.timedDurationMs)
         : 0;

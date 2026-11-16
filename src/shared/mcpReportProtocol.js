@@ -80,7 +80,7 @@ const MCP_TOOLS = Object.freeze([
         granularity: {
           type: 'string',
           enum: ['daily', 'weekly', 'monthly'],
-          description: 'Optional granularity to generate; omits to generate enabled granularities.'
+          description: 'Optional granularity to generate ("daily", "weekly", or "monthly"); omits to default to "all" (generating all granularities).'
         },
         periodKey: {
           type: 'string',
