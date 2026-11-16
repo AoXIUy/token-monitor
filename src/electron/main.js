@@ -3739,7 +3739,7 @@ function reportsConfigFromSettings(source = settings) {
 }
 
 function defaultReportsDir() {
-  return path.join(path.dirname(hubDataFile()), 'data', 'reports');
+  return path.join(path.dirname(hubDataFile()), 'reports');
 }
 
 function effectiveReportsDir() {
