@@ -18,7 +18,7 @@ const DEFAULT_AI_CONFIG = Object.freeze({
   language: 'zh-CN',
   customPrompt: '',
   temperature: 0.3,
-  maxTokens: 1500,
+  maxTokens: 4096,
   autoAnalyzeOnRollover: false
 });
 
@@ -125,7 +125,7 @@ function normalizeAiIntegrationConfig(raw) {
     : DEFAULT_AI_CONFIG.temperature;
   const rawMaxTokens = Number(src.maxTokens);
   const maxTokens = Number.isInteger(rawMaxTokens)
-    ? Math.max(256, Math.min(8192, rawMaxTokens))
+    ? Math.max(256, Math.min(32768, rawMaxTokens))
     : DEFAULT_AI_CONFIG.maxTokens;
 
   return {
@@ -453,6 +453,64 @@ function buildAiReportPromptPayload({
 }
 
 /**
+ * Extract assistant text, token usage, and reasoning-exhaustion metadata from an AI completion payload.
+ * @param {'openai-compatible' | 'anthropic-messages'} protocol
+ * @param {any} data
+ */
+function extractAiCompletionOutcome(protocol, data) {
+  let summaryMarkdown = '';
+  let tokenUsage = null;
+  let reasoningExhausted = false;
+
+  if (protocol === 'anthropic-messages') {
+    const blocks = Array.isArray(data?.content) ? data.content : [];
+    summaryMarkdown = blocks
+      .filter((/** @type {any} */ b) => b && b.type === 'text' && typeof b.text === 'string')
+      .map((/** @type {any} */ b) => b.text)
+      .join('\n')
+      .trim();
+    const hasThinking = blocks.some(
+      (/** @type {any} */ b) => b && b.type === 'thinking' && typeof b.thinking === 'string' && b.thinking.trim()
+    );
+    if (!summaryMarkdown && data?.stop_reason === 'max_tokens' && hasThinking) {
+      reasoningExhausted = true;
+    }
+    if (isPlainObject(data?.usage)) {
+      const inTok = Math.max(0, Math.round(num(data.usage.input_tokens)));
+      const outTok = Math.max(0, Math.round(num(data.usage.output_tokens)));
+      tokenUsage = { inputTokens: inTok, outputTokens: outTok, totalTokens: inTok + outTok };
+    }
+  } else {
+    const choice = Array.isArray(data?.choices) ? data.choices[0] : null;
+    const msgContent = choice?.message?.content;
+    if (typeof msgContent === 'string') {
+      summaryMarkdown = msgContent.trim();
+    } else if (Array.isArray(msgContent)) {
+      summaryMarkdown = msgContent
+        .filter((b) => b && typeof b.text === 'string')
+        .map((b) => b.text)
+        .join('\n')
+        .trim();
+    }
+    const finishReason = cleanText(choice?.finish_reason, 32).toLowerCase();
+    const reasoningContent = typeof choice?.message?.reasoning_content === 'string'
+      ? choice.message.reasoning_content.trim()
+      : '';
+    if (!summaryMarkdown && finishReason === 'length' && reasoningContent) {
+      reasoningExhausted = true;
+    }
+    if (isPlainObject(data?.usage)) {
+      const inTok = Math.max(0, Math.round(num(data.usage.prompt_tokens ?? data.usage.input_tokens)));
+      const outTok = Math.max(0, Math.round(num(data.usage.completion_tokens ?? data.usage.output_tokens)));
+      const totalTok = Math.max(inTok + outTok, Math.round(num(data.usage.total_tokens)));
+      tokenUsage = { inputTokens: inTok, outputTokens: outTok, totalTokens: totalTok };
+    }
+  }
+
+  return { summaryMarkdown, tokenUsage, reasoningExhausted };
+}
+
+/**
  * Call a third-party AI API to analyze a report + live telemetry.
  * @param {{
  *   config: any,
@@ -465,6 +523,7 @@ function buildAiReportPromptPayload({
  *   timeoutMs?: number,
  *   now?: () => Date
  * }} options
+ * @returns {Promise<{ ok: true, analysis: any } | { ok: false, error: string, message: string, statusCode?: number }>}
  */
 async function invokeThirdPartyAiAnalysis({
   config,
@@ -474,7 +533,7 @@ async function invokeThirdPartyAiAnalysis({
   question = '',
   language,
   fetchImpl = globalThis.fetch,
-  timeoutMs = 45_000,
+  timeoutMs = 60_000,
   now = () => new Date()
 }) {
   const norm = normalizeAiIntegrationConfig(config);
@@ -508,98 +567,99 @@ async function invokeThirdPartyAiAnalysis({
 
   /** @type {Record<string, string>} */
   const headers = { 'content-type': 'application/json' };
-  let requestBody;
   if (norm.protocol === 'anthropic-messages') {
     if (trimmedKey) headers['x-api-key'] = trimmedKey;
     headers['anthropic-version'] = '2023-06-01';
-    requestBody = {
-      model: norm.model,
-      max_tokens: norm.maxTokens,
-      temperature: norm.temperature,
-      system: prompt.systemPrompt,
-      messages: [{ role: 'user', content: prompt.userPrompt }]
-    };
-  } else {
-    if (trimmedKey) headers.authorization = `Bearer ${trimmedKey}`;
-    requestBody = {
-      model: norm.model,
-      temperature: norm.temperature,
-      max_tokens: norm.maxTokens,
-      messages: [
-        { role: 'system', content: prompt.systemPrompt },
-        { role: 'user', content: prompt.userPrompt }
-      ]
-    };
+  } else if (trimmedKey) {
+    headers.authorization = `Bearer ${trimmedKey}`;
   }
 
-  let response;
-  let data;
-  try {
-    response = await fetchImpl(endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(requestBody),
-      signal: AbortSignal.timeout(Math.max(2000, Number(timeoutMs) || 45_000))
-    });
-    const text = await response.text();
+  const resolvedTimeoutMs = Math.max(2000, Number(timeoutMs) || 60_000);
+
+  /**
+   * @param {number} maxTokens
+   * @returns {Promise<
+   *   | { ok: true, data: any, summaryMarkdown: string, tokenUsage: any, reasoningExhausted: boolean }
+   *   | { ok: false, error: string, message: string, statusCode?: number }
+   * >}
+   */
+  async function executeCompletion(maxTokens) {
+    const requestBody = norm.protocol === 'anthropic-messages'
+      ? {
+          model: norm.model,
+          max_tokens: maxTokens,
+          temperature: norm.temperature,
+          system: prompt.systemPrompt,
+          messages: [{ role: 'user', content: prompt.userPrompt }]
+        }
+      : {
+          model: norm.model,
+          temperature: norm.temperature,
+          max_tokens: maxTokens,
+          messages: [
+            { role: 'system', content: prompt.systemPrompt },
+            { role: 'user', content: prompt.userPrompt }
+          ]
+        };
+
+    let response;
+    let data;
     try {
-      data = text ? JSON.parse(text) : null;
-    } catch {
-      data = { rawText: text };
+      response = await fetchImpl(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(requestBody),
+        signal: AbortSignal.timeout(resolvedTimeoutMs)
+      });
+      const text = await response.text();
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = { rawText: text };
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        error: 'ai_network_error',
+        message: redactSecrets(error instanceof Error ? error.message : String(error), [trimmedKey])
+      };
     }
-  } catch (error) {
+
+    if (!response.ok) {
+      const remoteMsg = data?.error?.message || data?.message || data?.rawText || `HTTP ${response.status}`;
+      return {
+        ok: false,
+        error: 'ai_http_error',
+        statusCode: response.status,
+        message: redactSecrets(String(remoteMsg).slice(0, 400), [trimmedKey])
+      };
+    }
+
     return {
-      ok: false,
-      error: 'ai_network_error',
-      message: redactSecrets(error instanceof Error ? error.message : String(error), [trimmedKey])
+      ok: true,
+      data,
+      ...extractAiCompletionOutcome(norm.protocol, data)
     };
   }
 
-  if (!response.ok) {
-    const remoteMsg = data?.error?.message || data?.message || data?.rawText || `HTTP ${response.status}`;
-    return {
-      ok: false,
-      error: 'ai_http_error',
-      statusCode: response.status,
-      message: redactSecrets(String(remoteMsg).slice(0, 400), [trimmedKey])
-    };
+  let attempt = await executeCompletion(norm.maxTokens);
+  if (!attempt.ok) return attempt;
+
+  if (!attempt.summaryMarkdown && attempt.reasoningExhausted && norm.maxTokens < 8192) {
+    const retryMaxTokens = Math.min(16384, Math.max(8192, norm.maxTokens * 2));
+    const retryAttempt = await executeCompletion(retryMaxTokens);
+    if (!retryAttempt.ok) return retryAttempt;
+    attempt = retryAttempt;
   }
 
-  let summaryMarkdown = '';
-  let tokenUsage = null;
-  if (norm.protocol === 'anthropic-messages') {
-    const blocks = Array.isArray(data?.content) ? data.content : [];
-    summaryMarkdown = blocks
-      .filter((/** @type {any} */ b) => b && b.type === 'text' && typeof b.text === 'string')
-      .map((/** @type {any} */ b) => b.text)
-      .join('\n')
-      .trim();
-    if (isPlainObject(data?.usage)) {
-      const inTok = Math.max(0, Math.round(num(data.usage.input_tokens)));
-      const outTok = Math.max(0, Math.round(num(data.usage.output_tokens)));
-      tokenUsage = { inputTokens: inTok, outputTokens: outTok, totalTokens: inTok + outTok };
+  if (!attempt.summaryMarkdown) {
+    if (attempt.reasoningExhausted) {
+      return {
+        ok: false,
+        error: 'ai_token_limit',
+        message: 'Third-party AI reasoning exhausted max_tokens before generating output. Increase maxTokens or switch to a standard chat model.'
+      };
     }
-  } else {
-    const choice = Array.isArray(data?.choices) ? data.choices[0] : null;
-    const msgContent = choice?.message?.content;
-    if (typeof msgContent === 'string') {
-      summaryMarkdown = msgContent.trim();
-    } else if (Array.isArray(msgContent)) {
-      summaryMarkdown = msgContent
-        .filter((b) => b && typeof b.text === 'string')
-        .map((b) => b.text)
-        .join('\n')
-        .trim();
-    }
-    if (isPlainObject(data?.usage)) {
-      const inTok = Math.max(0, Math.round(num(data.usage.prompt_tokens ?? data.usage.input_tokens)));
-      const outTok = Math.max(0, Math.round(num(data.usage.completion_tokens ?? data.usage.output_tokens)));
-      const totalTok = Math.max(inTok + outTok, Math.round(num(data.usage.total_tokens)));
-      tokenUsage = { inputTokens: inTok, outputTokens: outTok, totalTokens: totalTok };
-    }
-  }
-
-  if (!summaryMarkdown) {
     return {
       ok: false,
       error: 'ai_empty_response',
@@ -614,11 +674,11 @@ async function invokeThirdPartyAiAnalysis({
       generatedAt: now().toISOString(),
       protocol: norm.protocol,
       providerLabel: norm.providerLabel || (norm.protocol === 'anthropic-messages' ? 'Anthropic API' : 'OpenAI-Compatible API'),
-      model: cleanText(data?.model, 160) || norm.model,
+      model: cleanText(attempt.data?.model, 160) || norm.model,
       language: prompt.language,
       question: cleanText(question, 1000) || null,
-      summaryMarkdown: summaryMarkdown.slice(0, 16_000),
-      tokenUsage,
+      summaryMarkdown: attempt.summaryMarkdown.slice(0, 16_000),
+      tokenUsage: attempt.tokenUsage,
       basedOnSignature: report ? reportContentSignature(report) : ''
     }
   };

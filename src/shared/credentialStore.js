@@ -424,30 +424,24 @@ class CredentialStore {
   readIntegrationSecrets(document = this.readDocument()) {
     const aiApiKey = valueAt(document.credentials, ['integrations', 'reports', 'aiApiKey']);
     const openclawHookToken = valueAt(document.credentials, ['integrations', 'reports', 'openclawHookToken']);
+    const weixinBotToken = valueAt(document.credentials, ['integrations', 'reports', 'weixinBotToken']);
     return {
       aiApiKey: typeof aiApiKey === 'string' ? aiApiKey : '',
-      openclawHookToken: typeof openclawHookToken === 'string' ? openclawHookToken : ''
+      openclawHookToken: typeof openclawHookToken === 'string' ? openclawHookToken : '',
+      weixinBotToken: typeof weixinBotToken === 'string' ? weixinBotToken : ''
     };
   }
 
   writeIntegrationSecrets(patch = {}) {
     const document = this.readDocument();
     let changed = false;
-    if (Object.hasOwn(patch, 'aiApiKey')) {
-      const value = typeof patch.aiApiKey === 'string' ? patch.aiApiKey.trim() : '';
+    for (const key of ['aiApiKey', 'openclawHookToken', 'weixinBotToken']) {
+      if (!Object.hasOwn(patch, key)) continue;
+      const value = typeof patch[key] === 'string' ? patch[key].trim() : '';
       if (value) {
-        setValueAt(document.credentials, ['integrations', 'reports', 'aiApiKey'], value);
+        setValueAt(document.credentials, ['integrations', 'reports', key], value);
       } else {
-        deleteValueAt(document.credentials, ['integrations', 'reports', 'aiApiKey']);
-      }
-      changed = true;
-    }
-    if (Object.hasOwn(patch, 'openclawHookToken')) {
-      const value = typeof patch.openclawHookToken === 'string' ? patch.openclawHookToken.trim() : '';
-      if (value) {
-        setValueAt(document.credentials, ['integrations', 'reports', 'openclawHookToken'], value);
-      } else {
-        deleteValueAt(document.credentials, ['integrations', 'reports', 'openclawHookToken']);
+        deleteValueAt(document.credentials, ['integrations', 'reports', key]);
       }
       changed = true;
     }

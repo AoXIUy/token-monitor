@@ -9,6 +9,7 @@ const test = require('node:test');
 const { CredentialStore } = require('../../src/shared/credentialStore');
 const {
   buildOpenClawWebhookRequest,
+  DEFAULT_AI_CONFIG,
   extractLimitsSummary,
   formatOpenClawWeChatMessage,
   invokeThirdPartyAiAnalysis,
@@ -17,6 +18,7 @@ const {
   resolveAiCompletionEndpoint,
   resolveOpenClawWebhookEndpoint
 } = require('../../src/shared/aiReportAnalyzer');
+const { syncIntegrationSecretsFile } = require('../../src/hub/integrations');
 const { createHub } = require('../../src/hub/server');
 
 function makeTempDir(prefix) {
@@ -231,23 +233,39 @@ test('aiReportAnalyzer endpoint resolution & sanitization never leak email/secre
   assert.equal(ocReq.body.to, 'wxid_target_123');
 });
 
-test('CredentialStore isolates integration secrets cleanly without touching CREDENTIAL_SETTING_PATHS', () => {
+test('CredentialStore and syncIntegrationSecretsFile isolate integration secrets cleanly without touching CREDENTIAL_SETTING_PATHS', () => {
   const dir = makeTempDir('tm-cred-integ-');
   try {
     const store = new CredentialStore(dir);
-    assert.deepEqual(store.readIntegrationSecrets(), { aiApiKey: '', openclawHookToken: '' });
-
-    store.writeIntegrationSecrets({ aiApiKey: 'sk-test-123', openclawHookToken: 'oc-tok-456' });
-    assert.deepEqual(store.readIntegrationSecrets(), {
-      aiApiKey: 'sk-test-123',
-      openclawHookToken: 'oc-tok-456'
-    });
-
-    store.writeIntegrationSecrets({ aiApiKey: '' });
     assert.deepEqual(store.readIntegrationSecrets(), {
       aiApiKey: '',
-      openclawHookToken: 'oc-tok-456'
+      openclawHookToken: '',
+      weixinBotToken: ''
     });
+
+    store.writeIntegrationSecrets({
+      aiApiKey: 'sk-test-123',
+      openclawHookToken: 'oc-tok-456',
+      weixinBotToken: 'wx-bot-789'
+    });
+    assert.deepEqual(store.readIntegrationSecrets(), {
+      aiApiKey: 'sk-test-123',
+      openclawHookToken: 'oc-tok-456',
+      weixinBotToken: 'wx-bot-789'
+    });
+
+    store.writeIntegrationSecrets({ aiApiKey: '', weixinBotToken: '' });
+    assert.deepEqual(store.readIntegrationSecrets(), {
+      aiApiKey: '',
+      openclawHookToken: 'oc-tok-456',
+      weixinBotToken: ''
+    });
+
+    const dataFile = path.join(dir, 'devices.json');
+    const synced1 = syncIntegrationSecretsFile(dataFile, { aiApiKey: 'sk-file-1', weixinBotToken: 'wx-file-2' });
+    assert.deepEqual(synced1, { aiApiKey: 'sk-file-1', openclawHookToken: '', weixinBotToken: 'wx-file-2' });
+    const synced2 = syncIntegrationSecretsFile(dataFile, { aiApiKey: '' });
+    assert.deepEqual(synced2, { aiApiKey: '', openclawHookToken: '', weixinBotToken: 'wx-file-2' });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -428,6 +446,208 @@ test('Hub API + MCP + OpenClaw rollover integration end-to-end', async () => {
     await hub.stop();
     assert.ok(openclawCalls.length >= 2, 'rollover should have triggered automatic OpenClaw WeChat delivery');
     assert.equal(openclawCalls.at(-1).headers['idempotency-key'], 'token-monitor-daily-2026-11-16');
+  } finally {
+    await hub.stop().catch(() => {});
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('invokeThirdPartyAiAnalysis retries once when reasoning exhausts max_tokens and returns ai_token_limit if still empty', async () => {
+  assert.equal(DEFAULT_AI_CONFIG.maxTokens, 4096);
+  const report = {
+    reportId: 'daily:2026-11-16',
+    granularity: 'daily',
+    period: { key: '2026-11-16', label: '2026-11-16', startDate: '2026-11-16', endDate: '2026-11-16', isCurrent: true },
+    hub: { deviceCount: 1, activeDeviceCount: 1 },
+    summary: { totalTokens: 1000, knownCostUsd: 0.1, cacheHitRatePct: 20 },
+    projects: [],
+    clients: [],
+    models: [],
+    signals: []
+  };
+
+  const retryBodies = [];
+  const retryOk = await invokeThirdPartyAiAnalysis({
+    config: normalizeAiIntegrationConfig({
+      enabled: true,
+      protocol: 'openai-compatible',
+      baseUrl: 'https://ai.mock.local/v1',
+      model: 'deepseek-flash'
+    }),
+    apiKey: 'sk-mock-reasoning',
+    report,
+    fetchImpl: async (_url, init) => {
+      const parsed = JSON.parse(init.body);
+      retryBodies.push(parsed.max_tokens);
+      if (retryBodies.length === 1) {
+        return new Response(JSON.stringify({
+          model: 'deepseek-flash',
+          choices: [{ finish_reason: 'length', message: { content: '', reasoning_content: 'long reasoning chain...' } }]
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        model: 'deepseek-flash',
+        choices: [{ finish_reason: 'stop', message: { content: '### 总结\n完成。' } }],
+        usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 }
+      }), { status: 200 });
+    }
+  });
+  assert.equal(retryOk.ok, true);
+  assert.deepEqual(retryBodies, [4096, 8192]);
+  assert.match(retryOk.analysis.summaryMarkdown, /总结/);
+
+  const exhausted = await invokeThirdPartyAiAnalysis({
+    config: normalizeAiIntegrationConfig({
+      enabled: true,
+      protocol: 'openai-compatible',
+      baseUrl: 'https://ai.mock.local/v1',
+      model: 'deepseek-flash',
+      maxTokens: 12000
+    }),
+    apiKey: 'sk-mock-reasoning',
+    report,
+    fetchImpl: async () => new Response(JSON.stringify({
+      model: 'deepseek-flash',
+      choices: [{ finish_reason: 'length', message: { content: '', reasoning_content: 'still thinking...' } }]
+    }), { status: 200 })
+  });
+  assert.equal(exhausted.ok, false);
+  assert.equal(exhausted.error, 'ai_token_limit');
+});
+
+test('Hub OpenClaw QR login & provisioning endpoints bind WeChat, persist credentials, and never expose secrets', async () => {
+  const dir = makeTempDir('tm-hub-oc-qr-');
+  const openclawDir = path.join(dir, 'openclaw-state');
+  const statusQueue = [
+    { status: 'wait' },
+    { status: 'need_verifycode' },
+    {
+      status: 'confirmed',
+      bot_token: 'qr-bot-secret-xyz',
+      ilink_bot_id: 'Bot99@im.bot',
+      baseurl: 'https://idc9.weixin.local',
+      ilink_user_id: 'wx_user_qr@im.wechat'
+    }
+  ];
+
+  const integrationFetch = async (url) => {
+    const target = String(url);
+    if (target.includes('/ilink/bot/get_bot_qrcode')) {
+      return new Response(JSON.stringify({
+        qrcode: 'qrc-hub-1',
+        qrcode_img_content: 'https://liteapp.weixin.qq.com/q/hub?qrcode=qrc-hub-1&bot_type=3'
+      }), { status: 200 });
+    }
+    if (target.includes('/ilink/bot/get_qrcode_status')) {
+      return new Response(JSON.stringify(statusQueue.shift() || { status: 'wait' }), { status: 200 });
+    }
+    throw new Error(`Unexpected URL: ${target}`);
+  };
+
+  const hub = createHub({
+    port: 0,
+    host: '127.0.0.1',
+    secret: 'hub-qr-secret',
+    dataFile: path.join(dir, 'devices.json'),
+    reportsDir: path.join(dir, 'reports'),
+    integrationFetch,
+    openclawOptions: {
+      env: { OPENCLAW_STATE_DIR: openclawDir },
+      probeGateway: true,
+      probePort: async () => true,
+      cliPath: null
+    },
+    logger: { error() {}, warn() {}, log() {} }
+  });
+
+  await hub.start();
+  const baseUrl = `http://127.0.0.1:${hub.server.address().port}`;
+  const auth = { authorization: 'Bearer hub-qr-secret' };
+
+  try {
+    // Auth enforcement
+    assert.equal((await fetch(`${baseUrl}/api/integrations/openclaw/env`)).status, 401);
+    assert.equal((await fetch(`${baseUrl}/api/integrations/openclaw/qr/start`, { method: 'POST' })).status, 401);
+
+    const envRes = await fetch(`${baseUrl}/api/integrations/openclaw/env`, { headers: auth });
+    assert.equal(envRes.status, 200);
+    const envData = await envRes.json();
+    assert.equal(envData.gatewayPort, 18789);
+    assert.equal(envData.gatewayReachable, true);
+
+    const startRes = await fetch(`${baseUrl}/api/integrations/openclaw/qr/start`, {
+      method: 'POST',
+      headers: auth
+    });
+    assert.equal(startRes.status, 200);
+    const started = await startRes.json();
+    assert.equal(started.ok, true);
+    assert.equal(started.qrcodeImgContent, 'https://liteapp.weixin.qq.com/q/hub?qrcode=qrc-hub-1&bot_type=3');
+
+    const waitRes = await fetch(`${baseUrl}/api/integrations/openclaw/qr/status?sessionId=${encodeURIComponent(started.sessionId)}`, {
+      headers: auth
+    });
+    assert.equal((await waitRes.json()).status, 'wait');
+
+    const codePromptRes = await fetch(`${baseUrl}/api/integrations/openclaw/qr/status?sessionId=${encodeURIComponent(started.sessionId)}`, {
+      headers: auth
+    });
+    assert.equal((await codePromptRes.json()).status, 'need_verifycode');
+
+    const verifyRes = await fetch(`${baseUrl}/api/integrations/openclaw/qr/verify`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: started.sessionId, verifyCode: '8888' })
+    });
+    assert.equal(verifyRes.status, 200);
+    const confirmed = await verifyRes.json();
+    assert.equal(confirmed.ok, true);
+    assert.equal(confirmed.status, 'confirmed');
+    assert.equal(confirmed.accountId, 'bot99-im-bot');
+    assert.equal(confirmed.userId, 'wx_user_qr@im.wechat');
+    assert.equal(confirmed.autoConfigured, true);
+    assert.equal(confirmed.openclaw.enabled, true);
+    assert.equal(confirmed.openclaw.to, 'wx_user_qr@im.wechat');
+    assert.equal(confirmed.openclaw.channel, 'openclaw-weixin');
+    assert.equal(confirmed.openclaw.webhookUrl, 'http://127.0.0.1:18789/hooks/agent');
+    assert.equal(confirmed.openclaw.hookTokenConfigured, true);
+    assert.equal(confirmed.openclaw.weixinBotConfigured, true);
+
+    // Raw bot token & generated hook token must never be returned over HTTP
+    const confirmedText = JSON.stringify(confirmed);
+    assert.equal(confirmedText.includes('qr-bot-secret-xyz'), false);
+    const hostSecrets = hub.getIntegrationSecrets();
+    assert.equal(hostSecrets.weixinBotToken, 'qr-bot-secret-xyz');
+    assert.ok(hostSecrets.openclawHookToken.length >= 16);
+    assert.equal(confirmedText.includes(hostSecrets.openclawHookToken), false);
+
+    // Persisted OpenClaw files exist on disk
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(path.join(openclawDir, 'openclaw-weixin', 'accounts.json'), 'utf8')),
+      ['bot99-im-bot']
+    );
+    const acctData = JSON.parse(fs.readFileSync(path.join(openclawDir, 'openclaw-weixin', 'accounts', 'bot99-im-bot.json'), 'utf8'));
+    assert.equal(acctData.token, 'qr-bot-secret-xyz');
+    assert.equal(acctData.userId, 'wx_user_qr@im.wechat');
+    assert.equal(fs.existsSync(path.join(openclawDir, 'skills', 'openclaw-token-monitor', 'SKILL.md')), true);
+
+    // Cancel & provision routes work cleanly
+    const start2 = await (await fetch(`${baseUrl}/api/integrations/openclaw/qr/start`, { method: 'POST', headers: auth })).json();
+    const cancelRes = await fetch(`${baseUrl}/api/integrations/openclaw/qr/cancel`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: start2.sessionId })
+    });
+    assert.equal((await cancelRes.json()).cancelled, true);
+
+    const provRes = await fetch(`${baseUrl}/api/integrations/openclaw/provision`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ ensureHooks: true, installSkill: true })
+    });
+    const provData = await provRes.json();
+    assert.equal(provData.ok, true);
+    assert.equal(JSON.stringify(provData).includes(hostSecrets.openclawHookToken), false);
   } finally {
     await hub.stop().catch(() => {});
     fs.rmSync(dir, { recursive: true, force: true });

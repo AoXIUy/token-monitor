@@ -554,6 +554,7 @@ Object.assign(els, {
   approvalAlertsHookError: document.getElementById('approvalAlertsHookError'),
   reportsSettingsGroup: document.getElementById('reportsSettingsGroup'),
   reportsHostRequiredNote: document.getElementById('reportsHostRequiredNote'),
+  reportsEnableHostButton: document.getElementById('reportsEnableHostButton'),
   reportsHostControls: document.getElementById('reportsHostControls'),
   reportsScheduleList: document.getElementById('reportsScheduleList'),
   reportsEnabledInput: document.getElementById('reportsEnabledInput'),
@@ -567,6 +568,7 @@ Object.assign(els, {
   reportsGenerateNowButton: document.getElementById('reportsGenerateNowButton'),
   reportsStatusText: document.getElementById('reportsStatusText'),
   reportsIntegrationsControls: document.getElementById('reportsIntegrationsControls'),
+  reportsAiPanel: document.getElementById('reportsAiPanel'),
   reportsAiEnabledInput: document.getElementById('reportsAiEnabledInput'),
   reportsAiProtocolInput: document.getElementById('reportsAiProtocolInput'),
   reportsAiProviderLabelInput: document.getElementById('reportsAiProviderLabelInput'),
@@ -580,6 +582,20 @@ Object.assign(els, {
   reportsAiSaveButton: document.getElementById('reportsAiSaveButton'),
   reportsAiAnalyzeNowButton: document.getElementById('reportsAiAnalyzeNowButton'),
   reportsAiPreview: document.getElementById('reportsAiPreview'),
+  reportsOpenClawPanel: document.getElementById('reportsOpenClawPanel'),
+  reportsOpenClawEnvSummary: document.getElementById('reportsOpenClawEnvSummary'),
+  reportsOpenClawQrScanButton: document.getElementById('reportsOpenClawQrScanButton'),
+  reportsOpenClawProvisionButton: document.getElementById('reportsOpenClawProvisionButton'),
+  reportsOpenClawQrCard: document.getElementById('reportsOpenClawQrCard'),
+  reportsOpenClawQrBox: document.getElementById('reportsOpenClawQrBox'),
+  reportsOpenClawQrStatusText: document.getElementById('reportsOpenClawQrStatusText'),
+  reportsOpenClawQrVerifyRow: document.getElementById('reportsOpenClawQrVerifyRow'),
+  reportsOpenClawQrVerifyInput: document.getElementById('reportsOpenClawQrVerifyInput'),
+  reportsOpenClawQrVerifyButton: document.getElementById('reportsOpenClawQrVerifyButton'),
+  reportsOpenClawQrRefreshButton: document.getElementById('reportsOpenClawQrRefreshButton'),
+  reportsOpenClawQrCopyLinkButton: document.getElementById('reportsOpenClawQrCopyLinkButton'),
+  reportsOpenClawQrCancelButton: document.getElementById('reportsOpenClawQrCancelButton'),
+  reportsOpenClawQrGuideText: document.getElementById('reportsOpenClawQrGuideText'),
   reportsOpenClawEnabledInput: document.getElementById('reportsOpenClawEnabledInput'),
   reportsOpenClawModeInput: document.getElementById('reportsOpenClawModeInput'),
   reportsOpenClawWebhookUrlInput: document.getElementById('reportsOpenClawWebhookUrlInput'),
@@ -6308,6 +6324,7 @@ function openViewFromTray(viewId) {
   resetSettingsListSearch();
   syncModeSelect?.close();
   syncContentForm?.closeHelp();
+  if (typeof cancelOpenClawQrIfActive === 'function') cancelOpenClawQrIfActive();
   els.settingsPanel?.classList.add('hidden');
   els.shell.classList.remove('settings-open');
   syncPluginLimitsDemand();
@@ -14199,6 +14216,7 @@ els.settingsButton.addEventListener('click', (event) => {
     syncContentForm?.closeHelp();
     resetSettingsListSearch();
     stopWindowShortcutRecording();
+    if (typeof cancelOpenClawQrIfActive === 'function') cancelOpenClawQrIfActive();
   }
   els.shell.classList.toggle('settings-open', settingsOpen);
   syncPluginLimitsDemand();
@@ -14665,10 +14683,22 @@ let reportsGenerating = false;
 let reportsStatusFeedback = null;
 let reportsAiBusy = false;
 let reportsOpenClawBusy = false;
+let reportsAiDirty = false;
+let reportsOpenClawDirty = false;
 let reportsAiStatusFeedback = null;
 let reportsOpenClawStatusFeedback = null;
 let reportsIntegrationsSnapshot = null;
-let reportsIntegrationsModeSynced = '';
+let reportsIntegrationsSyncKey = '';
+let reportsIntegrationsFetchSeq = 0;
+let reportsOpenClawEnvSnapshot = null;
+let reportsOpenClawEnvSyncKey = '';
+let reportsOpenClawEnvLoading = false;
+let reportsOpenClawEnvFetchSeq = 0;
+let reportsOpenClawQrSession = null;
+let reportsOpenClawQrBusy = false;
+let reportsOpenClawQrPollToken = 0;
+let reportsOpenClawQrPollTimer = null;
+let reportsOpenClawQrCopiedTimer = null;
 
 function currentReportIntegrations() {
   if (reportsIntegrationsSnapshot && (state.settings?.hubMode || 'local') === 'client') {
@@ -14677,88 +14707,279 @@ function currentReportIntegrations() {
   return reportsIntegrationsSnapshot || state.settings?.reportIntegrations || {};
 }
 
-function populateIntegrationsFields(integrations) {
-  const ai = integrations?.ai || {};
-  const oc = integrations?.openclaw || {};
-  if (els.reportsAiEnabledInput) els.reportsAiEnabledInput.checked = ai.enabled === true;
-  if (els.reportsAiProtocolInput && !els.reportsAiProtocolInput.matches?.(':focus')) {
-    els.reportsAiProtocolInput.value = ai.protocol || 'openai-compatible';
+function syncReportIntegrationsState(integrations) {
+  if (!integrations || typeof integrations !== 'object') return;
+  const previous = reportsIntegrationsSnapshot || state.settings?.reportIntegrations || {};
+  const next = {
+    ai: integrations.ai ? { ...(previous.ai || {}), ...integrations.ai } : (previous.ai || {}),
+    openclaw: integrations.openclaw ? { ...(previous.openclaw || {}), ...integrations.openclaw } : (previous.openclaw || {}),
+    lastPush: integrations.lastPush !== undefined ? integrations.lastPush : (previous.lastPush || null)
+  };
+  reportsIntegrationsSnapshot = next;
+  if (state.settings && typeof state.settings === 'object') {
+    state.settings = { ...state.settings, reportIntegrations: next };
   }
-  if (els.reportsAiProviderLabelInput && !els.reportsAiProviderLabelInput.matches?.(':focus')) {
-    els.reportsAiProviderLabelInput.value = ai.providerLabel || '';
-  }
-  if (els.reportsAiBaseUrlInput && !els.reportsAiBaseUrlInput.matches?.(':focus')) {
-    els.reportsAiBaseUrlInput.value = ai.baseUrl || '';
-  }
-  if (els.reportsAiModelInput && !els.reportsAiModelInput.matches?.(':focus')) {
-    els.reportsAiModelInput.value = ai.model || '';
-  }
-  if (els.reportsAiLanguageInput && !els.reportsAiLanguageInput.matches?.(':focus')) {
-    els.reportsAiLanguageInput.value = ai.language || 'zh-CN';
-  }
-  if (els.reportsAiAutoAnalyzeInput) els.reportsAiAutoAnalyzeInput.checked = ai.autoAnalyzeOnRollover === true;
-  if (els.reportsAiApiKeyInput) {
-    els.reportsAiApiKeyInput.placeholder = ai.apiKeyConfigured
-      ? t('settings.reports.secretConfiguredPlaceholder')
-      : t('settings.reports.secretPlaceholder');
-  }
-  if (els.reportsAiClearKeyButton) els.reportsAiClearKeyButton.hidden = ai.apiKeyConfigured !== true;
+}
 
-  if (els.reportsOpenClawEnabledInput) els.reportsOpenClawEnabledInput.checked = oc.enabled === true;
-  if (els.reportsOpenClawModeInput && !els.reportsOpenClawModeInput.matches?.(':focus')) {
-    els.reportsOpenClawModeInput.value = oc.mode || 'openclaw-agent';
+function populateAiIntegrationFields(ai = {}, options = {}) {
+  if (!options.force && (reportsAiBusy || reportsAiDirty)) return;
+  const src = ai || {};
+  if (els.reportsAiEnabledInput) els.reportsAiEnabledInput.checked = src.enabled === true;
+  if (els.reportsAiProtocolInput && (options.force || !els.reportsAiProtocolInput.matches?.(':focus'))) {
+    els.reportsAiProtocolInput.value = src.protocol || 'openai-compatible';
   }
-  if (els.reportsOpenClawWebhookUrlInput && !els.reportsOpenClawWebhookUrlInput.matches?.(':focus')) {
-    els.reportsOpenClawWebhookUrlInput.value = oc.webhookUrl || '';
+  if (els.reportsAiProviderLabelInput && (options.force || !els.reportsAiProviderLabelInput.matches?.(':focus'))) {
+    els.reportsAiProviderLabelInput.value = src.providerLabel || '';
   }
-  if (els.reportsOpenClawChannelInput && !els.reportsOpenClawChannelInput.matches?.(':focus')) {
-    els.reportsOpenClawChannelInput.value = oc.channel || 'openclaw-weixin';
+  if (els.reportsAiBaseUrlInput && (options.force || !els.reportsAiBaseUrlInput.matches?.(':focus'))) {
+    els.reportsAiBaseUrlInput.value = src.baseUrl || '';
   }
-  if (els.reportsOpenClawToInput && !els.reportsOpenClawToInput.matches?.(':focus')) {
-    els.reportsOpenClawToInput.value = oc.to || '';
+  if (els.reportsAiModelInput && (options.force || !els.reportsAiModelInput.matches?.(':focus'))) {
+    els.reportsAiModelInput.value = src.model || '';
   }
-  if (els.reportsOpenClawAgentIdInput && !els.reportsOpenClawAgentIdInput.matches?.(':focus')) {
-    els.reportsOpenClawAgentIdInput.value = oc.agentId || 'main';
+  if (els.reportsAiLanguageInput && (options.force || !els.reportsAiLanguageInput.matches?.(':focus'))) {
+    els.reportsAiLanguageInput.value = src.language || 'zh-CN';
   }
-  if (els.reportsOpenClawPushOnRolloverInput) els.reportsOpenClawPushOnRolloverInput.checked = oc.pushOnRollover === true;
-  if (els.reportsOpenClawIncludeAiInput) els.reportsOpenClawIncludeAiInput.checked = oc.includeAiAnalysis !== false;
-  if (els.reportsOpenClawIncludeLimitsInput) els.reportsOpenClawIncludeLimitsInput.checked = oc.includeLimits !== false;
-  if (els.reportsOpenClawHookTokenInput) {
-    els.reportsOpenClawHookTokenInput.placeholder = oc.hookTokenConfigured
+  if (els.reportsAiAutoAnalyzeInput) els.reportsAiAutoAnalyzeInput.checked = src.autoAnalyzeOnRollover === true;
+  if (els.reportsAiApiKeyInput) {
+    els.reportsAiApiKeyInput.placeholder = src.apiKeyConfigured
       ? t('settings.reports.secretConfiguredPlaceholder')
       : t('settings.reports.secretPlaceholder');
   }
-  if (els.reportsOpenClawClearTokenButton) els.reportsOpenClawClearTokenButton.hidden = oc.hookTokenConfigured !== true;
+  if (els.reportsAiClearKeyButton) els.reportsAiClearKeyButton.hidden = src.apiKeyConfigured !== true;
+}
+
+function populateOpenClawIntegrationFields(oc = {}, options = {}) {
+  if (!options.force && (reportsOpenClawBusy || reportsOpenClawDirty)) return;
+  const src = oc || {};
+  if (els.reportsOpenClawEnabledInput) els.reportsOpenClawEnabledInput.checked = src.enabled === true;
+  if (els.reportsOpenClawModeInput && (options.force || !els.reportsOpenClawModeInput.matches?.(':focus'))) {
+    els.reportsOpenClawModeInput.value = src.mode || 'openclaw-agent';
+  }
+  if (els.reportsOpenClawWebhookUrlInput && (options.force || !els.reportsOpenClawWebhookUrlInput.matches?.(':focus'))) {
+    els.reportsOpenClawWebhookUrlInput.value = src.webhookUrl || '';
+  }
+  if (els.reportsOpenClawChannelInput && (options.force || !els.reportsOpenClawChannelInput.matches?.(':focus'))) {
+    els.reportsOpenClawChannelInput.value = src.channel || 'openclaw-weixin';
+  }
+  if (els.reportsOpenClawToInput && (options.force || !els.reportsOpenClawToInput.matches?.(':focus'))) {
+    els.reportsOpenClawToInput.value = src.to || '';
+  }
+  if (els.reportsOpenClawAgentIdInput && (options.force || !els.reportsOpenClawAgentIdInput.matches?.(':focus'))) {
+    els.reportsOpenClawAgentIdInput.value = src.agentId || 'main';
+  }
+  if (els.reportsOpenClawPushOnRolloverInput) els.reportsOpenClawPushOnRolloverInput.checked = src.pushOnRollover === true;
+  if (els.reportsOpenClawIncludeAiInput) els.reportsOpenClawIncludeAiInput.checked = src.includeAiAnalysis !== false;
+  if (els.reportsOpenClawIncludeLimitsInput) els.reportsOpenClawIncludeLimitsInput.checked = src.includeLimits !== false;
+  if (els.reportsOpenClawHookTokenInput) {
+    els.reportsOpenClawHookTokenInput.placeholder = src.hookTokenConfigured
+      ? t('settings.reports.secretConfiguredPlaceholder')
+      : t('settings.reports.secretPlaceholder');
+  }
+  if (els.reportsOpenClawClearTokenButton) els.reportsOpenClawClearTokenButton.hidden = src.hookTokenConfigured !== true;
+}
+
+function populateIntegrationsFields(integrations, options = {}) {
+  populateAiIntegrationFields(integrations?.ai || {}, options);
+  populateOpenClawIntegrationFields(integrations?.openclaw || {}, options);
+}
+
+function validateAiConfigForSave(ai = {}) {
+  const rawUrl = String(ai.baseUrl || '').trim();
+  if (rawUrl) {
+    if (!/^https?:\/\//i.test(rawUrl)) {
+      return { ok: false, error: 'ai_invalid_url' };
+    }
+    if (typeof URL === 'function') {
+      try {
+        const parsed = new URL(rawUrl);
+        if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !parsed.hostname || parsed.username || parsed.password || parsed.hash) {
+          return { ok: false, error: 'ai_invalid_url' };
+        }
+      } catch (_) {
+        return { ok: false, error: 'ai_invalid_url' };
+      }
+    }
+  }
+  if (ai.enabled === true) {
+    if (!rawUrl || !String(ai.model || '').trim()) {
+      return { ok: false, error: 'ai_not_configured' };
+    }
+  }
+  return { ok: true };
 }
 
 async function refreshReportIntegrations(force = false) {
   const mode = state.settings?.hubMode || 'local';
+  const syncKey = `${mode}|${String(state.settings?.hubUrl || '').trim()}`;
   if (mode !== 'host' && mode !== 'client') {
-    reportsIntegrationsSnapshot = null;
-    reportsIntegrationsModeSynced = mode;
+    reportsIntegrationsSyncKey = syncKey;
     return;
   }
-  if (!force && reportsIntegrationsModeSynced === mode && reportsIntegrationsSnapshot) return;
-  reportsIntegrationsModeSynced = mode;
+  if (!force && reportsIntegrationsSyncKey === syncKey && reportsIntegrationsSnapshot) return;
+  reportsIntegrationsSyncKey = syncKey;
+  const fetchSeq = ++reportsIntegrationsFetchSeq;
   try {
     const res = await window.tokenMonitor?.getReportIntegrations?.();
+    if (fetchSeq !== reportsIntegrationsFetchSeq) return;
     if (res?.ok) {
-      reportsIntegrationsSnapshot = { ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null };
+      syncReportIntegrationsState({ ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null });
       populateIntegrationsFields(reportsIntegrationsSnapshot);
       renderReportsSettingsStatusOnly();
     }
   } catch (_) {}
 }
 
+function renderOpenClawEnvSummary() {
+  if (!els.reportsOpenClawEnvSummary) return;
+  const env = reportsOpenClawEnvSnapshot;
+  if (reportsOpenClawEnvLoading && !env) {
+    els.reportsOpenClawEnvSummary.textContent = t('settings.reports.openclawEnvChecking');
+    return;
+  }
+  if (!env || env.ok === false) {
+    els.reportsOpenClawEnvSummary.textContent = '';
+    return;
+  }
+  const boundAccount = Array.isArray(env.accounts)
+    ? (env.accounts.find((a) => a?.userId) || env.accounts[0])
+    : null;
+  const boundTarget = env.activeUserId
+    || env.configuredUserId
+    || boundAccount?.userId
+    || boundAccount?.accountId
+    || env.activeAccountId
+    || (typeof env.accounts?.[0] === 'string' ? env.accounts[0] : '');
+  const parts = [];
+  if (boundTarget) {
+    parts.push(t('settings.reports.openclawEnvBound', { target: boundTarget }));
+  }
+  const cliOk = env.cliInstalled === true || env.openclawInstalled === true || env.installed === true;
+  const gatewayPort = env.gatewayPort || 18789;
+  if (!cliOk) {
+    parts.push(t('settings.reports.openclawEnvMissingCli'));
+  } else if (env.gatewayReachable === true) {
+    parts.push(t('settings.reports.openclawEnvReady', { port: gatewayPort }));
+  } else {
+    parts.push(t('settings.reports.openclawEnvGatewayDown', { port: gatewayPort }));
+  }
+  els.reportsOpenClawEnvSummary.textContent = parts.join(' · ');
+}
+
+async function refreshOpenClawEnv(force = false) {
+  const mode = state.settings?.hubMode || 'local';
+  const syncKey = `${mode}|${String(state.settings?.hubUrl || '').trim()}`;
+  if (mode === 'icloud') return;
+  if (!window.tokenMonitor?.getOpenClawEnv) return;
+  if (!force && reportsOpenClawEnvSyncKey === syncKey && reportsOpenClawEnvSnapshot) return;
+  reportsOpenClawEnvSyncKey = syncKey;
+  const fetchSeq = ++reportsOpenClawEnvFetchSeq;
+  reportsOpenClawEnvLoading = true;
+  renderOpenClawEnvSummary();
+  try {
+    const res = await window.tokenMonitor.getOpenClawEnv();
+    if (fetchSeq !== reportsOpenClawEnvFetchSeq) return;
+    if (res && res.ok !== false) {
+      reportsOpenClawEnvSnapshot = res;
+    }
+  } catch (_) {
+  } finally {
+    if (fetchSeq === reportsOpenClawEnvFetchSeq) {
+      reportsOpenClawEnvLoading = false;
+      renderOpenClawEnvSummary();
+    }
+  }
+}
+
+function renderQrCodeToBox(qrcodeImgContent) {
+  if (!els.reportsOpenClawQrBox) return;
+  if (!qrcodeImgContent) {
+    if (typeof els.reportsOpenClawQrBox.replaceChildren === 'function') {
+      els.reportsOpenClawQrBox.replaceChildren();
+    }
+    els.reportsOpenClawQrBox.hidden = true;
+    return;
+  }
+  const qrApi = (typeof globalThis !== 'undefined' && globalThis.TokenMonitorQrSvg)
+    || (typeof window !== 'undefined' && window.TokenMonitorQrSvg)
+    || null;
+  if (typeof document === 'undefined' || typeof document.createElementNS !== 'function'
+    || !qrApi?.encodeQrMatrix || !qrApi?.qrPathData) {
+    els.reportsOpenClawQrBox.hidden = true;
+    return;
+  }
+  const matrix = qrApi.encodeQrMatrix(qrcodeImgContent);
+  const { totalSize, path } = qrApi.qrPathData(matrix, 4);
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${totalSize} ${totalSize}`);
+  svg.setAttribute('width', '176');
+  svg.setAttribute('height', '176');
+  svg.setAttribute('shape-rendering', 'crispEdges');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', t('settings.reports.openclawQrAria'));
+  const bg = document.createElementNS(svgNS, 'rect');
+  bg.setAttribute('width', String(totalSize));
+  bg.setAttribute('height', String(totalSize));
+  bg.setAttribute('fill', '#ffffff');
+  const fg = document.createElementNS(svgNS, 'path');
+  fg.setAttribute('d', path);
+  fg.setAttribute('fill', '#111111');
+  svg.append(bg, fg);
+  if (typeof els.reportsOpenClawQrBox.replaceChildren === 'function') {
+    els.reportsOpenClawQrBox.replaceChildren(svg);
+  } else {
+    els.reportsOpenClawQrBox.textContent = '';
+    els.reportsOpenClawQrBox.appendChild?.(svg);
+  }
+  els.reportsOpenClawQrBox.hidden = false;
+}
+
+function openClawGuideMessage(env) {
+  const ready = env && (env.cliInstalled === true || env.openclawInstalled === true || env.installed === true)
+    && env.pluginInstalled !== false;
+  return ready ? t('settings.reports.openclawGuideReady') : t('settings.reports.openclawGuideInstall');
+}
+
+function renderOpenClawQrState() {
+  const session = reportsOpenClawQrSession;
+  if (!els.reportsOpenClawQrCard) return;
+  if (!session) {
+    els.reportsOpenClawQrCard.hidden = true;
+    if (els.reportsOpenClawQrVerifyRow) els.reportsOpenClawQrVerifyRow.hidden = true;
+    if (els.reportsOpenClawQrGuideText) els.reportsOpenClawQrGuideText.hidden = true;
+    renderQrCodeToBox('');
+    return;
+  }
+  els.reportsOpenClawQrCard.hidden = false;
+  const terminal = session.status === 'confirmed' || session.status === 'binded_redirect';
+  if (terminal) {
+    renderQrCodeToBox('');
+  } else if (session.qrcodeImgContent) {
+    renderQrCodeToBox(session.qrcodeImgContent);
+  }
+  if (els.reportsOpenClawQrStatusText) {
+    els.reportsOpenClawQrStatusText.textContent = session.statusText || '';
+  }
+  if (els.reportsOpenClawQrVerifyRow) {
+    els.reportsOpenClawQrVerifyRow.hidden = session.status !== 'need_verifycode';
+  }
+  if (els.reportsOpenClawQrCopyLinkButton) {
+    els.reportsOpenClawQrCopyLinkButton.hidden = terminal || !session.qrcodeImgContent;
+  }
+  if (els.reportsOpenClawQrGuideText) {
+    els.reportsOpenClawQrGuideText.hidden = !session.guideText;
+    els.reportsOpenClawQrGuideText.textContent = session.guideText || '';
+  }
+}
+
 function renderReportsSettingsStatusOnly() {
   const integrations = currentReportIntegrations();
   const lastPush = integrations?.lastPush || null;
+  const mode = state.settings?.hubMode || 'local';
+  const hubCapable = mode === 'host' || mode === 'client';
   if (els.reportsAiStatusText) {
-    if (reportsAiStatusFeedback) {
-      els.reportsAiStatusText.textContent = reportsAiStatusFeedback;
-    } else {
-      els.reportsAiStatusText.textContent = '';
-    }
+    els.reportsAiStatusText.textContent = reportsAiStatusFeedback || '';
   }
   if (els.reportsOpenClawStatusText) {
     if (reportsOpenClawStatusFeedback) {
@@ -14767,16 +14988,73 @@ function renderReportsSettingsStatusOnly() {
       els.reportsOpenClawStatusText.textContent = lastPush.ok
         ? t('settings.reports.openclawLastPushOk', { at: String(lastPush.at).slice(0, 19).replace('T', ' ') })
         : t('settings.reports.openclawLastPushFail', { error: lastPush.message || lastPush.error || 'failed' });
+    } else if (!hubCapable) {
+      els.reportsOpenClawStatusText.textContent = t('settings.reports.openclawLocalModeHint');
     } else {
       els.reportsOpenClawStatusText.textContent = '';
     }
   }
 }
 
-function formatReportsError(errorCode) {
+function formatReportsError(errorCode, fallbackMessage = '') {
   if (errorCode === 'hub_required') return t('settings.reports.hubRequiredNote');
   if (errorCode === 'hub_not_running') return t('settings.reports.hubNotRunning');
-  return String(errorCode || t('settings.reports.generateFailed'));
+  if (errorCode === 'ai_disabled') return t('settings.reports.errAiDisabled');
+  if (errorCode === 'ai_not_configured') return t('settings.reports.errAiNotConfigured');
+  if (errorCode === 'ai_invalid_url') return t('settings.reports.errAiInvalidUrl');
+  if (errorCode === 'ai_missing_key') return t('settings.reports.errAiMissingKey');
+  if (errorCode === 'ai_token_limit') return t('settings.reports.errAiTokenLimit');
+  if (errorCode === 'ai_empty_response') return t('settings.reports.errAiEmptyResponse');
+  if (errorCode === 'not_found') return t('settings.reports.errReportNotFound');
+  if (errorCode === 'openclaw_disabled') return t('settings.reports.errOpenClawDisabled');
+  if (errorCode === 'openclaw_invalid_url') return t('settings.reports.errOpenClawInvalidUrl');
+  if (errorCode === 'openclaw_missing_target' || errorCode === 'openclaw_missing_recipient') {
+    return t('settings.reports.errOpenClawMissingTarget');
+  }
+  if (errorCode === 'openclaw_missing_token') return t('settings.reports.errOpenClawMissingToken');
+  return String(fallbackMessage || errorCode || t('settings.reports.generateFailed'));
+}
+
+function updateReportsActionButtons() {
+  const mode = state.settings?.hubMode || 'local';
+  const isHost = mode === 'host';
+  const isClient = mode === 'client';
+  const hubCapable = isHost || isClient;
+  const qrActive = Boolean(reportsOpenClawQrSession && reportsOpenClawQrSession.status !== 'confirmed' && reportsOpenClawQrSession.status !== 'binded_redirect');
+
+  if (els.reportsEnableHostButton) {
+    els.reportsEnableHostButton.disabled = reportsGenerating || reportsAiBusy || reportsOpenClawBusy || reportsOpenClawQrBusy;
+  }
+  if (els.reportsOpenDirButton) els.reportsOpenDirButton.disabled = !isHost;
+  if (els.reportsGenerateNowButton) {
+    els.reportsGenerateNowButton.disabled = reportsGenerating || !hubCapable;
+    els.reportsGenerateNowButton.textContent = reportsGenerating
+      ? t('settings.reports.generating')
+      : t('settings.reports.generateNow');
+  }
+  if (els.reportsAiSaveButton) els.reportsAiSaveButton.disabled = reportsAiBusy || !hubCapable;
+  if (els.reportsAiAnalyzeNowButton) {
+    els.reportsAiAnalyzeNowButton.disabled = reportsAiBusy || !hubCapable;
+    els.reportsAiAnalyzeNowButton.textContent = reportsAiBusy
+      ? t('settings.reports.aiAnalyzing')
+      : t('settings.reports.aiAnalyzeNow');
+  }
+  if (els.reportsOpenClawSaveButton) els.reportsOpenClawSaveButton.disabled = reportsOpenClawBusy || !hubCapable;
+  if (els.reportsOpenClawPushNowButton) {
+    els.reportsOpenClawPushNowButton.disabled = reportsOpenClawBusy || !hubCapable;
+    els.reportsOpenClawPushNowButton.textContent = reportsOpenClawBusy
+      ? t('settings.reports.openclawPushing')
+      : t('settings.reports.openclawPushNow');
+  }
+  if (els.reportsOpenClawQrScanButton) {
+    els.reportsOpenClawQrScanButton.disabled = reportsOpenClawQrBusy || reportsOpenClawBusy || mode === 'icloud';
+  }
+  if (els.reportsOpenClawProvisionButton) {
+    els.reportsOpenClawProvisionButton.disabled = reportsOpenClawQrBusy || reportsOpenClawBusy || mode === 'icloud';
+  }
+  if (els.reportsOpenClawQrRefreshButton) els.reportsOpenClawQrRefreshButton.disabled = reportsOpenClawQrBusy;
+  if (els.reportsOpenClawQrVerifyButton) els.reportsOpenClawQrVerifyButton.disabled = reportsOpenClawQrBusy || !qrActive;
+  if (els.reportsOpenClawQrCancelButton) els.reportsOpenClawQrCancelButton.disabled = false;
 }
 
 function renderReportsSettings() {
@@ -14784,6 +15062,17 @@ function renderReportsSettings() {
   const isHost = mode === 'host';
   const isClient = mode === 'client';
   const hubCapable = isHost || isClient;
+  const isIcloud = mode === 'icloud';
+  const syncKey = `${mode}|${String(state.settings?.hubUrl || '').trim()}`;
+  if (syncKey !== reportsIntegrationsSyncKey) {
+    reportsIntegrationsSyncKey = syncKey;
+    reportsAiDirty = false;
+    reportsOpenClawDirty = false;
+    reportsIntegrationsSnapshot = null;
+    reportsIntegrationsFetchSeq += 1;
+    cancelOpenClawQrIfActive();
+  }
+
   const reportsEnabled = state.settings?.reportsEnabled === true;
   if (els.reportsHostRequiredNote) els.reportsHostRequiredNote.hidden = hubCapable;
   if (els.reportsHostControls) {
@@ -14810,13 +15099,6 @@ function renderReportsSettings() {
   if (els.reportsScheduleList) els.reportsScheduleList.classList.toggle('is-disabled', !reportsEnabled);
   const reportsDir = String(state.settings?.reportsDir || '').trim();
   if (els.reportsDirLabel) els.reportsDirLabel.textContent = reportsDir || t('settings.reports.defaultFolder');
-  if (els.reportsOpenDirButton) els.reportsOpenDirButton.disabled = !isHost;
-  if (els.reportsGenerateNowButton) {
-    els.reportsGenerateNowButton.disabled = reportsGenerating || !hubCapable;
-    els.reportsGenerateNowButton.textContent = reportsGenerating
-      ? t('settings.reports.generating')
-      : t('settings.reports.generateNow');
-  }
   if (els.reportsStatusText) {
     const activeFeedback = reportsStatusFeedback && reportsStatusFeedback.mode === mode ? reportsStatusFeedback : null;
     if (activeFeedback?.kind === 'error') {
@@ -14835,34 +15117,39 @@ function renderReportsSettings() {
     }
   }
   if (els.reportsIntegrationsControls) {
-    els.reportsIntegrationsControls.hidden = !hubCapable;
-    els.reportsIntegrationsControls.inert = !hubCapable;
+    els.reportsIntegrationsControls.hidden = isIcloud;
+    els.reportsIntegrationsControls.inert = isIcloud;
+  }
+  if (els.reportsAiPanel) {
+    els.reportsAiPanel.hidden = !hubCapable;
+    els.reportsAiPanel.inert = !hubCapable;
+  }
+  if (els.reportsOpenClawPanel) {
+    els.reportsOpenClawPanel.hidden = isIcloud;
+    els.reportsOpenClawPanel.inert = isIcloud;
   }
   if (hubCapable) {
     if (isHost && state.settings?.reportIntegrations) {
+      const prev = reportsIntegrationsSnapshot || {};
+      const incoming = state.settings.reportIntegrations;
       reportsIntegrationsSnapshot = {
-        ...state.settings.reportIntegrations,
-        lastPush: reportsIntegrationsSnapshot?.lastPush || state.settings.reportIntegrations?.lastPush || null
+        ai: (!reportsAiBusy && !reportsAiDirty && incoming.ai) ? incoming.ai : (prev.ai || incoming.ai),
+        openclaw: (!reportsOpenClawBusy && !reportsOpenClawDirty && incoming.openclaw) ? incoming.openclaw : (prev.openclaw || incoming.openclaw),
+        lastPush: prev.lastPush || incoming.lastPush || null
       };
     }
     populateIntegrationsFields(currentReportIntegrations());
     void refreshReportIntegrations(false);
+  } else if (!isIcloud && state.settings?.reportIntegrations && !reportsOpenClawBusy && !reportsOpenClawDirty) {
+    populateOpenClawIntegrationFields(state.settings.reportIntegrations.openclaw || {});
   }
-  if (els.reportsAiSaveButton) els.reportsAiSaveButton.disabled = reportsAiBusy || !hubCapable;
-  if (els.reportsAiAnalyzeNowButton) {
-    els.reportsAiAnalyzeNowButton.disabled = reportsAiBusy || !hubCapable;
-    els.reportsAiAnalyzeNowButton.textContent = reportsAiBusy
-      ? t('settings.reports.aiAnalyzing')
-      : t('settings.reports.aiAnalyzeNow');
+  if (!isIcloud) {
+    void refreshOpenClawEnv(false);
   }
-  if (els.reportsOpenClawSaveButton) els.reportsOpenClawSaveButton.disabled = reportsOpenClawBusy || !hubCapable;
-  if (els.reportsOpenClawPushNowButton) {
-    els.reportsOpenClawPushNowButton.disabled = reportsOpenClawBusy || !hubCapable;
-    els.reportsOpenClawPushNowButton.textContent = reportsOpenClawBusy
-      ? t('settings.reports.openclawPushing')
-      : t('settings.reports.openclawPushNow');
-  }
+  updateReportsActionButtons();
   renderReportsSettingsStatusOnly();
+  renderOpenClawEnvSummary();
+  renderOpenClawQrState();
 }
 
 for (const [elKey, settingKey, defaultValue] of [
@@ -14885,6 +15172,25 @@ for (const [elKey, settingKey, defaultValue] of [
     }
   });
 }
+els.reportsEnableHostButton?.addEventListener('click', async () => {
+  reportsStatusFeedback = null;
+  if (els.reportsEnableHostButton) els.reportsEnableHostButton.disabled = true;
+  try {
+    await saveSettings({ hubMode: 'host' });
+    reportsIntegrationsSyncKey = '';
+    reportsOpenClawEnvSyncKey = '';
+    void refreshReportIntegrations(true);
+    void refreshOpenClawEnv(true);
+  } catch (error) {
+    reportsStatusFeedback = {
+      kind: 'error',
+      mode: state.settings?.hubMode || 'local',
+      message: error?.message || t('settings.reports.generateFailed')
+    };
+  } finally {
+    renderReportsSettings();
+  }
+});
 els.reportsPickDirButton?.addEventListener('click', async () => {
   const result = await window.tokenMonitor?.pickReportsDir?.();
   if (result?.ok && result.dir) {
@@ -14908,7 +15214,7 @@ els.reportsGenerateNowButton?.addEventListener('click', async () => {
   const mode = state.settings?.hubMode || 'local';
   reportsGenerating = true;
   reportsStatusFeedback = null;
-  renderReportsSettings();
+  updateReportsActionButtons();
   try {
     const result = await window.tokenMonitor?.generateReportsNow?.({ force: true });
     if (result?.ok) {
@@ -14918,20 +15224,66 @@ els.reportsGenerateNowButton?.addEventListener('click', async () => {
       reportsStatusFeedback = {
         kind: 'error',
         mode,
-        message: formatReportsError(result?.error)
+        message: formatReportsError(result?.error, result?.message)
       };
     }
   } catch (error) {
     reportsStatusFeedback = {
       kind: 'error',
       mode,
-      message: error?.message || t('settings.reports.generateFailed')
+      message: formatReportsError(error?.code || error?.message, error?.message)
     };
   } finally {
     reportsGenerating = false;
     renderReportsSettings();
   }
 });
+
+for (const elKey of [
+  'reportsAiEnabledInput',
+  'reportsAiProtocolInput',
+  'reportsAiProviderLabelInput',
+  'reportsAiBaseUrlInput',
+  'reportsAiModelInput',
+  'reportsAiApiKeyInput',
+  'reportsAiLanguageInput',
+  'reportsAiAutoAnalyzeInput'
+]) {
+  const markAiDirty = () => {
+    if (reportsAiBusy) return;
+    reportsAiDirty = true;
+    if (reportsAiStatusFeedback) {
+      reportsAiStatusFeedback = null;
+      renderReportsSettingsStatusOnly();
+    }
+  };
+  els[elKey]?.addEventListener('input', markAiDirty);
+  els[elKey]?.addEventListener('change', markAiDirty);
+}
+
+for (const elKey of [
+  'reportsOpenClawEnabledInput',
+  'reportsOpenClawModeInput',
+  'reportsOpenClawWebhookUrlInput',
+  'reportsOpenClawHookTokenInput',
+  'reportsOpenClawChannelInput',
+  'reportsOpenClawToInput',
+  'reportsOpenClawAgentIdInput',
+  'reportsOpenClawPushOnRolloverInput',
+  'reportsOpenClawIncludeAiInput',
+  'reportsOpenClawIncludeLimitsInput'
+]) {
+  const markOcDirty = () => {
+    if (reportsOpenClawBusy) return;
+    reportsOpenClawDirty = true;
+    if (reportsOpenClawStatusFeedback) {
+      reportsOpenClawStatusFeedback = null;
+      renderReportsSettingsStatusOnly();
+    }
+  };
+  els[elKey]?.addEventListener('input', markOcDirty);
+  els[elKey]?.addEventListener('change', markOcDirty);
+}
 
 function collectAiIntegrationPatch(options = {}) {
   const apiKeyRaw = String(els.reportsAiApiKeyInput?.value || '').trim();
@@ -14967,51 +15319,116 @@ function collectOpenClawIntegrationPatch(options = {}) {
   };
 }
 
+async function saveAiIntegrationsFromForm(options = {}) {
+  const patch = collectAiIntegrationPatch(options);
+  if (!options.clearApiKey) {
+    const validation = validateAiConfigForSave(patch.ai);
+    if (!validation.ok) {
+      reportsAiStatusFeedback = formatReportsError(validation.error);
+      updateReportsActionButtons();
+      renderReportsSettingsStatusOnly();
+      return { ok: false, error: validation.error, validated: false };
+    }
+  }
+  reportsIntegrationsFetchSeq += 1;
+  const res = await window.tokenMonitor?.saveReportIntegrations?.(patch);
+  if (res?.ok) {
+    reportsAiDirty = false;
+    syncReportIntegrationsState({ ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null });
+    if (els.reportsAiApiKeyInput) els.reportsAiApiKeyInput.value = '';
+    populateAiIntegrationFields(reportsIntegrationsSnapshot.ai, { force: true });
+    return { ok: true, res };
+  }
+  return { ok: false, res };
+}
+
 els.reportsAiSaveButton?.addEventListener('click', async () => {
+  if (reportsAiBusy) return;
+  const patch = collectAiIntegrationPatch();
+  const validation = validateAiConfigForSave(patch.ai);
+  if (!validation.ok) {
+    reportsAiStatusFeedback = formatReportsError(validation.error);
+    updateReportsActionButtons();
+    renderReportsSettingsStatusOnly();
+    return;
+  }
   reportsAiBusy = true;
   reportsAiStatusFeedback = null;
-  renderReportsSettings();
+  updateReportsActionButtons();
+  renderReportsSettingsStatusOnly();
   try {
-    const res = await window.tokenMonitor?.saveReportIntegrations?.(collectAiIntegrationPatch());
+    reportsIntegrationsFetchSeq += 1;
+    const res = await window.tokenMonitor?.saveReportIntegrations?.(patch);
     if (res?.ok) {
-      reportsIntegrationsSnapshot = { ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null };
+      reportsAiDirty = false;
+      syncReportIntegrationsState({ ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null });
       if (els.reportsAiApiKeyInput) els.reportsAiApiKeyInput.value = '';
+      populateAiIntegrationFields(reportsIntegrationsSnapshot.ai, { force: true });
       reportsAiStatusFeedback = t('settings.reports.aiSaved');
     } else {
-      reportsAiStatusFeedback = formatReportsError(res?.message || res?.error);
+      reportsAiStatusFeedback = formatReportsError(res?.error, res?.message);
     }
   } catch (error) {
-    reportsAiStatusFeedback = error?.message || t('settings.reports.generateFailed');
+    reportsAiStatusFeedback = formatReportsError(error?.code || error?.message, error?.message);
   } finally {
     reportsAiBusy = false;
-    renderReportsSettings();
+    updateReportsActionButtons();
+    renderReportsSettingsStatusOnly();
   }
 });
 
 els.reportsAiClearKeyButton?.addEventListener('click', async () => {
+  if (reportsAiBusy) return;
+  const patch = collectAiIntegrationPatch({ clearApiKey: true });
   reportsAiBusy = true;
   reportsAiStatusFeedback = null;
-  renderReportsSettings();
+  updateReportsActionButtons();
+  renderReportsSettingsStatusOnly();
   try {
-    const res = await window.tokenMonitor?.saveReportIntegrations?.(collectAiIntegrationPatch({ clearApiKey: true }));
+    reportsIntegrationsFetchSeq += 1;
+    const res = await window.tokenMonitor?.saveReportIntegrations?.(patch);
     if (res?.ok) {
-      reportsIntegrationsSnapshot = { ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null };
+      reportsAiDirty = false;
+      syncReportIntegrationsState({ ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null });
       if (els.reportsAiApiKeyInput) els.reportsAiApiKeyInput.value = '';
+      populateAiIntegrationFields(reportsIntegrationsSnapshot.ai, { force: true });
       reportsAiStatusFeedback = t('settings.reports.aiSaved');
     } else {
-      reportsAiStatusFeedback = formatReportsError(res?.message || res?.error);
+      reportsAiStatusFeedback = formatReportsError(res?.error, res?.message);
     }
+  } catch (error) {
+    reportsAiStatusFeedback = formatReportsError(error?.code || error?.message, error?.message);
   } finally {
     reportsAiBusy = false;
-    renderReportsSettings();
+    updateReportsActionButtons();
+    renderReportsSettingsStatusOnly();
   }
 });
 
 els.reportsAiAnalyzeNowButton?.addEventListener('click', async () => {
+  if (reportsAiBusy) return;
+  if (reportsAiDirty) {
+    const patch = collectAiIntegrationPatch();
+    const validation = validateAiConfigForSave(patch.ai);
+    if (!validation.ok) {
+      reportsAiStatusFeedback = formatReportsError(validation.error);
+      updateReportsActionButtons();
+      renderReportsSettingsStatusOnly();
+      return;
+    }
+  }
   reportsAiBusy = true;
   reportsAiStatusFeedback = null;
-  renderReportsSettings();
+  updateReportsActionButtons();
+  renderReportsSettingsStatusOnly();
   try {
+    if (reportsAiDirty) {
+      const saved = await saveAiIntegrationsFromForm();
+      if (!saved.ok) {
+        reportsAiStatusFeedback = formatReportsError(saved.res?.error || saved.error, saved.res?.message);
+        return;
+      }
+    }
     const res = await window.tokenMonitor?.analyzeReportWithAi?.({ granularity: 'daily', periodKey: 'latest', refresh: true });
     if (res?.ok && res.aiAnalysis) {
       reportsAiStatusFeedback = t('settings.reports.aiAnalyzed', { model: res.aiAnalysis.model || 'AI' });
@@ -15020,78 +15437,383 @@ els.reportsAiAnalyzeNowButton?.addEventListener('click', async () => {
         els.reportsAiPreview.classList.toggle('hidden', !res.aiAnalysis.summaryMarkdown);
       }
     } else {
-      reportsAiStatusFeedback = formatReportsError(res?.message || res?.error);
+      reportsAiStatusFeedback = formatReportsError(res?.error, res?.message);
     }
   } catch (error) {
-    reportsAiStatusFeedback = error?.message || t('settings.reports.generateFailed');
+    reportsAiStatusFeedback = formatReportsError(error?.code || error?.message, error?.message);
   } finally {
     reportsAiBusy = false;
-    renderReportsSettings();
+    updateReportsActionButtons();
+    renderReportsSettingsStatusOnly();
   }
 });
 
 els.reportsOpenClawSaveButton?.addEventListener('click', async () => {
+  if (reportsOpenClawBusy) return;
+  const patch = collectOpenClawIntegrationPatch();
   reportsOpenClawBusy = true;
   reportsOpenClawStatusFeedback = null;
-  renderReportsSettings();
+  updateReportsActionButtons();
+  renderReportsSettingsStatusOnly();
   try {
-    const res = await window.tokenMonitor?.saveReportIntegrations?.(collectOpenClawIntegrationPatch());
+    reportsIntegrationsFetchSeq += 1;
+    const res = await window.tokenMonitor?.saveReportIntegrations?.(patch);
     if (res?.ok) {
-      reportsIntegrationsSnapshot = { ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null };
+      reportsOpenClawDirty = false;
+      syncReportIntegrationsState({ ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null });
       if (els.reportsOpenClawHookTokenInput) els.reportsOpenClawHookTokenInput.value = '';
+      populateOpenClawIntegrationFields(reportsIntegrationsSnapshot.openclaw, { force: true });
       reportsOpenClawStatusFeedback = t('settings.reports.openclawSaved');
     } else {
-      reportsOpenClawStatusFeedback = formatReportsError(res?.message || res?.error);
+      reportsOpenClawStatusFeedback = formatReportsError(res?.error, res?.message);
     }
   } catch (error) {
-    reportsOpenClawStatusFeedback = error?.message || t('settings.reports.generateFailed');
+    reportsOpenClawStatusFeedback = formatReportsError(error?.code || error?.message, error?.message);
   } finally {
     reportsOpenClawBusy = false;
-    renderReportsSettings();
+    updateReportsActionButtons();
+    renderReportsSettingsStatusOnly();
   }
 });
 
 els.reportsOpenClawClearTokenButton?.addEventListener('click', async () => {
+  if (reportsOpenClawBusy) return;
+  const patch = collectOpenClawIntegrationPatch({ clearHookToken: true });
   reportsOpenClawBusy = true;
   reportsOpenClawStatusFeedback = null;
-  renderReportsSettings();
+  updateReportsActionButtons();
+  renderReportsSettingsStatusOnly();
   try {
-    const res = await window.tokenMonitor?.saveReportIntegrations?.(collectOpenClawIntegrationPatch({ clearHookToken: true }));
+    reportsIntegrationsFetchSeq += 1;
+    const res = await window.tokenMonitor?.saveReportIntegrations?.(patch);
     if (res?.ok) {
-      reportsIntegrationsSnapshot = { ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null };
+      reportsOpenClawDirty = false;
+      syncReportIntegrationsState({ ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null });
       if (els.reportsOpenClawHookTokenInput) els.reportsOpenClawHookTokenInput.value = '';
+      populateOpenClawIntegrationFields(reportsIntegrationsSnapshot.openclaw, { force: true });
       reportsOpenClawStatusFeedback = t('settings.reports.openclawSaved');
     } else {
-      reportsOpenClawStatusFeedback = formatReportsError(res?.message || res?.error);
+      reportsOpenClawStatusFeedback = formatReportsError(res?.error, res?.message);
     }
+  } catch (error) {
+    reportsOpenClawStatusFeedback = formatReportsError(error?.code || error?.message, error?.message);
   } finally {
     reportsOpenClawBusy = false;
-    renderReportsSettings();
+    updateReportsActionButtons();
+    renderReportsSettingsStatusOnly();
   }
 });
 
 els.reportsOpenClawPushNowButton?.addEventListener('click', async () => {
+  if (reportsOpenClawBusy) return;
   reportsOpenClawBusy = true;
   reportsOpenClawStatusFeedback = null;
-  renderReportsSettings();
+  updateReportsActionButtons();
+  renderReportsSettingsStatusOnly();
   try {
     const res = await window.tokenMonitor?.pushReportToOpenClaw?.({ target: 'openclaw', granularity: 'daily', periodKey: 'latest' });
     if (res?.lastPush) {
-      const current = currentReportIntegrations();
-      reportsIntegrationsSnapshot = { ...current, lastPush: res.lastPush };
+      syncReportIntegrationsState({ lastPush: res.lastPush });
     }
     if (res?.ok) {
       reportsOpenClawStatusFeedback = t('settings.reports.openclawPushed', { channel: res.channel || 'openclaw-weixin' });
     } else {
-      reportsOpenClawStatusFeedback = formatReportsError(res?.message || res?.error);
+      reportsOpenClawStatusFeedback = formatReportsError(res?.error, res?.message);
     }
   } catch (error) {
-    reportsOpenClawStatusFeedback = error?.message || t('settings.reports.generateFailed');
+    reportsOpenClawStatusFeedback = formatReportsError(error?.code || error?.message, error?.message);
   } finally {
     reportsOpenClawBusy = false;
-    renderReportsSettings();
+    updateReportsActionButtons();
+    renderReportsSettingsStatusOnly();
   }
 });
+
+function applyOpenClawQrResult(res) {
+  if (!reportsOpenClawQrSession) return false;
+  if (res?.qrcodeImgContent && res.qrcodeImgContent !== reportsOpenClawQrSession.qrcodeImgContent) {
+    reportsOpenClawQrSession.qrcodeImgContent = res.qrcodeImgContent;
+  }
+  const status = res?.status || '';
+  if (!res?.ok) {
+    reportsOpenClawQrSession.status = 'error';
+    reportsOpenClawQrSession.statusText = t('settings.reports.openclawQrFailed', {
+      error: res?.message || res?.error || t('settings.reports.generateFailed')
+    });
+    renderOpenClawQrState();
+    updateReportsActionButtons();
+    return true;
+  }
+  reportsOpenClawQrSession.status = status;
+  if (status === 'wait') {
+    reportsOpenClawQrSession.statusText = t('settings.reports.openclawQrWait');
+    renderOpenClawQrState();
+    return false;
+  }
+  if (status === 'scaned' || status === 'scaned_but_redirect') {
+    reportsOpenClawQrSession.statusText = t('settings.reports.openclawQrScanned');
+    renderOpenClawQrState();
+    return false;
+  }
+  if (status === 'need_verifycode') {
+    reportsOpenClawQrSession.statusText = t('settings.reports.openclawQrNeedVerify');
+    renderOpenClawQrState();
+    updateReportsActionButtons();
+    return true;
+  }
+  if (status === 'expired' || status === 'verify_code_blocked') {
+    reportsOpenClawQrSession.statusText = t('settings.reports.openclawQrExpired');
+    renderOpenClawQrState();
+    updateReportsActionButtons();
+    return true;
+  }
+  if (status === 'confirmed' || status === 'binded_redirect') {
+    if (res.openclawEnv) {
+      reportsOpenClawEnvSnapshot = res.openclawEnv;
+    } else {
+      void refreshOpenClawEnv(true);
+    }
+    const target = res.userId || res.accountId || res.openclaw?.to || 'WeChat';
+    const nextOpenClaw = res.openclaw || {
+      ...(currentReportIntegrations()?.openclaw || {}),
+      enabled: true,
+      mode: 'openclaw-agent',
+      channel: 'openclaw-weixin',
+      ...(res.userId ? { to: res.userId } : {}),
+      ...(res.webhookUrl ? { webhookUrl: res.webhookUrl } : {})
+    };
+    reportsOpenClawDirty = false;
+    reportsIntegrationsFetchSeq += 1;
+    syncReportIntegrationsState({
+      ...(res.ai ? { ai: res.ai } : {}),
+      openclaw: nextOpenClaw,
+      ...(res.lastPush !== undefined ? { lastPush: res.lastPush } : {})
+    });
+    populateOpenClawIntegrationFields(reportsIntegrationsSnapshot?.openclaw || nextOpenClaw, { force: true });
+    const confirmedMsg = res.alreadyConnected || status === 'binded_redirect'
+      ? t('settings.reports.openclawQrAlreadyBound', { target })
+      : t('settings.reports.openclawQrConfirmed', { target });
+    reportsOpenClawQrSession.statusText = confirmedMsg;
+    reportsOpenClawQrSession.guideText = openClawGuideMessage(res.openclawEnv || reportsOpenClawEnvSnapshot);
+    reportsOpenClawStatusFeedback = confirmedMsg;
+    renderOpenClawEnvSummary();
+    renderOpenClawQrState();
+    renderReportsSettingsStatusOnly();
+    updateReportsActionButtons();
+    return true;
+  }
+  return false;
+}
+
+function clearOpenClawQrPollTimer() {
+  if (reportsOpenClawQrPollTimer) {
+    clearTimeout(reportsOpenClawQrPollTimer);
+    reportsOpenClawQrPollTimer = null;
+  }
+}
+
+async function pollOpenClawQrLoop(sessionId, pollToken) {
+  if (reportsOpenClawQrPollToken !== pollToken || reportsOpenClawQrSession?.sessionId !== sessionId) return;
+  let res;
+  try {
+    res = await window.tokenMonitor?.pollOpenClawWeixinQrStatus?.(sessionId);
+  } catch (error) {
+    res = { ok: false, error: 'request_failed', message: error?.message || String(error) };
+  }
+  if (reportsOpenClawQrPollToken !== pollToken || reportsOpenClawQrSession?.sessionId !== sessionId) return;
+  const stop = applyOpenClawQrResult(res);
+  if (stop || reportsOpenClawQrPollToken !== pollToken || reportsOpenClawQrSession?.sessionId !== sessionId) return;
+  clearOpenClawQrPollTimer();
+  reportsOpenClawQrPollTimer = setTimeout(() => {
+    reportsOpenClawQrPollTimer = null;
+    void pollOpenClawQrLoop(sessionId, pollToken);
+  }, 25);
+}
+
+function cancelOpenClawQrIfActive() {
+  const active = reportsOpenClawQrSession;
+  reportsOpenClawQrPollToken += 1;
+  clearOpenClawQrPollTimer();
+  reportsOpenClawQrSession = null;
+  if (reportsOpenClawQrCopiedTimer) {
+    clearTimeout(reportsOpenClawQrCopiedTimer);
+    reportsOpenClawQrCopiedTimer = null;
+  }
+  if (els.reportsOpenClawQrVerifyInput) els.reportsOpenClawQrVerifyInput.value = '';
+  renderOpenClawQrState();
+  updateReportsActionButtons();
+  if (active?.sessionId && active.status !== 'confirmed' && active.status !== 'binded_redirect') {
+    void window.tokenMonitor?.cancelOpenClawWeixinQr?.(active.sessionId)?.catch?.(() => {});
+  }
+}
+
+async function startOpenClawQrFlow() {
+  if (reportsOpenClawQrBusy) return;
+  const previousSessionId = reportsOpenClawQrSession?.sessionId;
+  const previousStatus = reportsOpenClawQrSession?.status;
+  reportsOpenClawQrPollToken += 1;
+  clearOpenClawQrPollTimer();
+  if (previousSessionId && previousStatus !== 'confirmed' && previousStatus !== 'binded_redirect') {
+    void window.tokenMonitor?.cancelOpenClawWeixinQr?.(previousSessionId)?.catch?.(() => {});
+  }
+  reportsOpenClawQrBusy = true;
+  reportsOpenClawQrSession = {
+    sessionId: '',
+    qrcodeImgContent: '',
+    status: 'starting',
+    statusText: t('settings.reports.openclawQrStarting'),
+    guideText: ''
+  };
+  if (els.reportsOpenClawQrVerifyInput) els.reportsOpenClawQrVerifyInput.value = '';
+  renderOpenClawQrState();
+  updateReportsActionButtons();
+  try {
+    const res = await window.tokenMonitor?.startOpenClawWeixinQr?.();
+    if (!reportsOpenClawQrSession) return;
+    if (!res?.ok || !res?.sessionId) {
+      reportsOpenClawQrSession.status = 'error';
+      reportsOpenClawQrSession.statusText = t('settings.reports.openclawQrFailed', {
+        error: res?.message || res?.error || t('settings.reports.generateFailed')
+      });
+      renderOpenClawQrState();
+      return;
+    }
+    reportsOpenClawQrSession = {
+      sessionId: res.sessionId,
+      qrcodeImgContent: res.qrcodeImgContent || '',
+      status: res.status || 'wait',
+      statusText: t('settings.reports.openclawQrWait'),
+      guideText: ''
+    };
+    renderOpenClawQrState();
+    const pollToken = ++reportsOpenClawQrPollToken;
+    void pollOpenClawQrLoop(res.sessionId, pollToken);
+  } catch (error) {
+    if (reportsOpenClawQrSession) {
+      reportsOpenClawQrSession.status = 'error';
+      reportsOpenClawQrSession.statusText = t('settings.reports.openclawQrFailed', {
+        error: error?.message || t('settings.reports.generateFailed')
+      });
+      renderOpenClawQrState();
+    }
+  } finally {
+    reportsOpenClawQrBusy = false;
+    updateReportsActionButtons();
+  }
+}
+
+els.reportsOpenClawQrScanButton?.addEventListener('click', () => startOpenClawQrFlow());
+els.reportsOpenClawQrRefreshButton?.addEventListener('click', () => startOpenClawQrFlow());
+els.reportsOpenClawQrCancelButton?.addEventListener('click', () => {
+  cancelOpenClawQrIfActive();
+});
+els.reportsOpenClawQrCopyLinkButton?.addEventListener('click', async () => {
+  const link = reportsOpenClawQrSession?.qrcodeImgContent;
+  if (!link) return;
+  try {
+    if (window.tokenMonitor?.copyText) await window.tokenMonitor.copyText(link);
+    else if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) await navigator.clipboard.writeText(link);
+    if (els.reportsOpenClawQrCopyLinkButton) {
+      els.reportsOpenClawQrCopyLinkButton.textContent = t('settings.reports.openclawQrCopied');
+      if (reportsOpenClawQrCopiedTimer) clearTimeout(reportsOpenClawQrCopiedTimer);
+      reportsOpenClawQrCopiedTimer = setTimeout(() => {
+        reportsOpenClawQrCopiedTimer = null;
+        if (els.reportsOpenClawQrCopyLinkButton) {
+          els.reportsOpenClawQrCopyLinkButton.textContent = t('settings.reports.openclawQrCopyLink');
+        }
+      }, 1500);
+    }
+  } catch (_) {}
+});
+async function submitOpenClawQrVerifyFromInput() {
+  if (reportsOpenClawQrBusy || !reportsOpenClawQrSession?.sessionId) return;
+  const sessionId = reportsOpenClawQrSession.sessionId;
+  const verifyCode = String(els.reportsOpenClawQrVerifyInput?.value || '').trim();
+  if (!verifyCode) return;
+  reportsOpenClawQrBusy = true;
+  updateReportsActionButtons();
+  try {
+    const res = await window.tokenMonitor?.submitOpenClawWeixinVerifyCode?.(sessionId, verifyCode);
+    if (!reportsOpenClawQrSession || reportsOpenClawQrSession.sessionId !== sessionId) return;
+    const stop = applyOpenClawQrResult(res);
+    if (!stop) {
+      clearOpenClawQrPollTimer();
+      const pollToken = ++reportsOpenClawQrPollToken;
+      void pollOpenClawQrLoop(sessionId, pollToken);
+    }
+  } catch (error) {
+    if (reportsOpenClawQrSession && reportsOpenClawQrSession.sessionId === sessionId) {
+      reportsOpenClawQrSession.status = 'error';
+      reportsOpenClawQrSession.statusText = t('settings.reports.openclawQrFailed', {
+        error: error?.message || t('settings.reports.generateFailed')
+      });
+      renderOpenClawQrState();
+    }
+  } finally {
+    reportsOpenClawQrBusy = false;
+    updateReportsActionButtons();
+  }
+}
+
+els.reportsOpenClawQrVerifyButton?.addEventListener('click', () => submitOpenClawQrVerifyFromInput());
+els.reportsOpenClawQrVerifyInput?.addEventListener('keydown', (event) => {
+  if (event?.key === 'Enter') {
+    event.preventDefault?.();
+    return submitOpenClawQrVerifyFromInput();
+  }
+  return undefined;
+});
+els.reportsOpenClawProvisionButton?.addEventListener('click', async () => {
+  if (reportsOpenClawBusy || reportsOpenClawQrBusy) return;
+  reportsOpenClawBusy = true;
+  reportsOpenClawStatusFeedback = t('settings.reports.openclawProvisioning');
+  updateReportsActionButtons();
+  renderReportsSettingsStatusOnly();
+  try {
+    const agentId = String(els.reportsOpenClawAgentIdInput?.value || '').trim();
+    const res = await window.tokenMonitor?.provisionOpenClaw?.({
+      ensureHooks: true,
+      installSkill: true,
+      ...(agentId ? { agentId } : {})
+    });
+    if (res?.ok) {
+      const nextEnv = res.openclawEnv || res.env;
+      if (nextEnv) reportsOpenClawEnvSnapshot = nextEnv;
+      else void refreshOpenClawEnv(true);
+      if (res.openclaw) {
+        reportsOpenClawDirty = false;
+        reportsIntegrationsFetchSeq += 1;
+        syncReportIntegrationsState({
+          ...(res.ai ? { ai: res.ai } : {}),
+          openclaw: res.openclaw,
+          ...(res.lastPush !== undefined ? { lastPush: res.lastPush } : {})
+        });
+        populateOpenClawIntegrationFields(reportsIntegrationsSnapshot.openclaw, { force: true });
+      } else if (res.webhookUrl) {
+        reportsOpenClawDirty = false;
+        const baseOpenClaw = currentReportIntegrations()?.openclaw || {};
+        syncReportIntegrationsState({
+          openclaw: { ...baseOpenClaw, webhookUrl: res.webhookUrl }
+        });
+        populateOpenClawIntegrationFields(reportsIntegrationsSnapshot.openclaw, { force: true });
+      }
+      reportsOpenClawStatusFeedback = t('settings.reports.openclawProvisioned');
+    } else {
+      reportsOpenClawStatusFeedback = formatReportsError(res?.error, res?.message);
+    }
+  } catch (error) {
+    reportsOpenClawStatusFeedback = formatReportsError(error?.code || error?.message, error?.message);
+  } finally {
+    reportsOpenClawBusy = false;
+    renderOpenClawEnvSummary();
+    updateReportsActionButtons();
+    renderReportsSettingsStatusOnly();
+  }
+});
+
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('unload', cancelOpenClawQrIfActive, { once: true });
+}
 els.resetClientDisplayOrderButton?.addEventListener('click', resetClientDisplayOrder);
 els.showAllClientsButton?.addEventListener('click', showAllClients);
 

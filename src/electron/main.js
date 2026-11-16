@@ -183,6 +183,15 @@ const {
   projectModelAliasHistory
 } = require('./modelAliasPresentation');
 const { createHub } = require('../hub/server');
+const { syncIntegrationSecretsFile } = require('../hub/integrations');
+const {
+  configureOpenClawHost,
+  detectOpenClawEnvironment,
+  persistWeixinBinding,
+  readLocalWeixinTokens,
+  readOpenClawHookSecrets
+} = require('../hub/openclawProvisioner');
+const { createWeixinQrLoginManager } = require('../shared/openclawWeixinQr');
 const { probeHubBuild } = require('./hubBuildStatus');
 const {
   normalizeLimitsRefreshMode,
@@ -3762,6 +3771,113 @@ function effectiveReportsDir() {
   return defaultReportsDir();
 }
 
+const hubReportsFetch = electronLimitsFetch();
+
+function mergeReportIntegrationsConfig(current = {}, patch = {}) {
+  const mergeAi = patch?.ai && typeof patch.ai === 'object'
+    ? { ...(current?.ai || {}), ...patch.ai }
+    : current?.ai;
+  const mergeOpenClaw = patch?.openclaw && typeof patch.openclaw === 'object'
+    ? {
+        ...(current?.openclaw || {}),
+        ...patch.openclaw,
+        pushGranularities: {
+          ...(current?.openclaw?.pushGranularities || {}),
+          ...(patch.openclaw.pushGranularities && typeof patch.openclaw.pushGranularities === 'object'
+            ? patch.openclaw.pushGranularities
+            : {})
+        }
+      }
+    : current?.openclaw;
+  if (mergeAi && typeof mergeAi === 'object') {
+    delete mergeAi.apiKey;
+    delete mergeAi.apiKeyConfigured;
+    delete mergeAi.clearApiKey;
+  }
+  if (mergeOpenClaw && typeof mergeOpenClaw === 'object') {
+    delete mergeOpenClaw.hookToken;
+    delete mergeOpenClaw.hookTokenConfigured;
+    delete mergeOpenClaw.clearHookToken;
+  }
+  return {
+    ai: normalizeAiIntegrationConfig(mergeAi),
+    openclaw: normalizeOpenClawIntegrationConfig(mergeOpenClaw)
+  };
+}
+
+async function requestClientHubJson(pathname, {
+  method = 'GET',
+  body = undefined,
+  query = null,
+  timeoutMs = 15_000,
+  fallback = { ok: true }
+} = {}) {
+  const { url: hubUrl, secret } = effectiveHubConfig();
+  if (!hubUrl) return { ok: false, error: 'hub_required' };
+  try {
+    const url = new URL(`${hubUrl.replace(/\/$/, '')}${pathname}`);
+    if (query && typeof query === 'object') {
+      for (const [key, value] of Object.entries(query)) {
+        if (value !== undefined && value !== null && value !== '') {
+          url.searchParams.set(key, String(value));
+        }
+      }
+    }
+    const headers = {
+      ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+      ...(secret ? { authorization: `Bearer ${secret}` } : {})
+    };
+    const response = await hubReportsFetch(url.toString(), {
+      method,
+      headers,
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: data?.error || `Hub ${response.status}`,
+        ...(data?.message ? { message: data.message } : {})
+      };
+    }
+    return data || fallback;
+  } catch (error) {
+    return { ok: false, error: error?.message || 'request_failed' };
+  }
+}
+
+let localWeixinQrManager = null;
+
+function ensureLocalWeixinQrManager() {
+  if (!localWeixinQrManager) {
+    localWeixinQrManager = createWeixinQrLoginManager({
+      fetchImpl: hubReportsFetch,
+      getLocalTokens: () => {
+        const fromOpenClaw = readLocalWeixinTokens();
+        let credToken = '';
+        try { credToken = ensureCredentialStore().readIntegrationSecrets().weixinBotToken || ''; } catch (_) {}
+        return [...new Set([...fromOpenClaw, ...(credToken ? [credToken] : [])])];
+      }
+    });
+  }
+  return localWeixinQrManager;
+}
+
+function redactOpenClawIpcPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
+  const {
+    botToken: _botToken,
+    rawAccountId: _rawAccountId,
+    resolvedHookToken: _resolvedHookToken,
+    weixinBotToken: _weixinBotToken,
+    openclawHookToken: _openclawHookToken,
+    aiApiKey: _aiApiKey,
+    ...safe
+  } = payload;
+  return safe;
+}
+
 function sendHubPush(payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try { mainWindow.webContents.send('hub:push', payload); } catch (_) {}
@@ -3835,6 +3951,7 @@ async function startEmbeddedHub() {
       reportsDir: settings.reportsDir || '',
       integrations: settings.reportIntegrations,
       integrationSecrets,
+      integrationFetch: hubReportsFetch,
       dataFile: hubDataFile(),
       logger: { error: (err) => console.log(`[hub] ${err?.message || err}`) }
     });
@@ -5943,13 +6060,17 @@ function reportIntegrationsForRenderer(currentSettings = settings) {
     return embeddedHub.hub.getIntegrationsStatus();
   }
   const storedSecrets = (() => {
-    try { return ensureCredentialStore().readIntegrationSecrets(); } catch (_) { return { aiApiKey: '', openclawHookToken: '' }; }
+    try { return ensureCredentialStore().readIntegrationSecrets(); } catch (_) { return { aiApiKey: '', openclawHookToken: '', weixinBotToken: '' }; }
   })();
   const ai = normalizeAiIntegrationConfig(currentSettings?.reportIntegrations?.ai);
   const openclaw = normalizeOpenClawIntegrationConfig(currentSettings?.reportIntegrations?.openclaw);
   return {
     ai: { ...ai, apiKeyConfigured: Boolean(storedSecrets.aiApiKey) },
-    openclaw: { ...openclaw, hookTokenConfigured: Boolean(storedSecrets.openclawHookToken) },
+    openclaw: {
+      ...openclaw,
+      hookTokenConfigured: Boolean(storedSecrets.openclawHookToken),
+      weixinBotConfigured: Boolean(storedSecrets.weixinBotToken)
+    },
     lastPush: null
   };
 }
@@ -7226,6 +7347,7 @@ function stopAll() {
   // hub the power to hold our own exit open. The listening socket closes with
   // the process, and a graceful hub close buys nothing on the way out.
   void stopEmbeddedHub();
+  try { localWeixinQrManager?.cancelAll?.(); } catch (_) {}
   stopDiscordRpc();
   try { sessionUsageArchiveStore.close(); } catch (error) {
     console.log(`[session-archive] close failed: ${error?.message || error}`);
@@ -9237,198 +9359,516 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('reports:generateNow', async (_event, options = {}) => {
     if (settings?.hubMode === 'host') {
-      if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
-      try {
-        return await embeddedHub.hub.generateReport(options || {});
-      } catch (error) {
-        return { ok: false, error: error?.message || 'generate_failed' };
+      await modeQueue;
+      if (settings?.hubMode === 'host') {
+        if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+        try {
+          return await embeddedHub.hub.generateReport(options || {});
+        } catch (error) {
+          return { ok: false, error: error?.message || 'generate_failed' };
+        }
       }
     }
     if (settings?.hubMode === 'client') {
-      const { url: hubUrl, secret } = effectiveHubConfig();
-      if (!hubUrl) return { ok: false, error: 'hub_required' };
-      try {
-        const response = await fetch(`${hubUrl.replace(/\/$/, '')}/api/reports/generate`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            ...(secret ? { authorization: `Bearer ${secret}` } : {})
-          },
-          body: JSON.stringify(options || {}),
-          signal: AbortSignal.timeout(15_000)
-        });
-        const data = await response.json().catch(() => null);
-        if (!response.ok) return { ok: false, error: data?.error || `Hub ${response.status}` };
-        return data || { ok: true, reports: [] };
-      } catch (error) {
-        return { ok: false, error: error?.message || 'request_failed' };
-      }
+      return requestClientHubJson('/api/reports/generate', {
+        method: 'POST',
+        body: options || {},
+        timeoutMs: 15_000,
+        fallback: { ok: true, reports: [] }
+      });
     }
     return { ok: false, error: 'hub_required' };
   });
   ipcMain.handle('reports:list', async (_event, options = {}) => {
     if (settings?.hubMode === 'host') {
-      if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
-      try {
-        return await embeddedHub.hub.listReports(options || {});
-      } catch (error) {
-        return { ok: false, error: error?.message || 'list_failed' };
+      await modeQueue;
+      if (settings?.hubMode === 'host') {
+        if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+        try {
+          return await embeddedHub.hub.listReports(options || {});
+        } catch (error) {
+          return { ok: false, error: error?.message || 'list_failed' };
+        }
       }
     }
     if (settings?.hubMode === 'client') {
-      const { url: hubUrl, secret } = effectiveHubConfig();
-      if (!hubUrl) return { ok: false, error: 'hub_required' };
-      try {
-        const url = new URL(`${hubUrl.replace(/\/$/, '')}/api/reports`);
-        if (options?.granularity) url.searchParams.set('granularity', String(options.granularity));
-        if (options?.limit) url.searchParams.set('limit', String(options.limit));
-        const response = await fetch(url.toString(), {
-          headers: secret ? { authorization: `Bearer ${secret}` } : {},
-          signal: AbortSignal.timeout(15_000)
-        });
-        const data = await response.json().catch(() => null);
-        if (!response.ok) return { ok: false, error: data?.error || `Hub ${response.status}` };
-        return data || { ok: true, reports: [] };
-      } catch (error) {
-        return { ok: false, error: error?.message || 'request_failed' };
-      }
+      return requestClientHubJson('/api/reports', {
+        method: 'GET',
+        query: {
+          granularity: options?.granularity,
+          limit: options?.limit
+        },
+        timeoutMs: 15_000,
+        fallback: { ok: true, reports: [] }
+      });
     }
     return { ok: false, error: 'hub_required' };
   });
   ipcMain.handle('reports:getIntegrations', async () => {
     if (settings?.hubMode === 'host') {
-      if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
-      try {
-        return { ok: true, ...embeddedHub.hub.getIntegrationsStatus() };
-      } catch (error) {
-        return { ok: false, error: error?.message || 'integrations_failed' };
+      await modeQueue;
+      if (settings?.hubMode === 'host') {
+        if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+        try {
+          return { ok: true, ...embeddedHub.hub.getIntegrationsStatus() };
+        } catch (error) {
+          return { ok: false, error: error?.message || 'integrations_failed' };
+        }
       }
     }
     if (settings?.hubMode === 'client') {
-      const { url: hubUrl, secret } = effectiveHubConfig();
-      if (!hubUrl) return { ok: false, error: 'hub_required' };
-      try {
-        const response = await fetch(`${hubUrl.replace(/\/$/, '')}/api/reports/integrations`, {
-          headers: secret ? { authorization: `Bearer ${secret}` } : {},
-          signal: AbortSignal.timeout(15_000)
-        });
-        const data = await response.json().catch(() => null);
-        if (!response.ok) return { ok: false, error: data?.error || `Hub ${response.status}`, message: data?.message };
-        return data || { ok: true };
-      } catch (error) {
-        return { ok: false, error: error?.message || 'request_failed' };
-      }
+      return requestClientHubJson('/api/reports/integrations', {
+        method: 'GET',
+        timeoutMs: 15_000,
+        fallback: { ok: true }
+      });
     }
     return { ok: false, error: 'hub_required' };
   });
   ipcMain.handle('reports:saveIntegrations', async (_event, patch = {}) => {
     if (settings?.hubMode === 'host') {
-      try {
-        const secretPatch = {};
-        if (patch?.ai?.clearApiKey === true) secretPatch.aiApiKey = '';
-        else if (typeof patch?.ai?.apiKey === 'string' && patch.ai.apiKey.trim()) secretPatch.aiApiKey = patch.ai.apiKey.trim();
-        if (patch?.openclaw?.clearHookToken === true) secretPatch.openclawHookToken = '';
-        else if (typeof patch?.openclaw?.hookToken === 'string' && patch.openclaw.hookToken.trim()) secretPatch.openclawHookToken = patch.openclaw.hookToken.trim();
-        if (Object.keys(secretPatch).length > 0) {
-          ensureCredentialStore().writeIntegrationSecrets(secretPatch);
+      await modeQueue;
+      if (settings?.hubMode === 'host') {
+        try {
+          const secretPatch = {};
+          if (patch?.ai?.clearApiKey === true) secretPatch.aiApiKey = '';
+          else if (typeof patch?.ai?.apiKey === 'string' && patch.ai.apiKey.trim()) secretPatch.aiApiKey = patch.ai.apiKey.trim();
+          if (patch?.openclaw?.clearHookToken === true) secretPatch.openclawHookToken = '';
+          else if (typeof patch?.openclaw?.hookToken === 'string' && patch.openclaw.hookToken.trim()) secretPatch.openclawHookToken = patch.openclaw.hookToken.trim();
+          if (Object.keys(secretPatch).length > 0) {
+            ensureCredentialStore().writeIntegrationSecrets(secretPatch);
+            if (!embeddedHub?.hub) {
+              syncIntegrationSecretsFile(hubDataFile(), secretPatch, settings.reportsDir || '');
+            }
+          }
+          let nextConfig = mergeReportIntegrationsConfig(settings.reportIntegrations, patch);
+          if (embeddedHub?.hub) {
+            const hubUpdated = embeddedHub.hub.updateIntegrationsConfig(patch);
+            if (hubUpdated?.ok === false) return hubUpdated;
+            nextConfig = mergeReportIntegrationsConfig(nextConfig, {
+              ai: hubUpdated?.ai,
+              openclaw: hubUpdated?.openclaw
+            });
+          }
+          applySettingsPatch({ reportIntegrations: nextConfig });
+          const status = embeddedHub?.hub?.getIntegrationsStatus?.() || reportIntegrationsForRenderer();
+          return { ok: true, ...status };
+        } catch (error) {
+          return { ok: false, error: error?.message || 'save_failed' };
         }
-        const nextConfig = {
-          ai: normalizeAiIntegrationConfig(patch?.ai ?? settings.reportIntegrations?.ai),
-          openclaw: normalizeOpenClawIntegrationConfig(patch?.openclaw ?? settings.reportIntegrations?.openclaw)
-        };
-        applySettingsPatch({ reportIntegrations: nextConfig });
-        if (embeddedHub?.hub) {
-          embeddedHub.hub.updateIntegrationsConfig(patch);
-        }
-        const status = embeddedHub?.hub?.getIntegrationsStatus?.() || reportIntegrationsForRenderer();
-        return { ok: true, ...status };
-      } catch (error) {
-        return { ok: false, error: error?.message || 'save_failed' };
       }
     }
     if (settings?.hubMode === 'client') {
-      const { url: hubUrl, secret } = effectiveHubConfig();
-      if (!hubUrl) return { ok: false, error: 'hub_required' };
-      try {
-        const response = await fetch(`${hubUrl.replace(/\/$/, '')}/api/reports/integrations`, {
-          method: 'PUT',
-          headers: {
-            'content-type': 'application/json',
-            ...(secret ? { authorization: `Bearer ${secret}` } : {})
-          },
-          body: JSON.stringify(patch || {}),
-          signal: AbortSignal.timeout(15_000)
-        });
-        const data = await response.json().catch(() => null);
-        if (!response.ok) return { ok: false, error: data?.error || `Hub ${response.status}`, message: data?.message };
-        return data || { ok: true };
-      } catch (error) {
-        return { ok: false, error: error?.message || 'request_failed' };
-      }
+      return requestClientHubJson('/api/reports/integrations', {
+        method: 'PUT',
+        body: patch || {},
+        timeoutMs: 15_000,
+        fallback: { ok: true }
+      });
     }
     return { ok: false, error: 'hub_required' };
   });
   ipcMain.handle('reports:analyzeWithAi', async (_event, options = {}) => {
     if (settings?.hubMode === 'host') {
-      if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
-      try {
-        return await embeddedHub.hub.analyzeReportWithAi(options || {});
-      } catch (error) {
-        return { ok: false, error: error?.message || 'analyze_failed' };
+      await modeQueue;
+      if (settings?.hubMode === 'host') {
+        if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+        try {
+          return await embeddedHub.hub.analyzeReportWithAi(options || {});
+        } catch (error) {
+          return { ok: false, error: error?.message || 'analyze_failed' };
+        }
       }
     }
     if (settings?.hubMode === 'client') {
-      const { url: hubUrl, secret } = effectiveHubConfig();
-      if (!hubUrl) return { ok: false, error: 'hub_required' };
-      try {
-        const response = await fetch(`${hubUrl.replace(/\/$/, '')}/api/reports/ai-analyze`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            ...(secret ? { authorization: `Bearer ${secret}` } : {})
-          },
-          body: JSON.stringify(options || {}),
-          signal: AbortSignal.timeout(50_000)
-        });
-        const data = await response.json().catch(() => null);
-        if (!response.ok) return { ok: false, error: data?.error || `Hub ${response.status}`, message: data?.message };
-        return data || { ok: true };
-      } catch (error) {
-        return { ok: false, error: error?.message || 'request_failed' };
-      }
+      return requestClientHubJson('/api/reports/ai-analyze', {
+        method: 'POST',
+        body: options || {},
+        timeoutMs: 75_000,
+        fallback: { ok: true }
+      });
     }
     return { ok: false, error: 'hub_required' };
   });
   ipcMain.handle('reports:pushToOpenClaw', async (_event, options = {}) => {
     if (settings?.hubMode === 'host') {
-      if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
-      try {
-        return await embeddedHub.hub.pushReportToOpenClaw(options || {});
-      } catch (error) {
-        return { ok: false, error: error?.message || 'push_failed' };
+      await modeQueue;
+      if (settings?.hubMode === 'host') {
+        if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+        try {
+          return await embeddedHub.hub.pushReportToOpenClaw(options || {});
+        } catch (error) {
+          return { ok: false, error: error?.message || 'push_failed' };
+        }
       }
     }
     if (settings?.hubMode === 'client') {
-      const { url: hubUrl, secret } = effectiveHubConfig();
-      if (!hubUrl) return { ok: false, error: 'hub_required' };
-      try {
-        const response = await fetch(`${hubUrl.replace(/\/$/, '')}/api/reports/push`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            ...(secret ? { authorization: `Bearer ${secret}` } : {})
-          },
-          body: JSON.stringify({ target: 'openclaw', ...(options || {}) }),
-          signal: AbortSignal.timeout(55_000)
-        });
-        const data = await response.json().catch(() => null);
-        if (!response.ok) return { ok: false, error: data?.error || `Hub ${response.status}`, message: data?.message };
-        return data || { ok: true };
-      } catch (error) {
-        return { ok: false, error: error?.message || 'request_failed' };
-      }
+      return requestClientHubJson('/api/reports/push', {
+        method: 'POST',
+        body: { target: 'openclaw', ...(options || {}) },
+        timeoutMs: 85_000,
+        fallback: { ok: true }
+      });
     }
     return { ok: false, error: 'hub_required' };
+  });
+  function syncHostIntegrationsToMain() {
+    if (!embeddedHub?.hub) return;
+    let secretsChanged = false;
+    const hubSecrets = embeddedHub.hub.getIntegrationSecrets?.();
+    if (hubSecrets && typeof hubSecrets === 'object') {
+      const stored = ensureCredentialStore().readIntegrationSecrets();
+      const secretPatch = {};
+      if (typeof hubSecrets.weixinBotToken === 'string' && hubSecrets.weixinBotToken !== stored.weixinBotToken) {
+        secretPatch.weixinBotToken = hubSecrets.weixinBotToken;
+      }
+      if (typeof hubSecrets.openclawHookToken === 'string' && hubSecrets.openclawHookToken !== stored.openclawHookToken) {
+        secretPatch.openclawHookToken = hubSecrets.openclawHookToken;
+      }
+      if (Object.keys(secretPatch).length > 0) {
+        ensureCredentialStore().writeIntegrationSecrets(secretPatch);
+        secretsChanged = true;
+      }
+    }
+    const hubStatus = embeddedHub.hub.getIntegrationsStatus?.();
+    if (hubStatus) {
+      const nextConfig = mergeReportIntegrationsConfig(settings.reportIntegrations, {
+        ai: hubStatus.ai,
+        openclaw: hubStatus.openclaw
+      });
+      if (JSON.stringify(nextConfig) !== JSON.stringify(settings.reportIntegrations)) {
+        applySettingsPatch({ reportIntegrations: nextConfig });
+      } else if (secretsChanged) {
+        pushSettingsToRenderer();
+      }
+    } else if (secretsChanged) {
+      pushSettingsToRenderer();
+    }
+  }
+  async function finalizeLocalWeixinQrResult(qrResult) {
+    const storedSecrets = ensureCredentialStore().readIntegrationSecrets();
+    const currentOpenClaw = normalizeOpenClawIntegrationConfig(settings?.reportIntegrations?.openclaw);
+    const warnings = [];
+    const secretPatch = {};
+    if (qrResult.status === 'confirmed') {
+      const botToken = typeof qrResult.botToken === 'string' ? qrResult.botToken.trim() : '';
+      if (botToken && botToken !== storedSecrets.weixinBotToken) {
+        secretPatch.weixinBotToken = botToken;
+      }
+      if (botToken && qrResult.accountId) {
+        try {
+          persistWeixinBinding({
+            accountId: qrResult.accountId,
+            rawAccountId: qrResult.rawAccountId,
+            botToken,
+            baseUrl: qrResult.baseUrl,
+            userId: qrResult.userId
+          });
+        } catch (error) {
+          warnings.push(`Failed to write ~/.openclaw/openclaw-weixin credentials: ${error?.message || error}`);
+        }
+      }
+    }
+    const hookSecrets = readOpenClawHookSecrets();
+    let provisionRes = null;
+    try {
+      provisionRes = await configureOpenClawHost({
+        ensureHooks: true,
+        installSkill: true,
+        restartGateway: false,
+        bumpChannelReload: true,
+        hookToken: storedSecrets.openclawHookToken || hookSecrets.hookToken || undefined,
+        agentId: currentOpenClaw.agentId || 'main'
+      });
+      if (Array.isArray(provisionRes.warnings) && provisionRes.warnings.length > 0) {
+        warnings.push(...provisionRes.warnings);
+      }
+    } catch (error) {
+      warnings.push(`Failed to configure OpenClaw host files: ${error?.message || error}`);
+    }
+    const nextHookToken = String(storedSecrets.openclawHookToken || provisionRes?.resolvedHookToken || hookSecrets.hookToken || '').trim();
+    if (nextHookToken && nextHookToken !== storedSecrets.openclawHookToken) {
+      secretPatch.openclawHookToken = nextHookToken;
+    }
+    if (Object.keys(secretPatch).length > 0) {
+      ensureCredentialStore().writeIntegrationSecrets(secretPatch);
+      syncIntegrationSecretsFile(hubDataFile(), secretPatch, settings.reportsDir || '');
+    }
+    const openclawEnv = provisionRes?.env || await detectOpenClawEnvironment();
+    const matchedUserId = qrResult.userId
+      || openclawEnv.accounts?.find((a) => a.userId)?.userId
+      || currentOpenClaw.to;
+    const resolvedWebhookUrl = currentOpenClaw.webhookUrl
+      || provisionRes?.webhookUrl
+      || openclawEnv.suggestedWebhookUrl
+      || 'http://127.0.0.1:18789/hooks/agent';
+    const nextOpenClaw = normalizeOpenClawIntegrationConfig({
+      ...currentOpenClaw,
+      enabled: true,
+      mode: 'openclaw-agent',
+      channel: 'openclaw-weixin',
+      to: matchedUserId || currentOpenClaw.to,
+      webhookUrl: resolvedWebhookUrl,
+      agentId: currentOpenClaw.agentId || 'main'
+    });
+    const nextConfig = mergeReportIntegrationsConfig(settings.reportIntegrations, { openclaw: nextOpenClaw });
+    applySettingsPatch({ reportIntegrations: nextConfig });
+    const rendererStatus = reportIntegrationsForRenderer();
+    return redactOpenClawIpcPayload({
+      ...qrResult,
+      accountId: qrResult.accountId || openclawEnv.accounts?.at(-1)?.accountId || '',
+      userId: matchedUserId || '',
+      autoConfigured: Boolean(provisionRes?.steps?.hooksConfigured),
+      steps: provisionRes?.steps || null,
+      warnings,
+      openclawEnv,
+      ...rendererStatus,
+      openclaw: {
+        ...rendererStatus.openclaw,
+        weixinBotConfigured: Boolean(
+          secretPatch.weixinBotToken || storedSecrets.weixinBotToken || (openclawEnv.accounts || []).some((a) => a.hasToken)
+        )
+      }
+    });
+  }
+  async function provisionLocalOpenClaw(options = {}) {
+    const storedSecrets = ensureCredentialStore().readIntegrationSecrets();
+    const currentOpenClaw = normalizeOpenClawIntegrationConfig(settings?.reportIntegrations?.openclaw);
+    const hookSecrets = readOpenClawHookSecrets();
+    const provisionRes = await configureOpenClawHost({
+      ensureHooks: options?.ensureHooks !== false,
+      installSkill: options?.installSkill !== false,
+      restartGateway: options?.restartGateway === true,
+      bumpChannelReload: options?.bumpChannelReload !== false,
+      hookToken: storedSecrets.openclawHookToken || hookSecrets.hookToken || undefined,
+      agentId: currentOpenClaw.agentId || 'main'
+    });
+    const nextHookToken = String(provisionRes.resolvedHookToken || hookSecrets.hookToken || '').trim();
+    if (nextHookToken && nextHookToken !== storedSecrets.openclawHookToken) {
+      const secretPatch = { openclawHookToken: nextHookToken };
+      ensureCredentialStore().writeIntegrationSecrets(secretPatch);
+      syncIntegrationSecretsFile(hubDataFile(), secretPatch, settings.reportsDir || '');
+    }
+    const nextWebhookUrl = currentOpenClaw.webhookUrl || provisionRes.webhookUrl;
+    const nextChannel = currentOpenClaw.channel || 'openclaw-weixin';
+    const nextEnabled = options?.enableIntegration === true ? true : currentOpenClaw.enabled;
+    const nextTo = currentOpenClaw.to || provisionRes.env?.accounts?.find((a) => a.userId)?.userId || '';
+    if (
+      nextWebhookUrl !== currentOpenClaw.webhookUrl
+      || nextChannel !== currentOpenClaw.channel
+      || nextEnabled !== currentOpenClaw.enabled
+      || nextTo !== currentOpenClaw.to
+    ) {
+      const nextOpenClaw = normalizeOpenClawIntegrationConfig({
+        ...currentOpenClaw,
+        enabled: nextEnabled,
+        webhookUrl: nextWebhookUrl,
+        channel: nextChannel,
+        to: nextTo
+      });
+      const nextConfig = mergeReportIntegrationsConfig(settings.reportIntegrations, { openclaw: nextOpenClaw });
+      applySettingsPatch({ reportIntegrations: nextConfig });
+    }
+    return redactOpenClawIpcPayload({
+      ...provisionRes,
+      ...reportIntegrationsForRenderer()
+    });
+  }
+  ipcMain.handle('openclaw:getEnv', async () => {
+    if (settings?.hubMode === 'host') {
+      await modeQueue;
+      if (settings?.hubMode === 'host') {
+        try {
+          if (embeddedHub?.hub) return redactOpenClawIpcPayload(await embeddedHub.hub.getOpenClawEnv());
+          return redactOpenClawIpcPayload(await detectOpenClawEnvironment());
+        } catch (error) {
+          return { ok: false, error: error?.message || 'openclaw_env_failed' };
+        }
+      }
+    }
+    if (settings?.hubMode === 'client') {
+      return requestClientHubJson('/api/integrations/openclaw/env', {
+        method: 'GET',
+        timeoutMs: 15_000,
+        fallback: { ok: false, error: 'openclaw_env_failed' }
+      });
+    }
+    try {
+      return redactOpenClawIpcPayload(await detectOpenClawEnvironment());
+    } catch (error) {
+      return { ok: false, error: error?.message || 'openclaw_env_failed' };
+    }
+  });
+  ipcMain.handle('openclaw:qrStart', async () => {
+    if (settings?.hubMode === 'host') {
+      await modeQueue;
+      if (settings?.hubMode === 'host') {
+        if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+        try {
+          return redactOpenClawIpcPayload(await embeddedHub.hub.startOpenClawWeixinQr());
+        } catch (error) {
+          return { ok: false, error: error?.message || 'qr_start_failed' };
+        }
+      }
+    }
+    if (settings?.hubMode === 'client') {
+      return requestClientHubJson('/api/integrations/openclaw/qr/start', {
+        method: 'POST',
+        body: {},
+        timeoutMs: 20_000,
+        fallback: { ok: false, error: 'qr_start_failed' }
+      });
+    }
+    try {
+      return redactOpenClawIpcPayload(await ensureLocalWeixinQrManager().start());
+    } catch (error) {
+      return { ok: false, error: error?.message || 'qr_start_failed' };
+    }
+  });
+  ipcMain.handle('openclaw:qrStatus', async (_event, sessionIdOrOptions = '') => {
+    const sessionId = typeof sessionIdOrOptions === 'string'
+      ? sessionIdOrOptions.trim()
+      : String(sessionIdOrOptions?.sessionId || '').trim();
+    if (!sessionId) {
+      return { ok: false, error: 'invalid_request', message: 'sessionId is required' };
+    }
+    if (settings?.hubMode === 'host') {
+      await modeQueue;
+      if (settings?.hubMode === 'host') {
+        if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+        try {
+          const result = await embeddedHub.hub.pollOpenClawWeixinQrStatus(sessionId);
+          if (result?.ok && (result.status === 'confirmed' || result.status === 'binded_redirect')) {
+            syncHostIntegrationsToMain();
+          }
+          return redactOpenClawIpcPayload(result);
+        } catch (error) {
+          return { ok: false, error: error?.message || 'qr_poll_failed' };
+        }
+      }
+    }
+    if (settings?.hubMode === 'client') {
+      return requestClientHubJson('/api/integrations/openclaw/qr/status', {
+        method: 'GET',
+        query: { sessionId },
+        timeoutMs: 50_000,
+        fallback: { ok: false, error: 'qr_poll_failed' }
+      });
+    }
+    try {
+      const result = await ensureLocalWeixinQrManager().pollStatus(sessionId);
+      if (result?.ok && (result.status === 'confirmed' || result.status === 'binded_redirect')) {
+        return await finalizeLocalWeixinQrResult(result);
+      }
+      return redactOpenClawIpcPayload(result);
+    } catch (error) {
+      return { ok: false, error: error?.message || 'qr_poll_failed' };
+    }
+  });
+  ipcMain.handle('openclaw:qrVerify', async (_event, sessionIdOrOptions = '', verifyCodeArg = '') => {
+    const sessionId = typeof sessionIdOrOptions === 'string'
+      ? sessionIdOrOptions.trim()
+      : String(sessionIdOrOptions?.sessionId || '').trim();
+    const verifyCode = typeof sessionIdOrOptions === 'object' && sessionIdOrOptions !== null && verifyCodeArg === undefined
+      ? String(sessionIdOrOptions.verifyCode || '').trim()
+      : String(verifyCodeArg || '').trim();
+    if (!sessionId || !verifyCode) {
+      return { ok: false, error: 'invalid_request', message: 'sessionId and verifyCode are required' };
+    }
+    if (settings?.hubMode === 'host') {
+      await modeQueue;
+      if (settings?.hubMode === 'host') {
+        if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+        try {
+          const result = await embeddedHub.hub.submitOpenClawWeixinVerifyCode(sessionId, verifyCode);
+          if (result?.ok && (result.status === 'confirmed' || result.status === 'binded_redirect')) {
+            syncHostIntegrationsToMain();
+          }
+          return redactOpenClawIpcPayload(result);
+        } catch (error) {
+          return { ok: false, error: error?.message || 'qr_verify_failed' };
+        }
+      }
+    }
+    if (settings?.hubMode === 'client') {
+      return requestClientHubJson('/api/integrations/openclaw/qr/verify', {
+        method: 'POST',
+        body: { sessionId, verifyCode },
+        timeoutMs: 50_000,
+        fallback: { ok: false, error: 'qr_verify_failed' }
+      });
+    }
+    try {
+      const manager = ensureLocalWeixinQrManager();
+      const queued = manager.submitVerifyCode(sessionId, verifyCode);
+      if (!queued.ok) return redactOpenClawIpcPayload(queued);
+      const result = await manager.pollStatus(sessionId);
+      if (result?.ok && (result.status === 'confirmed' || result.status === 'binded_redirect')) {
+        return await finalizeLocalWeixinQrResult(result);
+      }
+      return redactOpenClawIpcPayload(result);
+    } catch (error) {
+      return { ok: false, error: error?.message || 'qr_verify_failed' };
+    }
+  });
+  ipcMain.handle('openclaw:qrCancel', async (_event, sessionIdOrOptions = '') => {
+    const sessionId = typeof sessionIdOrOptions === 'string'
+      ? sessionIdOrOptions.trim()
+      : String(sessionIdOrOptions?.sessionId || '').trim();
+    if (settings?.hubMode === 'host') {
+      await modeQueue;
+      if (settings?.hubMode === 'host') {
+        if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+        try {
+          return redactOpenClawIpcPayload(await embeddedHub.hub.cancelOpenClawWeixinQr(sessionId));
+        } catch (error) {
+          return { ok: false, error: error?.message || 'qr_cancel_failed' };
+        }
+      }
+    }
+    if (settings?.hubMode === 'client') {
+      return requestClientHubJson('/api/integrations/openclaw/qr/cancel', {
+        method: 'POST',
+        body: { sessionId },
+        timeoutMs: 10_000,
+        fallback: { ok: true, sessionId, cancelled: false }
+      });
+    }
+    try {
+      return redactOpenClawIpcPayload(ensureLocalWeixinQrManager().cancel(sessionId));
+    } catch (error) {
+      return { ok: false, error: error?.message || 'qr_cancel_failed' };
+    }
+  });
+  ipcMain.handle('openclaw:provision', async (_event, options = {}) => {
+    if (settings?.hubMode === 'host') {
+      await modeQueue;
+      if (settings?.hubMode === 'host') {
+        if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+        try {
+          const result = await embeddedHub.hub.provisionOpenClaw(options || {});
+          if (result?.ok) {
+            syncHostIntegrationsToMain();
+          }
+          return redactOpenClawIpcPayload(result);
+        } catch (error) {
+          return { ok: false, error: error?.message || 'provision_failed' };
+        }
+      }
+    }
+    if (settings?.hubMode === 'client') {
+      return requestClientHubJson('/api/integrations/openclaw/provision', {
+        method: 'POST',
+        body: options || {},
+        timeoutMs: 30_000,
+        fallback: { ok: false, error: 'provision_failed' }
+      });
+    }
+    try {
+      return await provisionLocalOpenClaw(options || {});
+    } catch (error) {
+      return { ok: false, error: error?.message || 'provision_failed' };
+    }
   });
   ipcMain.handle('session:getDetail', (_event, args) => {
     const { client, sessionId, period, sessionCost } = args || {};

@@ -1738,7 +1738,10 @@
             </div>
             <div id="reportsSettingsGroup" class="settings-subgroup settings-export-block">
               <div class="settings-group-header"><span data-i18n="settings.reports.title">Project usage reports</span></div>
-              <p id="reportsHostRequiredNote" class="settings-note" data-i18n="settings.reports.hubRequiredNote" hidden>Available when hosting or connected to a Main Hub.</p>
+              <div id="reportsHostRequiredNote" class="reports-host-required-note" hidden>
+                <p class="settings-note" data-i18n="settings.reports.hubRequiredNote">Available when hosting or connected to a Main Hub.</p>
+                <button id="reportsEnableHostButton" type="button" class="settings-mini-button" data-i18n="settings.reports.enableHostMode">Enable Host Hub</button>
+              </div>
               <div id="reportsHostControls" class="export-auto-details">
                 <label class="checkbox-label settings-item">
                   <span class="settings-item-text">
@@ -1779,7 +1782,10 @@
                 <div id="reportsAiPanel" class="reports-integration-panel">
                   <div class="reports-integration-header">
                     <span class="settings-item-title" data-i18n="settings.reports.aiTitle">Third-party AI report analysis</span>
-                    <input id="reportsAiEnabledInput" type="checkbox" aria-label="Enable third-party AI report analysis" data-i18n-aria-label="settings.reports.aiTitle" />
+                    <label class="checkbox-label reports-integration-toggle">
+                      <span class="reports-integration-toggle-label" data-i18n="settings.reports.enableIntegration">Enable</span>
+                      <input id="reportsAiEnabledInput" type="checkbox" aria-label="Enable third-party AI report analysis" data-i18n-aria-label="settings.reports.aiTitle" />
+                    </label>
                   </div>
                   <p class="settings-note" data-i18n="settings.reports.aiDesc">Connect an OpenAI-compatible or Anthropic Messages API to summarize reports, live usage, and third-party API quotas.</p>
                   <div class="reports-integration-grid">
@@ -1835,9 +1841,35 @@
                 <div id="reportsOpenClawPanel" class="reports-integration-panel">
                   <div class="reports-integration-header">
                     <span class="settings-item-title" data-i18n="settings.reports.openclawTitle">OpenClaw WeChat delivery</span>
-                    <input id="reportsOpenClawEnabledInput" type="checkbox" aria-label="Enable OpenClaw WeChat delivery" data-i18n-aria-label="settings.reports.openclawTitle" />
+                    <label class="checkbox-label reports-integration-toggle">
+                      <span class="reports-integration-toggle-label" data-i18n="settings.reports.enableIntegration">Enable</span>
+                      <input id="reportsOpenClawEnabledInput" type="checkbox" aria-label="Enable OpenClaw WeChat delivery" data-i18n-aria-label="settings.reports.openclawTitle" />
+                    </label>
                   </div>
                   <p class="settings-note" data-i18n="settings.reports.openclawDesc">Push reports, AI summaries, and third-party API balances to WeChat via OpenClaw Gateway (/hooks/agent).</p>
+                  <div class="reports-openclaw-onboarding">
+                    <div class="reports-openclaw-env-row">
+                      <span id="reportsOpenClawEnvSummary" class="settings-note"></span>
+                    </div>
+                    <div class="settings-actions reports-openclaw-quick-actions">
+                      <button id="reportsOpenClawQrScanButton" type="button" class="reports-primary-button" data-i18n="settings.reports.openclawQrScan">Scan QR to Add WeChat</button>
+                      <button id="reportsOpenClawProvisionButton" type="button" class="settings-mini-button" data-i18n="settings.reports.openclawProvision">Configure Local OpenClaw</button>
+                    </div>
+                    <div id="reportsOpenClawQrCard" class="reports-openclaw-qr-card" hidden>
+                      <div id="reportsOpenClawQrBox" class="reports-openclaw-qr-box" aria-label="WeChat ClawBot pairing QR code" data-i18n-aria-label="settings.reports.openclawQrAria" hidden></div>
+                      <p id="reportsOpenClawQrStatusText" class="settings-note reports-openclaw-qr-status" role="status" aria-live="polite"></p>
+                      <div id="reportsOpenClawQrVerifyRow" class="reports-secret-row reports-openclaw-verify-row" hidden>
+                        <input id="reportsOpenClawQrVerifyInput" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="settings.reports.openclawVerifyPlaceholder" placeholder="Enter WeChat verification code" />
+                        <button id="reportsOpenClawQrVerifyButton" type="button" class="settings-mini-button" data-i18n="settings.reports.openclawVerifySubmit">Verify</button>
+                      </div>
+                      <div class="settings-actions reports-openclaw-qr-actions">
+                        <button id="reportsOpenClawQrRefreshButton" type="button" class="settings-mini-button" data-i18n="settings.reports.openclawQrRefresh">Refresh QR</button>
+                        <button id="reportsOpenClawQrCopyLinkButton" type="button" class="settings-mini-button" data-i18n="settings.reports.openclawQrCopyLink">Copy link</button>
+                        <button id="reportsOpenClawQrCancelButton" type="button" class="settings-mini-button" data-i18n="settings.common.cancel">Cancel</button>
+                      </div>
+                      <p id="reportsOpenClawQrGuideText" class="settings-note reports-openclaw-qr-guide" hidden></p>
+                    </div>
+                  </div>
                   <div class="reports-integration-grid">
                     <label class="reports-field">
                       <span class="settings-note" data-i18n="settings.reports.openclawMode">Delivery mode</span>
@@ -1849,7 +1881,7 @@
                     </label>
                     <label class="reports-field">
                       <span class="settings-note" data-i18n="settings.reports.openclawWebhookUrl">Gateway Webhook URL</span>
-                      <input id="reportsOpenClawWebhookUrlInput" type="url" spellcheck="false" placeholder="http://127.0.0.1:19001/hooks/agent" />
+                      <input id="reportsOpenClawWebhookUrlInput" type="url" spellcheck="false" placeholder="http://127.0.0.1:18789/hooks/agent" />
                     </label>
                     <label class="reports-field">
                       <span class="settings-note" data-i18n="settings.reports.openclawHookToken">Hook token</span>
@@ -2143,6 +2175,7 @@
     <script src="displaySettings.js"></script>
     <script src="displaySettingsPreview.js"></script>
     <script src="contentBlur.js"></script>
+    <script src="../../shared/qrSvg.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

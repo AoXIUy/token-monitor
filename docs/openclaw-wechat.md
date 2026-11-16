@@ -21,7 +21,7 @@ Open **Settings → Multi-device Sync → Project usage reports → Third-party 
    - `Anthropic Messages` (works with Anthropic Claude API and Anthropic-compatible relays)
 3. Enter **Base URL** (for example `https://api.deepseek.com/v1` or `https://api.anthropic.com`), **Model** (e.g. `deepseek-chat`, `gpt-4o-mini`, `claude-sonnet-4-5`), and **API key**.
    - Keys are stored server-side only (Desktop Host writes them to `userData/credentials.json`; standalone Node Hub writes them to `<reportsDir>/integrations.secrets.json` with `0o600` permissions). Raw keys are never returned over HTTP or to the renderer/Android client.
-4. Optionally enable **Auto-analyze rolled-over periods** so rolled-over daily/weekly/monthly archives are automatically summarized by AI.
+4. Optionally enable **Auto-analyze rolled-over periods** so rolled-over daily/weekly/monthly archives are automatically summarized by AI (default `maxTokens: 4096`, automatically retrying once if a reasoning model exhausts tokens on thinking before emitting output).
 5. Click **Save**, then click **Analyze latest** to preview immediately.
 
 ### Environment variables (Standalone Node Hub)
@@ -39,13 +39,32 @@ TOKEN_MONITOR_AI_AUTO_ANALYZE=1
 
 ---
 
-## 2. Setting Up OpenClaw + WeChat Active Push
+## 2. One-Click QR Code Setup ("Scan QR to Add to WeChat")
+
+In Desktop **Host** mode (or connected **Client** mode), open **Settings → Multi-device Sync → Project usage reports → OpenClaw WeChat delivery** and click **Scan QR to Add to WeChat** (`扫码添加到微信`):
+
+1. Token Monitor starts a WeChat ClawBot / `@tencent-weixin/openclaw-weixin` iLink QR session (`POST /ilink/bot/get_bot_qrcode?bot_type=3`) and renders the QR code inline as a crisp SVG.
+2. Scan the QR code with mobile WeChat and confirm binding (entering any phone pairing verification code inline if prompted).
+3. Upon confirmation, Token Monitor automatically:
+   - Saves the WeChat bot credentials to `~/.openclaw/openclaw-weixin/accounts.json` and `accounts/<accountId>.json` (`0o600`, pruning stale duplicates for the same user) and stores the bot token in the Main Hub / CredentialStore.
+   - Configures `~/.openclaw/openclaw.json` (`plugins.entries["openclaw-weixin"].enabled = true`, `hooks.enabled = true`, `hooks.path = "/hooks"`, `hooks.token`, `hooks.allowedAgentIds`, and `channels["openclaw-weixin"].channelConfigUpdatedAt`).
+   - Copies `skills/openclaw-token-monitor/` into `~/.openclaw/skills/openclaw-token-monitor/`.
+   - Fills Token Monitor's OpenClaw settings (`enabled: true`, `mode: "openclaw-agent"`, `webhookUrl: "http://127.0.0.1:18789/hooks/agent"` or your configured Gateway port, `channel: "openclaw-weixin"`, `to: "<ilink_user_id>"`, and `hookToken`).
+4. **First-message activation (`context_token`)**: Tencent's iLink `sendmessage` API requires an active `context_token` captured from an inbound message. While OpenClaw Gateway is running, send one message (for example `"你好"`) to the newly added **微信 ClawBot** inside WeChat, then click **Push to WeChat** (`立即推送到微信`).
+5. **If OpenClaw is not installed yet**: Your scanned WeChat binding is still saved under `~/.openclaw/openclaw-weixin/`. Install OpenClaw and the plugin (`npm install -g openclaw && npx -y @tencent-weixin/openclaw-weixin-cli install`), then run `openclaw gateway restart` — no second QR scan is needed.
+
+---
+
+## 3. Manual OpenClaw + WeChat Active Push
 
 Ensure your OpenClaw Gateway has the WeChat channel plugin (for example `@tencent-weixin/openclaw-weixin`) connected and Inbound Webhooks enabled:
 
 ```json5
-// In OpenClaw config.json5
+// In ~/.openclaw/openclaw.json
 {
+  "gateway": {
+    "port": 18789
+  },
   "hooks": {
     "enabled": true,
     "token": "<YOUR_OPENCLAW_HOOK_TOKEN>",
@@ -60,7 +79,7 @@ Then in Token Monitor (**Settings → Project usage reports → OpenClaw WeChat 
 ```env
 TOKEN_MONITOR_OPENCLAW_ENABLED=1
 TOKEN_MONITOR_OPENCLAW_MODE=openclaw-agent
-TOKEN_MONITOR_OPENCLAW_WEBHOOK_URL=http://127.0.0.1:19001/hooks/agent
+TOKEN_MONITOR_OPENCLAW_WEBHOOK_URL=http://127.0.0.1:18789/hooks/agent
 TOKEN_MONITOR_OPENCLAW_TOKEN=<YOUR_OPENCLAW_HOOK_TOKEN>
 TOKEN_MONITOR_OPENCLAW_CHANNEL=openclaw-weixin
 TOKEN_MONITOR_OPENCLAW_TO=<WECHAT_OPENID_OR_TARGET_ID>
@@ -74,7 +93,7 @@ TOKEN_MONITOR_OPENCLAW_PUSH_ON_ROLLOVER=1
 
 ---
 
-## 3. Setting Up WeChat → OpenClaw Q&A (Skill & MCP)
+## 4. Setting Up WeChat → OpenClaw Q&A (Skill & MCP)
 
 ### Option A: OpenClaw Skill (`skills/openclaw-token-monitor`)
 

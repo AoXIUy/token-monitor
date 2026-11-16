@@ -15,10 +15,20 @@ const {
   normalizeOpenClawIntegrationConfig,
   sendToOpenClawWebhook
 } = require('../shared/aiReportAnalyzer');
+const { createWeixinQrLoginManager } = require('../shared/openclawWeixinQr');
+const {
+  configureOpenClawHost,
+  detectOpenClawEnvironment,
+  persistWeixinBinding,
+  readLocalWeixinTokens,
+  readOpenClawHookSecrets
+} = require('./openclawProvisioner');
 
 const INTEGRATIONS_CONFIG_VERSION = 1;
 const SECRETS_VERSION = 1;
 const ANALYSIS_KEY_RE = /^[A-Za-z0-9._-]+$/;
+/** @type {readonly ('aiApiKey' | 'openclawHookToken' | 'weixinBotToken')[]} */
+const SECRET_KEYS = Object.freeze(['aiApiKey', 'openclawHookToken', 'weixinBotToken']);
 
 /**
  * @param {string} filePath
@@ -86,6 +96,65 @@ function cleanSecret(value) {
 }
 
 /**
+ * @param {string} secretsPath
+ * @param {{ error?: (...args: any[]) => void }} [logger]
+ * @returns {{ aiApiKey: string, openclawHookToken: string, weixinBotToken: string }}
+ */
+function readIntegrationSecretsFile(secretsPath, logger = console) {
+  try {
+    const raw = readPrivateTextNoFollow(secretsPath);
+    const parsed = JSON.parse(raw);
+    return {
+      aiApiKey: cleanSecret(parsed?.aiApiKey),
+      openclawHookToken: cleanSecret(parsed?.openclawHookToken),
+      weixinBotToken: cleanSecret(parsed?.weixinBotToken)
+    };
+  } catch (error) {
+    if (/** @type {any} */ (error)?.code === 'ENOENT') {
+      return { aiApiKey: '', openclawHookToken: '', weixinBotToken: '' };
+    }
+    (typeof logger?.error === 'function' ? logger.error.bind(logger) : console.error)(
+      error,
+      'failed to read integration secrets'
+    );
+    return { aiApiKey: '', openclawHookToken: '', weixinBotToken: '' };
+  }
+}
+
+/**
+ * Synchronize secret updates/clears into `<reportsDir>/integrations.secrets.json` even when the
+ * embedded Hub is stopped (e.g., so cleared keys do not resurrect when the Hub starts later).
+ * @param {string} dataFile
+ * @param {{ aiApiKey?: string, openclawHookToken?: string, weixinBotToken?: string }} [secretPatch]
+ * @param {string} [reportsDir]
+ * @param {{ error?: (...args: any[]) => void }} [logger]
+ */
+function syncIntegrationSecretsFile(dataFile, secretPatch = {}, reportsDir = '', logger = console) {
+  const resolvedReportsDir = String(reportsDir || '').trim() || path.join(path.dirname(dataFile), 'reports');
+  const secretsPath = path.join(resolvedReportsDir, 'integrations.secrets.json');
+  const current = readIntegrationSecretsFile(secretsPath, logger);
+  if (!isPlainObject(secretPatch)) return current;
+
+  let changed = false;
+  const next = { ...current };
+  for (const key of SECRET_KEYS) {
+    if (!Object.hasOwn(secretPatch, key)) continue;
+    const val = cleanSecret(/** @type {any} */ (secretPatch)[key]);
+    if (val !== next[key]) {
+      next[key] = val;
+      changed = true;
+    }
+  }
+  if (changed) {
+    writePrivateJson(secretsPath, {
+      version: SECRETS_VERSION,
+      ...next
+    });
+  }
+  return next;
+}
+
+/**
  * @param {NodeJS.ProcessEnv} [env]
  */
 function readEnvIntegrationsDefaults(env = process.env) {
@@ -117,7 +186,8 @@ function readEnvIntegrationsDefaults(env = process.env) {
     },
     secrets: {
       aiApiKey: cleanSecret(env.TOKEN_MONITOR_AI_API_KEY),
-      openclawHookToken: cleanSecret(env.TOKEN_MONITOR_OPENCLAW_TOKEN || env.TOKEN_MONITOR_OPENCLAW_HOOK_TOKEN)
+      openclawHookToken: cleanSecret(env.TOKEN_MONITOR_OPENCLAW_TOKEN || env.TOKEN_MONITOR_OPENCLAW_HOOK_TOKEN),
+      weixinBotToken: ''
     }
   };
 }
@@ -130,10 +200,11 @@ function readEnvIntegrationsDefaults(env = process.env) {
  *   reportManager: any,
  *   getStats: () => any,
  *   initialConfig?: any,
- *   initialSecrets?: { aiApiKey?: string, openclawHookToken?: string } | null,
+ *   initialSecrets?: { aiApiKey?: string, openclawHookToken?: string, weixinBotToken?: string } | null,
+ *   openclawOptions?: any,
  *   fetchImpl?: typeof fetch,
  *   now?: () => Date,
- *   logger?: { error?: (...args: any[]) => void, log?: (...args: any[]) => void }
+ *   logger?: { error?: (...args: any[]) => void, warn?: (...args: any[]) => void, log?: (...args: any[]) => void }
  * }} options
  */
 function createIntegrationManager({
@@ -143,6 +214,7 @@ function createIntegrationManager({
   getStats,
   initialConfig = null,
   initialSecrets = null,
+  openclawOptions = null,
   fetchImpl,
   now = () => new Date(),
   logger = console
@@ -154,32 +226,27 @@ function createIntegrationManager({
   const aiAnalysisDir = path.join(resolvedReportsDir, 'ai-analysis');
   const logError = typeof logger?.error === 'function' ? logger.error.bind(logger) : console.error;
   const httpFetch = typeof fetchImpl === 'function' ? fetchImpl : createOutboundFetch();
+  const resolvedOpenClawOpts = isPlainObject(openclawOptions) ? openclawOptions : {};
 
   const envDefaults = readEnvIntegrationsDefaults();
   const persistedConfig = readJson(configPath, null);
   const persistedState = readJson(statePath, null);
 
-  function readPersistedSecrets() {
-    try {
-      const raw = readPrivateTextNoFollow(secretsPath);
-      const parsed = JSON.parse(raw);
-      return {
-        aiApiKey: cleanSecret(parsed?.aiApiKey),
-        openclawHookToken: cleanSecret(parsed?.openclawHookToken)
-      };
-    } catch (error) {
-      if (/** @type {any} */ (error)?.code === 'ENOENT') {
-        return { aiApiKey: '', openclawHookToken: '' };
-      }
-      logError(error, 'failed to read integration secrets');
-      return { aiApiKey: '', openclawHookToken: '' };
-    }
-  }
-
-  const fileSecrets = readPersistedSecrets();
+  const fileSecrets = readIntegrationSecretsFile(secretsPath, logger);
+  const initSecretsObj = isPlainObject(initialSecrets) ? initialSecrets : null;
+  const hasExplicitInitSecret = (/** @type {'aiApiKey' | 'openclawHookToken' | 'weixinBotToken'} */ key) => (
+    Boolean(initSecretsObj && Object.hasOwn(initSecretsObj, key))
+  );
   let secrets = {
-    aiApiKey: cleanSecret(initialSecrets?.aiApiKey) || fileSecrets.aiApiKey || envDefaults.secrets.aiApiKey,
-    openclawHookToken: cleanSecret(initialSecrets?.openclawHookToken) || fileSecrets.openclawHookToken || envDefaults.secrets.openclawHookToken
+    aiApiKey: hasExplicitInitSecret('aiApiKey')
+      ? cleanSecret(initSecretsObj?.aiApiKey)
+      : (fileSecrets.aiApiKey || envDefaults.secrets.aiApiKey),
+    openclawHookToken: hasExplicitInitSecret('openclawHookToken')
+      ? cleanSecret(initSecretsObj?.openclawHookToken)
+      : (fileSecrets.openclawHookToken || envDefaults.secrets.openclawHookToken),
+    weixinBotToken: hasExplicitInitSecret('weixinBotToken')
+      ? cleanSecret(initSecretsObj?.weixinBotToken)
+      : fileSecrets.weixinBotToken
   };
 
   let config = {
@@ -219,8 +286,21 @@ function createIntegrationManager({
     writePrivateJson(secretsPath, {
       version: SECRETS_VERSION,
       aiApiKey: secrets.aiApiKey,
-      openclawHookToken: secrets.openclawHookToken
+      openclawHookToken: secrets.openclawHookToken,
+      weixinBotToken: secrets.weixinBotToken
     });
+  }
+
+  // Keep disk secrets aligned if initialSecrets explicitly cleared stale persisted keys.
+  if (
+    isPlainObject(initialSecrets)
+    && SECRET_KEYS.some((key) => hasExplicitInitSecret(key) && secrets[key] !== fileSecrets[key])
+  ) {
+    try {
+      saveSecrets();
+    } catch (error) {
+      logError(error, 'failed to synchronize initial integration secrets');
+    }
   }
 
   function saveState() {
@@ -229,6 +309,21 @@ function createIntegrationManager({
       lastPush: state.lastPush
     }, 2);
   }
+
+  const qrManager = createWeixinQrLoginManager({
+    fetchImpl: httpFetch,
+    getLocalTokens: () => {
+      const fromOpenClaw = readLocalWeixinTokens(resolvedOpenClawOpts);
+      return secrets.weixinBotToken
+        ? [...fromOpenClaw, secrets.weixinBotToken]
+        : fromOpenClaw;
+    },
+    logger,
+    now,
+    ...(typeof resolvedOpenClawOpts.ilinkBaseUrl === 'string' ? { ilinkBaseUrl: resolvedOpenClawOpts.ilinkBaseUrl } : {}),
+    ...(typeof resolvedOpenClawOpts.botType === 'string' ? { botType: resolvedOpenClawOpts.botType } : {}),
+    ...(resolvedOpenClawOpts.pollTimeoutMs ? { pollTimeoutMs: resolvedOpenClawOpts.pollTimeoutMs } : {})
+  });
 
   /**
    * @param {string} granularity
@@ -281,10 +376,18 @@ function createIntegrationManager({
       },
       openclaw: {
         ...config.openclaw,
-        hookTokenConfigured: Boolean(secrets.openclawHookToken)
+        hookTokenConfigured: Boolean(secrets.openclawHookToken),
+        weixinBotConfigured: Boolean(secrets.weixinBotToken)
       },
       lastPush: state.lastPush
     };
+  }
+
+  /**
+   * In-process only for Desktop Host CredentialStore synchronization. Never expose over HTTP.
+   */
+  function getSecrets() {
+    return { ...secrets };
   }
 
   /**
@@ -328,6 +431,7 @@ function createIntegrationManager({
       };
       delete mergedOc.hookToken;
       delete mergedOc.hookTokenConfigured;
+      delete mergedOc.weixinBotConfigured;
       delete mergedOc.clearHookToken;
       config.openclaw = normalizeOpenClawIntegrationConfig(mergedOc);
       configChanged = true;
@@ -351,22 +455,16 @@ function createIntegrationManager({
 
   /**
    * Synchronize in-memory/persisted secrets from Desktop CredentialStore on startup or save.
-   * @param {{ aiApiKey?: string | null, openclawHookToken?: string | null }} nextSecrets
+   * @param {{ aiApiKey?: string | null, openclawHookToken?: string | null, weixinBotToken?: string | null }} nextSecrets
    */
   function setSecrets(nextSecrets = {}) {
     if (!isPlainObject(nextSecrets)) return;
     let changed = false;
-    if (nextSecrets.aiApiKey !== undefined) {
-      const val = cleanSecret(nextSecrets.aiApiKey);
-      if (val !== secrets.aiApiKey) {
-        secrets.aiApiKey = val;
-        changed = true;
-      }
-    }
-    if (nextSecrets.openclawHookToken !== undefined) {
-      const val = cleanSecret(nextSecrets.openclawHookToken);
-      if (val !== secrets.openclawHookToken) {
-        secrets.openclawHookToken = val;
+    for (const key of SECRET_KEYS) {
+      if (nextSecrets[key] === undefined) continue;
+      const val = cleanSecret(nextSecrets[key]);
+      if (val !== secrets[key]) {
+        secrets[key] = val;
         changed = true;
       }
     }
@@ -392,12 +490,15 @@ function createIntegrationManager({
     if (stopped) {
       return { ok: false, error: 'hub_stopped', message: 'Hub is stopping.' };
     }
+    if (!config.ai.enabled) {
+      return { ok: false, error: 'ai_disabled', message: 'Third-party AI analysis is disabled.' };
+    }
     const fetched = reportManager.getReport(granularity, periodKey, { format: 'json' });
     if (!fetched || fetched.ok === false || !fetched.report) {
       return {
         ok: false,
         error: fetched?.error || 'not_found',
-        ...(fetched?.message ? { message: fetched.message } : {})
+        message: fetched?.message || 'No usage data or persisted report is available yet for this period.'
       };
     }
 
@@ -469,7 +570,7 @@ function createIntegrationManager({
       return {
         ok: false,
         error: fetched?.error || 'not_found',
-        ...(fetched?.message ? { message: fetched?.message } : {}),
+        ...(fetched?.message ? { message: fetched.message } : {}),
         realtime: buildRealtimeOverviewSnapshot(stats, limitsSummary || extractLimitsSummary(stats))
       };
     }
@@ -536,7 +637,7 @@ function createIntegrationManager({
       return {
         ok: false,
         error: fetched?.error || 'not_found',
-        ...(fetched?.message ? { message: fetched?.message } : {})
+        ...(fetched?.message ? { message: fetched.message } : {})
       };
     }
 
@@ -597,6 +698,206 @@ function createIntegrationManager({
     };
   }
 
+  async function getOpenClawEnv() {
+    return detectOpenClawEnvironment(resolvedOpenClawOpts);
+  }
+
+  async function startOpenClawWeixinQr() {
+    if (stopped) {
+      return { ok: false, error: 'hub_stopped', message: 'Hub is stopping.' };
+    }
+    return trackTask(qrManager.start());
+  }
+
+  /**
+   * Persist confirmed WeChat QR binding into OpenClaw state & Token Monitor config/secrets.
+   * Never returns raw botToken or hookToken.
+   * @param {any} qrResult
+   */
+  async function finalizeWeixinQrResult(qrResult) {
+    /** @type {string[]} */
+    const warnings = [];
+    let secretsChanged = false;
+
+    if (qrResult.status === 'confirmed') {
+      const botToken = cleanSecret(qrResult.botToken);
+      if (botToken && botToken !== secrets.weixinBotToken) {
+        secrets.weixinBotToken = botToken;
+        secretsChanged = true;
+      }
+      if (botToken && qrResult.accountId) {
+        try {
+          persistWeixinBinding({
+            accountId: qrResult.accountId,
+            rawAccountId: qrResult.rawAccountId,
+            botToken,
+            baseUrl: qrResult.baseUrl,
+            userId: qrResult.userId
+          }, { ...resolvedOpenClawOpts, now });
+        } catch (error) {
+          warnings.push(`Failed to write ~/.openclaw/openclaw-weixin credentials: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
+
+    const hookSecrets = readOpenClawHookSecrets(resolvedOpenClawOpts);
+    let provisionRes = null;
+    try {
+      provisionRes = await configureOpenClawHost({
+        ensureHooks: true,
+        installSkill: true,
+        restartGateway: false,
+        bumpChannelReload: true,
+        hookToken: secrets.openclawHookToken || hookSecrets.hookToken || undefined,
+        agentId: config.openclaw.agentId || 'main'
+      }, { ...resolvedOpenClawOpts, now });
+      if (Array.isArray(provisionRes.warnings) && provisionRes.warnings.length > 0) {
+        warnings.push(...provisionRes.warnings);
+      }
+    } catch (error) {
+      warnings.push(`Failed to configure OpenClaw host files: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    const nextHookToken = cleanSecret(secrets.openclawHookToken || provisionRes?.resolvedHookToken || hookSecrets.hookToken);
+    if (nextHookToken && nextHookToken !== secrets.openclawHookToken) {
+      secrets.openclawHookToken = nextHookToken;
+      secretsChanged = true;
+    }
+    if (secretsChanged) {
+      try {
+        saveSecrets();
+      } catch (error) {
+        logError(error, 'failed to persist WeChat QR secrets');
+      }
+    }
+
+    const openclawEnv = provisionRes?.env || await getOpenClawEnv();
+    const matchedUserId = qrResult.userId
+      || openclawEnv.accounts?.find((/** @type {any} */ a) => a.userId)?.userId
+      || config.openclaw.to;
+    const resolvedWebhookUrl = config.openclaw.webhookUrl
+      || provisionRes?.webhookUrl
+      || openclawEnv.suggestedWebhookUrl
+      || 'http://127.0.0.1:18789/hooks/agent';
+
+    config.openclaw = normalizeOpenClawIntegrationConfig({
+      ...config.openclaw,
+      enabled: true,
+      mode: 'openclaw-agent',
+      channel: 'openclaw-weixin',
+      to: matchedUserId || config.openclaw.to,
+      webhookUrl: resolvedWebhookUrl,
+      agentId: config.openclaw.agentId || 'main'
+    });
+    try {
+      saveConfig();
+    } catch (error) {
+      logError(error, 'failed to persist OpenClaw QR integration config');
+    }
+
+    const { botToken: _omitBotToken, rawAccountId: _omitRawId, ...safeQr } = qrResult;
+    return {
+      ...safeQr,
+      accountId: qrResult.accountId || openclawEnv.accounts?.at(-1)?.accountId || '',
+      userId: matchedUserId || '',
+      autoConfigured: Boolean(provisionRes?.steps?.hooksConfigured),
+      steps: provisionRes?.steps || null,
+      warnings,
+      openclawEnv,
+      ...getStatus()
+    };
+  }
+
+  /**
+   * @param {string} sessionId
+   */
+  async function pollOpenClawWeixinQrStatus(sessionId) {
+    if (stopped) {
+      return { ok: false, error: 'hub_stopped', message: 'Hub is stopping.' };
+    }
+    const result = await trackTask(qrManager.pollStatus(sessionId));
+    if (result?.ok && (result.status === 'confirmed' || result.status === 'binded_redirect')) {
+      return finalizeWeixinQrResult(result);
+    }
+    return result;
+  }
+
+  /**
+   * @param {string} sessionId
+   * @param {string} verifyCode
+   */
+  async function submitOpenClawWeixinVerifyCode(sessionId, verifyCode) {
+    if (stopped) {
+      return { ok: false, error: 'hub_stopped', message: 'Hub is stopping.' };
+    }
+    const queued = qrManager.submitVerifyCode(sessionId, verifyCode);
+    if (!queued.ok) return queued;
+    return pollOpenClawWeixinQrStatus(sessionId);
+  }
+
+  /**
+   * @param {string} sessionId
+   */
+  function cancelOpenClawWeixinQr(sessionId) {
+    return qrManager.cancel(sessionId);
+  }
+
+  /**
+   * @param {{
+   *   ensureHooks?: boolean,
+   *   installSkill?: boolean,
+   *   restartGateway?: boolean,
+   *   bumpChannelReload?: boolean,
+   *   enableIntegration?: boolean
+   * }} [options]
+   */
+  async function provisionOpenClaw(options = {}) {
+    if (stopped) {
+      return { ok: false, error: 'hub_stopped', message: 'Hub is stopping.' };
+    }
+    const hookSecrets = readOpenClawHookSecrets(resolvedOpenClawOpts);
+    const provisionRes = await trackTask(configureOpenClawHost({
+      ensureHooks: options?.ensureHooks !== false,
+      installSkill: options?.installSkill !== false,
+      restartGateway: options?.restartGateway === true,
+      bumpChannelReload: options?.bumpChannelReload !== false,
+      hookToken: secrets.openclawHookToken || hookSecrets.hookToken || undefined,
+      agentId: config.openclaw.agentId || 'main'
+    }, { ...resolvedOpenClawOpts, now }));
+
+    const nextHookToken = cleanSecret(provisionRes.resolvedHookToken || hookSecrets.hookToken);
+    if (nextHookToken && nextHookToken !== secrets.openclawHookToken) {
+      secrets.openclawHookToken = nextHookToken;
+      saveSecrets();
+    }
+
+    const nextWebhookUrl = config.openclaw.webhookUrl || provisionRes.webhookUrl;
+    const nextChannel = config.openclaw.channel || 'openclaw-weixin';
+    const nextEnabled = options?.enableIntegration === true ? true : config.openclaw.enabled;
+    const nextTo = config.openclaw.to || provisionRes.env?.accounts?.find((/** @type {any} */ a) => a.userId)?.userId || '';
+    if (
+      nextWebhookUrl !== config.openclaw.webhookUrl
+      || nextChannel !== config.openclaw.channel
+      || nextEnabled !== config.openclaw.enabled
+      || nextTo !== config.openclaw.to
+    ) {
+      config.openclaw = normalizeOpenClawIntegrationConfig({
+        ...config.openclaw,
+        enabled: nextEnabled,
+        webhookUrl: nextWebhookUrl,
+        channel: nextChannel,
+        to: nextTo
+      });
+      saveConfig();
+    }
+
+    const { resolvedHookToken: _omitHookToken, ...safeProvision } = provisionRes;
+    return {
+      ...safeProvision,
+      ...getStatus()
+    };
+  }
+
   /**
    * Called automatically when a period rolls over and is archived by reportManager.
    * Never throws or blocks ingest.
@@ -636,6 +937,7 @@ function createIntegrationManager({
 
   async function stop() {
     stopped = true;
+    qrManager.cancelAll();
     if (pendingTasks.size > 0) {
       await Promise.allSettled([...pendingTasks]);
     }
@@ -643,17 +945,25 @@ function createIntegrationManager({
 
   return {
     getStatus,
+    getSecrets,
     updateConfig,
     setSecrets,
     readCachedAnalysis,
     analyzeReport,
     buildWeChatBrief,
     pushToOpenClaw,
+    getOpenClawEnv,
+    startOpenClawWeixinQr,
+    pollOpenClawWeixinQrStatus,
+    submitOpenClawWeixinVerifyCode,
+    cancelOpenClawWeixinQr,
+    provisionOpenClaw,
     onReportArchived,
     stop
   };
 }
 
 module.exports = {
-  createIntegrationManager
+  createIntegrationManager,
+  syncIntegrationSecretsFile
 };

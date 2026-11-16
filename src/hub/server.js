@@ -97,6 +97,7 @@ function createHub({
   integrations = undefined,
   integrationSecrets = null,
   integrationFetch = undefined,
+  openclawOptions = undefined,
   staleAfterMs = DEFAULT_STALE_AFTER_MS,
   broadcastDelayMs = 100,
   persistIntervalMs = 0,
@@ -142,6 +143,7 @@ function createHub({
     getStats,
     initialConfig: integrations,
     initialSecrets: integrationSecrets,
+    openclawOptions,
     fetchImpl: integrationFetch,
     logger
   });
@@ -765,7 +767,10 @@ function createHub({
         if (!result.ok) {
           const status = result.error === 'not_found'
             ? 404
-            : result.error === 'ai_http_error' || result.error === 'ai_network_error' || result.error === 'ai_empty_response'
+            : result.error === 'ai_http_error'
+              || result.error === 'ai_network_error'
+              || result.error === 'ai_empty_response'
+              || result.error === 'ai_token_limit'
               ? 502
               : 400;
           return sendJson(res, status, result);
@@ -835,6 +840,109 @@ function createHub({
         return sendText(res, 200, result.text || '');
       }
       return sendJson(res, 200, result);
+    }
+
+    if (url.pathname === '/api/integrations/openclaw/env') {
+      if (req.method !== 'GET') return sendJson(res, 405, { error: 'invalid_request' });
+      const env = await integrationManager.getOpenClawEnv();
+      return sendJson(res, 200, env);
+    }
+
+    if (url.pathname === '/api/integrations/openclaw/qr/start') {
+      if (req.method !== 'POST') return sendJson(res, 405, { error: 'invalid_request' });
+      const result = await integrationManager.startOpenClawWeixinQr();
+      if (!result.ok) {
+        const status = result.error === 'hub_stopped' ? 503 : 502;
+        return sendJson(res, status, result);
+      }
+      return sendJson(res, 200, result);
+    }
+
+    if (url.pathname === '/api/integrations/openclaw/qr/status') {
+      if (req.method !== 'GET') return sendJson(res, 405, { error: 'invalid_request' });
+      const sessionId = url.searchParams.get('sessionId') || '';
+      if (!sessionId.trim()) {
+        return sendJson(res, 400, { ok: false, error: 'invalid_request', message: 'sessionId query parameter is required' });
+      }
+      const result = await integrationManager.pollOpenClawWeixinQrStatus(sessionId);
+      if (!result.ok && result.error === 'qr_session_not_found') {
+        return sendJson(res, 404, result);
+      }
+      if (!result.ok && (result.error === 'qr_poll_failed' || result.error === 'qr_refresh_failed')) {
+        return sendJson(res, 502, result);
+      }
+      return sendJson(res, 200, result);
+    }
+
+    if (url.pathname === '/api/integrations/openclaw/qr/verify') {
+      if (req.method !== 'POST') return sendJson(res, 405, { error: 'invalid_request' });
+      try {
+        const payload = await readJsonBody(req);
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          return sendJson(res, 400, { ok: false, error: 'invalid_request', message: 'Request body must be an object' });
+        }
+        const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId.trim() : '';
+        const verifyCode = typeof payload.verifyCode === 'string' ? payload.verifyCode.trim() : '';
+        if (!sessionId || !verifyCode) {
+          return sendJson(res, 400, { ok: false, error: 'invalid_request', message: 'sessionId and verifyCode are required' });
+        }
+        const result = await integrationManager.submitOpenClawWeixinVerifyCode(sessionId, verifyCode);
+        if (!result.ok && result.error === 'qr_session_not_found') {
+          return sendJson(res, 404, result);
+        }
+        if (!result.ok && (result.error === 'qr_poll_failed' || result.error === 'qr_refresh_failed')) {
+          return sendJson(res, 502, result);
+        }
+        return sendJson(res, 200, result);
+      } catch (error) {
+        if (error.code === 'payload_too_large') {
+          res.shouldKeepAlive = false;
+          return sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+        }
+        return sendJson(res, 400, { error: 'bad_request', message: error.message });
+      }
+    }
+
+    if (url.pathname === '/api/integrations/openclaw/qr/cancel') {
+      if (req.method !== 'POST') return sendJson(res, 405, { error: 'invalid_request' });
+      try {
+        const raw = await readRawTextBody(req);
+        const payload = raw.trim() ? JSON.parse(raw) : {};
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          return sendJson(res, 400, { ok: false, error: 'invalid_request', message: 'Request body must be an object' });
+        }
+        const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId.trim() : '';
+        return sendJson(res, 200, integrationManager.cancelOpenClawWeixinQr(sessionId));
+      } catch (error) {
+        if (error.code === 'payload_too_large') {
+          res.shouldKeepAlive = false;
+          return sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+        }
+        return sendJson(res, 400, { error: 'bad_request', message: error.message });
+      }
+    }
+
+    if (url.pathname === '/api/integrations/openclaw/provision') {
+      if (req.method !== 'POST') return sendJson(res, 405, { error: 'invalid_request' });
+      try {
+        const raw = await readRawTextBody(req);
+        const payload = raw.trim() ? JSON.parse(raw) : {};
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          return sendJson(res, 400, { ok: false, error: 'invalid_request', message: 'Request body must be an object' });
+        }
+        const result = await integrationManager.provisionOpenClaw(payload);
+        if (!result.ok) {
+          const status = result.error === 'hub_stopped' ? 503 : 400;
+          return sendJson(res, status, result);
+        }
+        return sendJson(res, 200, result);
+      } catch (error) {
+        if (error.code === 'payload_too_large') {
+          res.shouldKeepAlive = false;
+          return sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+        }
+        return sendJson(res, 400, { error: 'bad_request', message: error.message });
+      }
     }
 
     if (url.pathname === '/api/reports/config') {
@@ -1016,11 +1124,18 @@ function createHub({
     getReport: (granularity, periodKey, options) => reportManager.getReport(granularity, periodKey, options),
     generateReport: (options) => reportManager.generateReport(options),
     getIntegrationsStatus: () => integrationManager.getStatus(),
+    getIntegrationSecrets: () => integrationManager.getSecrets(),
     updateIntegrationsConfig: (patch) => integrationManager.updateConfig(patch),
     setIntegrationSecrets: (secrets) => integrationManager.setSecrets(secrets),
     analyzeReportWithAi: (options) => integrationManager.analyzeReport(options),
     pushReportToOpenClaw: (options) => integrationManager.pushToOpenClaw(options),
-    buildWeChatBrief: (options) => integrationManager.buildWeChatBrief(options)
+    buildWeChatBrief: (options) => integrationManager.buildWeChatBrief(options),
+    getOpenClawEnv: () => integrationManager.getOpenClawEnv(),
+    startOpenClawWeixinQr: () => integrationManager.startOpenClawWeixinQr(),
+    pollOpenClawWeixinQrStatus: (sessionId) => integrationManager.pollOpenClawWeixinQrStatus(sessionId),
+    submitOpenClawWeixinVerifyCode: (sessionId, verifyCode) => integrationManager.submitOpenClawWeixinVerifyCode(sessionId, verifyCode),
+    cancelOpenClawWeixinQr: (sessionId) => integrationManager.cancelOpenClawWeixinQr(sessionId),
+    provisionOpenClaw: (options) => integrationManager.provisionOpenClaw(options)
   };
 }
 
