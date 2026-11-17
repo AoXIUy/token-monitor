@@ -293,6 +293,42 @@ test('extractCompletionObservations active arming rules and liveActivity TTL/ove
   assert.equal(byKey.get('codex:overlay').active, true);
 });
 
+test('extractCompletionObservations normalizes client before overlay and guards sessionActivity own properties', () => {
+  const protoActivity = Object.assign(
+    Object.create({ 'claude:proto-key': { state: 'running', observedAt: iso(BASE_NOW - 200) } }),
+    { 'claude:alias-client': { state: 'running', observedAt: iso(BASE_NOW - 200) } }
+  );
+  const dev = makeDevice('pc', {}, {
+    periods: {
+      month: { sessions: {} },
+      today: {
+        sessions: {
+          'claude:alias-client': makeSession({
+            client: 'Claude Code',
+            sessionId: 'alias-client',
+            turnEnded: true,
+            lastUsedAt: iso(BASE_NOW - 1000)
+          }),
+          'claude:proto-key': makeSession({
+            client: 'claude',
+            sessionId: 'proto-key',
+            turnEnded: true,
+            lastUsedAt: iso(BASE_NOW - 1000)
+          })
+        },
+        sessionActivity: protoActivity
+      }
+    }
+  });
+
+  const rows = extractCompletionObservations(makeStats([dev]), BASE_NOW);
+  const byKey = new Map(rows.map((r) => [r.key, r]));
+  assert.equal(byKey.get('claude:alias-client').client, 'claude');
+  assert.equal(byKey.get('claude:alias-client').active, true);
+  assert.equal(byKey.get('claude:proto-key').active, false);
+  assert.equal(byKey.get('claude:proto-key').ended, true);
+});
+
 test('tracker never emits on initial baseline snapshot or idle timeout alone, and emits rich completion with turnDelta', () => {
   const emittedEvents = [];
   const tracker = createSessionCompletionTracker({

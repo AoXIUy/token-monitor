@@ -326,18 +326,21 @@ function extractCompletionObservations(stats, now = Date.now(), options = {}) {
         if (!key || !rawSession || typeof rawSession !== 'object' || Array.isArray(rawSession)) continue;
         if (isArchivedSession(rawSession)) continue;
 
+        const rawClient = typeof rawSession.client === 'string' ? rawSession.client.trim() : '';
+        const client = normalizeClientName(rawClient) || rawClient.toLowerCase();
+        const activityMap = periodData?.sessionActivity;
         let session = rawSession;
-        const overlay = normalizeLiveActivity(periodData?.sessionActivity?.[key]);
-        if (overlay && isSessionActivityClient(rawSession.client)
-          && canReplaceLiveActivity(rawSession.liveActivity, overlay, clock)) {
-          session = { ...rawSession, liveActivity: overlay };
+        if (activityMap && typeof activityMap === 'object' && !Array.isArray(activityMap)
+          && Object.hasOwn(activityMap, key)) {
+          const overlay = normalizeLiveActivity(activityMap[key]);
+          if (overlay && isSessionActivityClient(client)
+            && canReplaceLiveActivity(rawSession.liveActivity, overlay, clock)) {
+            session = { ...rawSession, liveActivity: overlay };
+          }
         }
 
         const lastUsedMs = timestampMs(session.lastUsedAt);
         if (lastUsedMs <= 0 || lastUsedMs > clock) continue;
-
-        const rawClient = typeof session.client === 'string' ? session.client.trim() : '';
-        const client = normalizeClientName(rawClient) || rawClient.toLowerCase();
         const sessionId = cleanSingleLine(
           typeof session.sessionId === 'string' && session.sessionId.trim()
             ? session.sessionId
