@@ -7,6 +7,7 @@ const {
   DEFAULT_OPENCLAW_CONFIG,
   OPENCLAW_EVENT_TYPES,
   buildOpenClawWebhookRequest,
+  extractLimitsSummary,
   formatOpenClawApprovalAlertMessage,
   formatOpenClawQueryDigestMessage,
   formatOpenClawQuotaAlertMessage,
@@ -717,4 +718,204 @@ test('buildOpenClawWebhookRequest and sendToOpenClawWebhook preserve legacy repo
   assert.equal(errRes.error, 'openclaw_http_error');
   assert.equal(errRes.message.includes('secret-hook-token-999'), false);
   assert.match(errRes.message, /\[REDACTED\]/);
+});
+
+test('Phase 1 verifier regressions: prototype keys, email/secret redaction, query schema alignment, and numeric timestamps', () => {
+  // 1. Prototype-key safety in SERVICE_STATUS_LABELS
+  const protoIncident = formatOpenClawServiceIncidentMessage({
+    label: 'Claude',
+    status: 'toString',
+    previousStatus: 'constructor',
+    indicator: '__proto__'
+  });
+  assert.equal(protoIncident.includes('function toString'), false);
+  assert.equal(protoIncident.includes('function Object'), false);
+  assert.match(protoIncident, /服务异常/);
+  assert.match(protoIncident, /原状态：constructor/);
+
+  // 2. extractLimitsSummary omits @-email labels and falls back safely
+  const limitsWithEmailLabel = extractLimitsSummary({
+    limits: {
+      providers: [
+        {
+          provider: 'codex',
+          accountLabel: 'owner@example.com',
+          profileName: 'secondary@example.com',
+          planLabel: 'Plus',
+          status: 'ok',
+          windows: [{ label: '5h', remainingPercent: 50 }]
+        },
+        {
+          provider: 'claude',
+          accountName: 'claude.user@example.com',
+          status: 'ok',
+          windows: [{ label: '5h', remainingPercent: 80 }]
+        }
+      ]
+    }
+  });
+  assert.equal(limitsWithEmailLabel.providers[0].label, 'Plus');
+  assert.equal(limitsWithEmailLabel.providers[1].label, 'claude');
+  assert.equal(JSON.stringify(limitsWithEmailLabel).includes('@'), false);
+
+  // 3. formatOpenClawQueryDigestMessage redacts @-email labels, expanded secret keys, and inline secret patterns
+  const arrayWithEmailLabel = formatOpenClawQueryDigestMessage({
+    queryType: 'accounts',
+    result: [{ label: 'leak-array@example.com', name: 'Safe Account', totalTokens: 1200 }]
+  });
+  assert.equal(arrayWithEmailLabel.includes('leak-array@example.com'), false);
+  assert.match(arrayWithEmailLabel, /Safe Account/);
+
+  const rowsWithEmailLabel = formatOpenClawQueryDigestMessage({
+    queryType: 'breakdown',
+    result: {
+      rows: [{ label: 'leak-row@example.com', project: 'clean-proj', totalTokens: 3400 }]
+    }
+  });
+  assert.equal(rowsWithEmailLabel.includes('leak-row@example.com'), false);
+  assert.match(rowsWithEmailLabel, /clean-proj/);
+
+  const genericSensitive = formatOpenClawQueryDigestMessage({
+    queryType: 'diag',
+    result: {
+      status: 'ok',
+      token: 'tok-raw-1',
+      accessToken: 'acc-raw-2',
+      refreshToken: 'ref-raw-3',
+      aiApiKey: 'sk-1234567890abcdef',
+      openclawHookToken: 'hook-raw-4',
+      accountKey: 'acct-key-5',
+      api_key: 'api-key-6',
+      bot_token: 'bot-tok-7',
+      account_email: 'hidden_snake@example.com',
+      note: 'Reach admin@example.com using sk-9876543210abcdef'
+    }
+  });
+  for (const leaked of [
+    'tok-raw-1', 'acc-raw-2', 'ref-raw-3', 'sk-1234567890abcdef',
+    'hook-raw-4', 'acct-key-5', 'api-key-6', 'bot-tok-7',
+    'hidden_snake@example.com', 'admin@example.com', 'sk-9876543210abcdef'
+  ]) {
+    assert.equal(genericSensitive.includes(leaked), false, `Expected ${leaked} to be redacted`);
+  }
+  assert.match(genericSensitive, /status: ok/);
+  assert.match(genericSensitive, /\[REDACTED\]/);
+
+  // 4. Schema alignment with src/shared/openclawQueries.js
+  // 4a. getSubscriptionsAndForecastsQuery
+  const subDigest = formatOpenClawQueryDigestMessage({
+    queryType: 'subscriptions',
+    result: {
+      asOfDate: '2026-11-17',
+      totalCount: 2,
+      activeCount: 2,
+      monthlyTotalUsd: 45,
+      subscriptions: [
+        {
+          provider: 'claude',
+          providerLabel: 'Claude',
+          planName: 'Max',
+          amountUnits: 20,
+          currency: 'USD',
+          monthlyAmountUsd: 20,
+          nextRenewalDate: '2026-12-01',
+          daysUntilRenewal: 14,
+          forecast: { status: 'notApplicable' }
+        },
+        {
+          provider: 'thirdparty',
+          providerLabel: 'NewAPI',
+          planName: 'TopUp Pool',
+          amountUnits: 25,
+          currency: 'USD',
+          monthlyAmountUsd: 25,
+          forecast: {
+            status: 'available',
+            balanceCurrency: 'USD',
+            dailyBurn: 2.5,
+            daysRemaining: 8,
+            exhaustDate: '2026-11-25'
+          }
+        }
+      ]
+    }
+  });
+  assert.match(subDigest, /月度订阅合计：\$45\.00（生效 2\/2）/);
+  assert.match(subDigest, /Claude \(Max\)：\$20\.00 · 续费 2026-12-01 · 距续费 14 天/);
+  assert.match(subDigest, /NewAPI \(TopUp Pool\)：\$25\.00 · 预计可用 8 天 · 日均 \$2\.50 · 耗尽 2026-11-25/);
+
+  // 4b. queryUsageHistory (monthly + streaks + range + favoriteModel)
+  const historyDigest = formatOpenClawQueryDigestMessage({
+    queryType: 'history',
+    result: {
+      resolution: 'monthly',
+      range: { from: '2026-10', to: '2026-11' },
+      activeDays: 22,
+      streaks: { currentStreak: 5, longestStreak: 12 },
+      peakDay: { date: '2026-11-15', totalTokens: 210_000, knownCostUsd: 2.1 },
+      totals: { totalTokens: 980_000, knownCostUsd: 9.8, favoriteModel: 'gpt-5' },
+      rows: [
+        { month: '2026-10', totalTokens: 400_000, knownCostUsd: 4.0 },
+        { month: '2026-11', totalTokens: 580_000, knownCostUsd: 5.8 }
+      ]
+    }
+  });
+  assert.match(historyDigest, /查询范围：2026-10 ~ 2026-11/);
+  assert.match(historyDigest, /主力模型 gpt-5/);
+  assert.match(historyDigest, /活跃天数 22 天 · 当前连续 5 天 · 最长连续 12 天/);
+  assert.match(historyDigest, /峰值日：2026-11-15 \(210\.0K tokens\)/);
+  assert.match(historyDigest, /1\. 2026-10: 400\.0K tokens · \$4\.00/);
+  assert.match(historyDigest, /2\. 2026-11: 580\.0K tokens · \$5\.80/);
+
+  // 4c. listSessionsQuery (activityState) & getDevicesAndHealthQuery & getLiveTokenRateSummary (unavailable)
+  const sessionsQueryDigest = formatOpenClawQueryDigestMessage({
+    queryType: 'sessions',
+    result: {
+      total: 1,
+      sessions: [
+        { activityState: 'waiting', client: 'codex', latestModel: 'gpt-5', projectLabel: 'tm', title: null, totalTokens: 15_000, costUsd: 0.2 }
+      ]
+    }
+  });
+  assert.match(sessionsQueryDigest, /tm — \[waiting\] · codex · gpt-5/);
+
+  const devicesDigest = formatOpenClawQueryDigestMessage({
+    queryType: 'devices',
+    result: {
+      deviceCount: 2,
+      activeDeviceCount: 1,
+      devices: [
+        { hostname: 'box-1', osName: 'Ubuntu', stale: false, trackedClients: ['codex'], clientHealthSummary: { attention: 1 } }
+      ]
+    }
+  });
+  assert.match(devicesDigest, /在线 1\/2 台/);
+  assert.match(devicesDigest, /异常 1 项/);
+
+  const unavailableRateDigest = formatOpenClawQueryDigestMessage({
+    queryType: 'live_rate',
+    result: {
+      state: 'unavailable',
+      reason: 'waitingForSample',
+      speed: null,
+      burn: null,
+      deviceCount: 1,
+      fallbackAvgOutputTokensPerSec: 38.4
+    }
+  });
+  assert.match(unavailableRateDigest, /状态 unavailable \(waitingForSample\)/);
+  assert.match(unavailableRateDigest, /平均速率 38\.4 tok\/s/);
+
+  // 5. Numeric epoch ms timestamps in formatOpenClawSessionCompletedMessage
+  const startMs = Date.parse('2026-11-17T10:00:00.000Z');
+  const endMs = startMs + 95_000;
+  const numericTsMsg = formatOpenClawSessionCompletedMessage({
+    completion: {
+      client: 'codex',
+      projectLabel: 'token-monitor',
+      startedAt: startMs,
+      lastUsedAt: String(endMs)
+    }
+  });
+  assert.match(numericTsMsg, /完成于 2026-11-17T10:01:35\.000Z · 耗时 1m 35s/);
 });

@@ -507,8 +507,8 @@ function extractLimitsSummary(stats, options = {}) {
       providers.push({
         provider,
         adapterId: cleanText(row.adapterId, 32) || null,
-        label: cleanText(row.accountLabel || row.profileName || row.accountName || row.planLabel || provider, 80),
-        planLabel: cleanText(row.planLabel, 48) || null,
+        label: safeDigestLabel([row.accountLabel, row.profileName, row.accountName, row.planLabel], provider),
+        planLabel: safeDigestLabel([row.planLabel], '') || null,
         status,
         stale,
         isThirdParty,
@@ -1016,18 +1016,48 @@ function truncateWeChatMessage(text, maxChars = 3500) {
 }
 
 /**
+ * Parse ISO timestamp string, Date, or epoch milliseconds.
+ * @param {any} value
+ * @returns {number | null}
+ */
+function parseTimestampMs(value) {
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) && ms > 0 ? ms : null;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (/^\d{10,16}$/u.test(trimmed)) {
+      const n = Number(trimmed);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+    const parsed = Date.parse(trimmed);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+  return null;
+}
+
+/**
  * @param {any} value
  * @returns {string}
  */
 function formatTimestampLabel(value) {
-  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-    return new Date(value).toISOString();
+  if (typeof value === 'number' || value instanceof Date) {
+    const ms = parseTimestampMs(value);
+    return ms !== null ? new Date(ms).toISOString() : '';
   }
   if (typeof value === 'string') {
     const trimmed = cleanSingleLine(value, 64);
     if (!trimmed) return '';
-    const parsed = Date.parse(trimmed);
-    return Number.isFinite(parsed) ? trimmed : '';
+    if (/^\d{10,16}$/u.test(trimmed)) {
+      const ms = parseTimestampMs(trimmed);
+      return ms !== null ? new Date(ms).toISOString() : '';
+    }
+    return parseTimestampMs(trimmed) !== null ? trimmed : '';
   }
   return '';
 }
@@ -1050,6 +1080,45 @@ function formatDurationCompact(ms) {
 }
 
 /**
+ * Detect email addresses, URLs with tokens/paths, or credential-shaped strings in display labels.
+ * @param {any} value
+ * @returns {boolean}
+ */
+function looksSensitiveDisplayText(value) {
+  const text = cleanSingleLine(value, 256);
+  if (!text) return false;
+  const norm = text.normalize('NFKC');
+  return norm.includes('@')
+    || /https?:\/\//iu.test(norm)
+    || /\b(?:bearer\s+[a-z0-9._~+/=-]{6,}|sk-[a-z0-9_-]{8,}|gh[pou]_[a-z0-9_-]{8,}|github_pat_[a-z0-9_]{8,}|xox[baprs]-[a-z0-9-]{8,}|AIza[a-z0-9_-]{16,}|ya29\.[a-z0-9._-]{8,}|eyJ[a-z0-9_-]{8,}\.[a-z0-9_-]{8,})\b/iu.test(norm);
+}
+
+/**
+ * Pick the first safe non-sensitive display label from candidate values.
+ * @param {any[]} candidates
+ * @param {string} [fallback]
+ * @returns {string}
+ */
+function safeDigestLabel(candidates, fallback = '') {
+  for (const cand of candidates) {
+    const clean = cleanSingleLine(cand, 80);
+    if (clean && !looksSensitiveDisplayText(clean)) return clean;
+  }
+  return fallback;
+}
+
+/**
+ * Scrub email addresses and token-like credentials from free-form digest text.
+ * @param {string} value
+ * @returns {string}
+ */
+function scrubSensitiveDigestText(value) {
+  return String(value || '')
+    .replace(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/giu, '[REDACTED]')
+    .replace(/\b(?:Bearer\s+[A-Za-z0-9._~+/=-]{6,}|sk-[A-Za-z0-9_-]{8,}|gh[pou]_[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AIza[A-Za-z0-9_-]{16,}|ya29\.[A-Za-z0-9._-]{8,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b/giu, '[REDACTED]');
+}
+
+/**
  * Resolve sanitized display label for a provider/account without exposing email addresses.
  * @param {any} obj
  * @param {string} [fallback]
@@ -1057,20 +1126,14 @@ function formatDurationCompact(ms) {
  */
 function safeAccountDisplayLabel(obj, fallback = '') {
   if (!isPlainObject(obj)) return fallback;
-  const candidates = [
+  return safeDigestLabel([
     obj.accountLabel,
     obj.profileName,
     obj.accountName,
     obj.label,
-    obj.planLabel
-  ];
-  for (const cand of candidates) {
-    const clean = cleanSingleLine(cand, 80);
-    if (clean && !clean.includes('@')) return clean;
-  }
-  const rawAcctId = cleanSingleLine(obj.accountId, 80);
-  if (rawAcctId && !rawAcctId.includes('@')) return rawAcctId;
-  return fallback;
+    obj.planLabel,
+    obj.accountId
+  ], fallback);
 }
 
 /**
@@ -1218,10 +1281,10 @@ function formatOpenClawSessionCompletedMessage({
     lines.push(`• 上下文窗口：${formatCompactTokens(ctxTokens)} / ${formatCompactTokens(ctxWindow)}（剩余 ${pctLeft}%）`);
   }
 
-  const startedMs = Date.parse(String(c.startedAt || ''));
-  const endedMs = Date.parse(String(c.lastUsedAt || ''));
+  const startedMs = parseTimestampMs(c.startedAt);
+  const endedMs = parseTimestampMs(c.lastUsedAt);
   const durMs = optionalNum(c.durationMs)
-    ?? (Number.isFinite(startedMs) && Number.isFinite(endedMs) && endedMs >= startedMs ? endedMs - startedMs : null);
+    ?? (startedMs !== null && endedMs !== null && endedMs >= startedMs ? endedMs - startedMs : null);
   const lastUsedLabel = formatTimestampLabel(c.lastUsedAt);
   if (lastUsedLabel || durMs !== null) {
     const timeParts = [
@@ -1344,7 +1407,7 @@ function formatOpenClawQuotaAlertMessage(alert = {}, { maxChars = 3500 } = {}) {
     || eventKind === 'full'
     || eventKind === 'ok';
   const provider = cleanSingleLine(a.provider, 48);
-  const providerLabel = cleanSingleLine(a.providerLabel || a.label || a.provider, 80) || '未知渠道';
+  const providerLabel = safeDigestLabel([a.providerLabel, a.label, a.provider], '未知渠道');
   const accountDisplay = safeAccountDisplayLabel(a);
   const adapterId = cleanSingleLine(a.adapterId, 48);
   const isThirdParty = a.isThirdParty === true || provider === 'thirdparty';
@@ -1420,7 +1483,7 @@ function formatOpenClawQuotaAlertMessage(alert = {}, { maxChars = 3500 } = {}) {
 }
 
 /** @type {Record<string, string>} */
-const SERVICE_STATUS_LABELS = Object.freeze({
+const SERVICE_STATUS_LABELS = Object.freeze(Object.assign(Object.create(null), {
   ok: '正常',
   operational: '正常',
   degraded: '性能降级',
@@ -1430,7 +1493,7 @@ const SERVICE_STATUS_LABELS = Object.freeze({
   minor: '局部异常',
   maintenance: '维护中',
   unknown: '状态未知'
-});
+}));
 
 /**
  * Format a WeChat-friendly digest for an upstream AI service status incident or recovery.
@@ -1459,8 +1522,8 @@ function formatOpenClawServiceIncidentMessage(incident = {}, { maxChars = 3500 }
     || indicator === 'none';
   const isOutage = !isResolved && (status === 'outage' || indicator === 'critical' || indicator === 'major');
   const icon = isResolved ? '🟢' : isOutage ? '🔴' : '🟠';
-  const statusLabel = SERVICE_STATUS_LABELS[status]
-    || SERVICE_STATUS_LABELS[indicator]
+  const statusLabel = (Object.hasOwn(SERVICE_STATUS_LABELS, status) && SERVICE_STATUS_LABELS[status])
+    || (Object.hasOwn(SERVICE_STATUS_LABELS, indicator) && SERVICE_STATUS_LABELS[indicator])
     || (isResolved ? '已恢复正常' : '服务异常');
 
   const rawTitle = cleanSingleLine(
@@ -1496,8 +1559,11 @@ function formatOpenClawServiceIncidentMessage(incident = {}, { maxChars = 3500 }
   /** @type {string[]} */
   const lines = [];
   lines.push(`${icon} Token Monitor ${isResolved ? '服务状态恢复' : '服务故障告警'} (${serviceName})`);
+  const prevLabel = Object.hasOwn(SERVICE_STATUS_LABELS, previousStatus)
+    ? SERVICE_STATUS_LABELS[previousStatus]
+    : previousStatus;
   const prevNote = previousStatus && previousStatus !== status
-    ? `（原状态：${SERVICE_STATUS_LABELS[previousStatus] || previousStatus}）`
+    ? `（原状态：${prevLabel}）`
     : '';
   lines.push(`• 服务与状态：${serviceName} · ${statusLabel}${prevNote}`);
   if (incidentTitle) lines.push(`• 事件标题：${incidentTitle}`);
@@ -1516,10 +1582,38 @@ function formatOpenClawServiceIncidentMessage(incident = {}, { maxChars = 3500 }
   return truncateWeChatMessage(lines.join('\n'), maxChars);
 }
 
-const SENSITIVE_DIGEST_KEYS = new Set([
-  'email', 'accountemail', 'apikey', 'hooktoken', 'bottoken', 'weixinbottoken',
-  'secret', 'password', 'authorization', 'cookie', 'credentials'
-]);
+/**
+ * Identify credential, token, or email keys to exclude from generic digest fallbacks
+ * without suppressing legitimate token usage counter keys (`totalTokens`, `tokens`, etc.).
+ * @param {string} key
+ * @returns {boolean}
+ */
+function isSensitiveDigestKey(key) {
+  const lower = String(key || '').trim().toLowerCase();
+  if (!lower) return false;
+  const compact = lower.replace(/[_-]+/gu, '');
+  return compact === 'token'
+    || compact.endsWith('bottoken')
+    || compact.endsWith('hooktoken')
+    || compact.endsWith('accesstoken')
+    || compact.endsWith('refreshtoken')
+    || compact.endsWith('authtoken')
+    || compact.endsWith('bearertoken')
+    || compact.endsWith('sessiontoken')
+    || compact.endsWith('idtoken')
+    || compact.endsWith('apitoken')
+    || compact.endsWith('csrftoken')
+    || compact.includes('email')
+    || compact.includes('apikey')
+    || compact.includes('accountkey')
+    || compact.includes('secret')
+    || compact.includes('password')
+    || compact.includes('passwd')
+    || compact.includes('credential')
+    || compact.includes('authorization')
+    || compact.includes('cookie')
+    || compact.includes('privatekey');
+}
 
 /**
  * Format a WeChat-friendly digest for unified OpenClaw data query results.
@@ -1549,7 +1643,7 @@ function formatOpenClawQueryDigestMessage({
   if (result === null || result === undefined) {
     lines.push('• 暂无查询结果数据。');
   } else if (typeof result === 'string') {
-    const text = result.trim();
+    const text = scrubSensitiveDigestText(result.trim());
     if (text) lines.push(`• ${cleanSingleLine(text, 1200)}`);
     else lines.push('• 暂无查询结果数据。');
   } else if (Array.isArray(result)) {
@@ -1559,7 +1653,7 @@ function formatOpenClawQueryDigestMessage({
       for (const [idx, item] of result.slice(0, 10).entries()) {
         if (isPlainObject(item)) {
           const itemLabel = safeAccountDisplayLabel(item)
-            || cleanSingleLine(item.label || item.name || item.model || item.client || item.project || item.date || item.key || item.deviceId, 80)
+            || safeDigestLabel([item.name, item.model, item.client, item.project, item.date, item.month, item.key, item.deviceId], '')
             || `条目 ${idx + 1}`;
           const toks = optionalNum(item.totalTokens ?? item.tokens);
           const cost = optionalNum(item.costUsd ?? item.knownCostUsd);
@@ -1569,7 +1663,7 @@ function formatOpenClawQueryDigestMessage({
           ].filter(Boolean);
           lines.push(`${idx + 1}. ${itemLabel}${parts.length ? `: ${parts.join(' · ')}` : ''}`);
         } else {
-          lines.push(`${idx + 1}. ${cleanSingleLine(String(item), 200)}`);
+          lines.push(`${idx + 1}. ${cleanSingleLine(scrubSensitiveDigestText(String(item)), 200)}`);
         }
       }
     }
@@ -1585,6 +1679,11 @@ function formatOpenClawQueryDigestMessage({
         lines.push(`• 统计周期：${pLine}`);
         renderedStructured = true;
       }
+    } else if (isPlainObject(result.range) && (result.range.from || result.range.to)) {
+      const rFrom = cleanSingleLine(result.range.from, 32) || '最早';
+      const rTo = cleanSingleLine(result.range.to, 32) || '最新';
+      lines.push(`• 查询范围：${rFrom} ~ ${rTo}`);
+      renderedStructured = true;
     }
 
     const totals = isPlainObject(result.totals) ? result.totals : (
@@ -1595,41 +1694,52 @@ function formatOpenClawQueryDigestMessage({
       const tCost = optionalNum(totals.knownCostUsd ?? totals.costUsd);
       const tCache = optionalNum(totals.cacheHitRatePct);
       const tSpeed = optionalNum(totals.avgOutputTokensPerSec);
+      const favModel = cleanSingleLine(totals.favoriteModel, 64);
       const tParts = [
         `总用量 ${formatCompactTokens(tTokens)} tokens`,
         tCost !== null ? `费用 ${formatMoney(tCost)}` : '',
         tCache !== null ? `缓存命中 ${tCache.toFixed(1)}%` : '',
-        tSpeed !== null && tSpeed > 0 ? `均速 ${tSpeed.toFixed(1)} tok/s` : ''
+        tSpeed !== null && tSpeed > 0 ? `均速 ${tSpeed.toFixed(1)} tok/s` : '',
+        favModel ? `主力模型 ${favModel}` : ''
       ].filter(Boolean);
       lines.push(`• ${tParts.join(' · ')}`);
       renderedStructured = true;
     }
 
+    const streaksObj = isPlainObject(result.streaks) ? result.streaks : result;
     if (optionalNum(result.activeDays) !== null || isPlainObject(result.peakDay)) {
+      const curStreak = optionalNum(streaksObj.currentStreak);
+      const longStreak = optionalNum(streaksObj.longestStreak);
       const histParts = [
         optionalNum(result.activeDays) !== null ? `活跃天数 ${Math.round(Number(result.activeDays))} 天` : '',
-        optionalNum(result.currentStreak) !== null ? `当前连续 ${Math.round(Number(result.currentStreak))} 天` : '',
-        optionalNum(result.longestStreak) !== null ? `最长连续 ${Math.round(Number(result.longestStreak))} 天` : ''
+        curStreak !== null ? `当前连续 ${Math.round(curStreak)} 天` : '',
+        longStreak !== null ? `最长连续 ${Math.round(longStreak)} 天` : ''
       ].filter(Boolean);
       if (histParts.length > 0) {
         lines.push(`• ${histParts.join(' · ')}`);
         renderedStructured = true;
       }
-      if (isPlainObject(result.peakDay) && result.peakDay.date) {
-        const pkTokens = optionalNum(result.peakDay.tokens ?? result.peakDay.totalTokens);
-        lines.push(`• 峰值日：${cleanSingleLine(result.peakDay.date, 32)}${pkTokens !== null ? ` (${formatCompactTokens(pkTokens)} tokens)` : ''}`);
+      if (isPlainObject(result.peakDay) && (result.peakDay.date || optionalNum(result.peakDay.totalTokens ?? result.peakDay.tokens) !== null)) {
+        const pkDate = cleanSingleLine(result.peakDay.date, 32) || '峰值';
+        const pkTokens = optionalNum(result.peakDay.totalTokens ?? result.peakDay.tokens);
+        lines.push(`• 峰值日：${pkDate}${pkTokens !== null ? ` (${formatCompactTokens(pkTokens)} tokens)` : ''}`);
         renderedStructured = true;
       }
     }
 
-    if (result.speed !== undefined || result.burn !== undefined || result.fallbackAvgOutputTokensPerSec !== undefined) {
+    const isLiveRateShape = result.state === 'unavailable'
+      || result.speed !== undefined
+      || result.burn !== undefined
+      || result.fallbackAvgOutputTokensPerSec !== undefined;
+    if (isLiveRateShape && !Array.isArray(result.sessions)) {
       const rateState = cleanSingleLine(result.state, 32);
+      const rateReason = cleanSingleLine(result.reason, 48);
       const speedVal = optionalNum(result.speed?.outputTokensPerSec ?? result.speed?.tokensPerSec ?? result.speed);
       const burnVal = optionalNum(result.burn?.costPerHour ?? result.burn?.usdPerHour ?? result.burn);
       const fallbackRate = optionalNum(result.fallbackAvgOutputTokensPerSec);
       const devCount = optionalNum(result.deviceCount);
       const rateParts = [
-        rateState ? `状态 ${rateState}` : '',
+        rateState ? `状态 ${rateState}${rateReason ? ` (${rateReason})` : ''}` : '',
         speedVal !== null ? `输出速率 ${speedVal.toFixed(1)} tok/s` : '',
         burnVal !== null ? `消耗速率 ${formatMoney(burnVal)}/h` : '',
         fallbackRate !== null && fallbackRate > 0 ? `平均速率 ${fallbackRate.toFixed(1)} tok/s` : '',
@@ -1641,21 +1751,31 @@ function formatOpenClawQueryDigestMessage({
       }
     }
 
-    const breakdownRows = Array.isArray(result.rows)
+    const breakdownRows = Array.isArray(result.rows) && result.rows.length > 0
       ? result.rows
-      : Array.isArray(result.items)
-        ? result.items
-        : Array.isArray(result.days)
-          ? result.days
-          : null;
+      : Array.isArray(result.breakdown) && result.breakdown.length > 0
+        ? result.breakdown
+        : Array.isArray(result.items)
+          ? result.items
+          : Array.isArray(result.days)
+            ? result.days
+            : null;
     if (breakdownRows && breakdownRows.length > 0) {
       lines.push('');
       lines.push('📌 明细 Top 10：');
       for (const [idx, row] of breakdownRows.slice(0, 10).entries()) {
-        const label = cleanSingleLine(
-          row?.label || row?.hostname || row?.deviceName || row?.model || row?.client || row?.project || row?.date || row?.key || row?.deviceId,
-          80
-        ) || `第 ${idx + 1} 项`;
+        const label = safeDigestLabel([
+          row?.label,
+          row?.hostname,
+          row?.deviceName,
+          row?.model,
+          row?.client,
+          row?.project,
+          row?.date,
+          row?.month,
+          row?.key,
+          row?.deviceId
+        ], `第 ${idx + 1} 项`);
         const toks = optionalNum(row?.tokens ?? row?.totalTokens);
         const cost = optionalNum(row?.costUsd ?? row?.knownCostUsd);
         const share = optionalNum(row?.tokenSharePct ?? row?.sharePct);
@@ -1673,14 +1793,16 @@ function formatOpenClawQueryDigestMessage({
       lines.push('');
       lines.push(`💬 会话列表（展示 ${Math.min(10, result.sessions.length)}/${optionalNum(result.total) ?? result.sessions.length}）：`);
       for (const [idx, sess] of result.sessions.slice(0, 10).entries()) {
-        const state = cleanSingleLine(sess?.state || sess?.sessionActivityState, 24);
+        const state = cleanSingleLine(sess?.activityState || sess?.state || sess?.sessionActivityState, 24);
         const client = cleanSingleLine(sess?.client, 32);
         const model = cleanSingleLine(sess?.latestModel || sess?.model, 64);
         const project = cleanSingleLine(sess?.projectLabel || sess?.project, 64);
-        const sessTitle = typeof sess?.title === 'string' ? cleanSingleLine(sess.title, 80) : '';
+        const sessTitle = typeof sess?.title === 'string' && !looksSensitiveDisplayText(sess.title)
+          ? cleanSingleLine(sess.title, 80)
+          : '';
         const toks = optionalNum(sess?.totalTokens ?? sess?.tokens);
         const cost = optionalNum(sess?.costUsd);
-        const label = sessTitle || project || cleanSingleLine(sess?.sessionId || sess?.key, 48) || `会话 ${idx + 1}`;
+        const label = sessTitle || project || safeDigestLabel([sess?.sessionId, sess?.key], `会话 ${idx + 1}`);
         const meta = [
           state ? `[${state}]` : '',
           client,
@@ -1695,16 +1817,23 @@ function formatOpenClawQueryDigestMessage({
 
     if (Array.isArray(result.devices) && result.devices.length > 0) {
       lines.push('');
-      lines.push(`🖥 设备状态（${result.devices.length} 台）：`);
+      const devTotal = optionalNum(result.deviceCount) ?? result.devices.length;
+      const devActive = optionalNum(result.activeDeviceCount);
+      const devHeader = devActive !== null
+        ? `🖥 设备状态（在线 ${Math.round(devActive)}/${Math.round(devTotal)} 台）：`
+        : `🖥 设备状态（${result.devices.length} 台）：`;
+      lines.push(devHeader);
       for (const dev of result.devices.slice(0, 10)) {
-        const name = cleanSingleLine(dev?.hostname || dev?.deviceName || dev?.deviceId, 64) || '未知设备';
+        const name = safeDigestLabel([dev?.hostname, dev?.deviceName, dev?.deviceId], '未知设备');
         const platform = cleanSingleLine(dev?.osName || dev?.platform, 48);
         const statusText = dev?.stale === true ? '离线/过期' : '在线';
         const trackedCount = Array.isArray(dev?.trackedClients) ? dev.trackedClients.length : null;
+        const attentionCount = optionalNum(dev?.clientHealthSummary?.attention);
         const devParts = [
           statusText,
           platform,
-          trackedCount !== null ? `监控工具 ${trackedCount} 个` : ''
+          trackedCount !== null ? `监控工具 ${trackedCount} 个` : '',
+          attentionCount !== null && attentionCount > 0 ? `异常 ${Math.round(attentionCount)} 项` : ''
         ].filter(Boolean);
         lines.push(`• ${name}：${devParts.join(' · ')}`);
       }
@@ -1713,31 +1842,59 @@ function formatOpenClawQueryDigestMessage({
 
     if (Array.isArray(result.providers) && result.providers.length > 0) {
       lines.push('');
-      lines.push('💳 渠道与额度概览：');
+      const healthy = optionalNum(result.healthyAccounts);
+      const totalAcc = optionalNum(result.totalAccounts) ?? result.providers.length;
+      const limitHeader = healthy !== null
+        ? `💳 渠道与额度概览（正常 ${Math.round(healthy)}/${Math.round(totalAcc)}）：`
+        : '💳 渠道与额度概览：';
+      lines.push(limitHeader);
       appendLimitsSnapshotBullets(lines, result, 8);
       renderedStructured = true;
     }
 
+    const monthlyTotal = optionalNum(result.monthlyTotalUsd ?? result.monthlyAmountUsd);
     if ((Array.isArray(result.subscriptions) && result.subscriptions.length > 0)
       || (Array.isArray(result.forecasts) && result.forecasts.length > 0)
-      || optionalNum(result.monthlyAmountUsd) !== null) {
-      const monthlyUsd = optionalNum(result.monthlyAmountUsd);
-      if (monthlyUsd !== null) {
-        lines.push(`• 月度订阅合计：${formatMoney(monthlyUsd)}`);
+      || monthlyTotal !== null) {
+      if (monthlyTotal !== null) {
+        const activeSub = optionalNum(result.activeCount);
+        const totalSub = optionalNum(result.totalCount);
+        const countSuffix = activeSub !== null && totalSub !== null
+          ? `（生效 ${Math.round(activeSub)}/${Math.round(totalSub)}）`
+          : '';
+        lines.push(`• 月度订阅合计：${formatMoney(monthlyTotal)}${countSuffix}`);
       }
       if (Array.isArray(result.subscriptions) && result.subscriptions.length > 0) {
         lines.push('');
         lines.push('📅 订阅计划：');
         for (const sub of result.subscriptions.slice(0, 6)) {
-          const sName = cleanSingleLine(sub?.name || sub?.label || sub?.provider, 64) || '订阅';
-          const amt = optionalNum(sub?.amountUsd ?? sub?.amount);
+          const providerDisp = safeDigestLabel([sub?.providerLabel, sub?.provider], '');
+          const planDisp = safeDigestLabel([sub?.planName, sub?.name, sub?.label], '');
+          const sName = providerDisp && planDisp && providerDisp !== planDisp
+            ? `${providerDisp} (${planDisp})`
+            : (planDisp || providerDisp || '订阅');
+          const amt = optionalNum(sub?.amountUnits ?? sub?.amountUsd ?? sub?.amount);
+          const subMonthly = optionalNum(sub?.monthlyAmountUsd);
           const cur = cleanSingleLine(sub?.currency, 12) || 'USD';
           const renew = cleanSingleLine(sub?.nextRenewalDate, 32);
           const daysLeft = optionalNum(sub?.daysUntilRenewal);
+          const fc = isPlainObject(sub?.forecast) ? sub.forecast : null;
+          const fcDays = optionalNum(fc?.daysRemaining);
+          const fcBurn = optionalNum(fc?.dailyBurn);
+          const fcExhaust = cleanSingleLine(fc?.exhaustDate, 32);
+          const fcParts = fc && fc.status === 'available'
+            ? [
+                fcDays !== null ? `预计可用 ${Math.round(fcDays)} 天` : '',
+                fcBurn !== null ? `日均 ${formatMoney(fcBurn, cleanSingleLine(fc.balanceCurrency, 12) || cur)}` : '',
+                fcExhaust ? `耗尽 ${fcExhaust}` : ''
+              ].filter(Boolean)
+            : (fc && fc.status && fc.status !== 'notApplicable' ? [`预测 ${cleanSingleLine(fc.status, 24)}`] : []);
           const sParts = [
             amt !== null ? formatMoney(amt, cur) : '',
+            subMonthly !== null && (cur !== 'USD' || amt === null) ? `折合月均 ${formatMoney(subMonthly)}` : '',
             renew ? `续费 ${renew}` : '',
-            daysLeft !== null ? `距续费 ${Math.round(daysLeft)} 天` : ''
+            daysLeft !== null ? `距续费 ${Math.round(daysLeft)} 天` : '',
+            ...fcParts
           ].filter(Boolean);
           lines.push(`• ${sName}${sParts.length ? `：${sParts.join(' · ')}` : ''}`);
         }
@@ -1763,7 +1920,7 @@ function formatOpenClawQueryDigestMessage({
       renderedStructured = true;
     }
 
-    const summaryNote = cleanSingleLine(result.summary || result.message || result.text, 500);
+    const summaryNote = cleanSingleLine(scrubSensitiveDigestText(String(result.summary || result.message || result.text || '')), 500);
     if (summaryNote) {
       lines.push(`• 摘要：${summaryNote}`);
       renderedStructured = true;
@@ -1774,14 +1931,16 @@ function formatOpenClawQueryDigestMessage({
         || (Array.isArray(result.items) && result.items.length === 0)
         || (Array.isArray(result.sessions) && result.sessions.length === 0)
         || (Array.isArray(result.devices) && result.devices.length === 0)
-        || (Array.isArray(result.providers) && result.providers.length === 0);
+        || (Array.isArray(result.providers) && result.providers.length === 0)
+        || (Array.isArray(result.subscriptions) && result.subscriptions.length === 0);
       if (hasEmptyCollection) {
         lines.push('• 查询结果为空（0 条记录）。');
       } else {
         for (const [k, v] of Object.entries(result)) {
-          if (SENSITIVE_DIGEST_KEYS.has(k.toLowerCase())) continue;
+          if (isSensitiveDigestKey(k)) continue;
           if (v === null || v === undefined || typeof v === 'object') continue;
-          lines.push(`• ${cleanSingleLine(k, 48)}: ${cleanSingleLine(String(v), 200)}`);
+          const cleanVal = cleanSingleLine(scrubSensitiveDigestText(String(v)), 200);
+          lines.push(`• ${cleanSingleLine(k, 48)}: ${cleanVal}`);
           if (lines.length >= 16) break;
         }
         if (lines.length === 1) {
@@ -1790,7 +1949,7 @@ function formatOpenClawQueryDigestMessage({
       }
     }
   } else {
-    lines.push(`• 结果：${cleanSingleLine(String(result), 500)}`);
+    lines.push(`• 结果：${cleanSingleLine(scrubSensitiveDigestText(String(result)), 500)}`);
   }
 
   const ai = resolveAiSummaryBlock(aiSummary);
