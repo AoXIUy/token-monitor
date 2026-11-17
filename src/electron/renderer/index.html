@@ -1903,10 +1903,6 @@
                       <input id="reportsOpenClawAgentIdInput" type="text" spellcheck="false" placeholder="main" />
                     </label>
                     <label class="checkbox-label settings-item">
-                      <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawAutoPush">Auto-push on period rollover</span></span>
-                      <input id="reportsOpenClawPushOnRolloverInput" type="checkbox" />
-                    </label>
-                    <label class="checkbox-label settings-item">
                       <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawIncludeAi">Include AI analysis summary</span></span>
                       <input id="reportsOpenClawIncludeAiInput" type="checkbox" checked />
                     </label>
@@ -1915,12 +1911,138 @@
                       <input id="reportsOpenClawIncludeLimitsInput" type="checkbox" checked />
                     </label>
                   </div>
-                  <div class="export-manual-row">
+                  <div id="reportsOpenClawEventsSection" class="reports-openclaw-subsection">
+                    <div class="reports-openclaw-subsection-title" data-i18n="settings.reports.openclawEventsTitle">Event triggers</div>
+                    <label class="checkbox-label settings-item">
+                      <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawAutoPush">Auto-push on period rollover</span></span>
+                      <input id="reportsOpenClawPushOnRolloverInput" type="checkbox" />
+                    </label>
+                    <label class="checkbox-label settings-item">
+                      <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawEventSessionCompleted">Session turn completed</span></span>
+                      <input id="reportsOpenClawEventSessionCompletedInput" type="checkbox" />
+                    </label>
+                    <label class="checkbox-label settings-item">
+                      <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawEventApprovalAlerts">Approval alerts (Codex / Antigravity)</span></span>
+                      <input id="reportsOpenClawEventApprovalAlertsInput" type="checkbox" />
+                    </label>
+                    <label class="checkbox-label settings-item">
+                      <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawEventQuotaAlerts">Quota low &amp; recovery alerts</span></span>
+                      <input id="reportsOpenClawEventQuotaAlertsInput" type="checkbox" />
+                    </label>
+                    <div id="reportsOpenClawQuotaOptions" class="reports-openclaw-subgrid">
+                      <label class="settings-item reports-openclaw-inline-number">
+                        <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawQuotaThreshold">Alert threshold (%)</span></span>
+                        <input id="reportsOpenClawQuotaThresholdInput" type="number" min="1" max="99" step="1" value="20" />
+                      </label>
+                      <label class="checkbox-label settings-item">
+                        <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawQuotaNotifyRecovery">Notify when quota recovers</span></span>
+                        <input id="reportsOpenClawQuotaNotifyRecoveryInput" type="checkbox" checked />
+                      </label>
+                    </div>
+                    <label class="checkbox-label settings-item">
+                      <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawEventServiceIncidents">AI service status incidents</span></span>
+                      <input id="reportsOpenClawEventServiceIncidentsInput" type="checkbox" />
+                    </label>
+                  </div>
+                  <div id="reportsOpenClawSessionSection" class="reports-openclaw-subsection reports-openclaw-collapsible">
+                    <button id="reportsOpenClawSessionToggle" class="settings-group-header cursor-settings-toggle reports-openclaw-subtoggle" type="button" aria-expanded="false" aria-controls="reportsOpenClawSessionDetails">
+                      <span data-i18n="settings.reports.openclawSessionCompletionTitle">Session completion &amp; filters</span>
+                      <span class="cursor-settings-summary"><span class="cursor-disclosure-icon" aria-hidden="true"></span></span>
+                    </button>
+                    <div id="reportsOpenClawSessionDetails" class="reports-openclaw-collapsible-body hidden" inert>
+                      <label class="checkbox-label settings-item">
+                        <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawExcludeSubagents">Exclude subagent sessions</span></span>
+                        <input id="reportsOpenClawExcludeSubagentsInput" type="checkbox" checked />
+                      </label>
+                      <label class="checkbox-label settings-item">
+                        <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawExcludeBackgroundReview">Exclude background review runs</span></span>
+                        <input id="reportsOpenClawExcludeBackgroundReviewInput" type="checkbox" checked />
+                      </label>
+                      <label class="checkbox-label settings-item">
+                        <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawSessionIncludeDetail">Include latest turn tool/prompt summary</span></span>
+                        <input id="reportsOpenClawSessionIncludeDetailInput" type="checkbox" />
+                      </label>
+                      <label class="checkbox-label settings-item">
+                        <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawSessionIncludeAi">Include AI one-line summary</span></span>
+                        <input id="reportsOpenClawSessionIncludeAiInput" type="checkbox" />
+                      </label>
+                      <div class="reports-openclaw-numeric-grid">
+                        <label class="reports-field">
+                          <span class="settings-note" data-i18n="settings.reports.openclawMinTurnTokens">Min turn tokens</span>
+                          <input id="reportsOpenClawMinTurnTokensInput" type="number" min="0" step="100" value="0" />
+                        </label>
+                        <label class="reports-field">
+                          <span class="settings-note" data-i18n="settings.reports.openclawMinTotalTokens">Min total tokens</span>
+                          <input id="reportsOpenClawMinTotalTokensInput" type="number" min="0" step="100" value="0" />
+                        </label>
+                        <label class="reports-field">
+                          <span class="settings-note" data-i18n="settings.reports.openclawDebounceMs">Settle delay (ms)</span>
+                          <input id="reportsOpenClawDebounceMsInput" type="number" min="0" max="600000" step="100" value="2500" />
+                        </label>
+                        <label class="reports-field">
+                          <span class="settings-note" data-i18n="settings.reports.openclawCooldownMs">Per-session cooldown (ms)</span>
+                          <input id="reportsOpenClawCooldownMsInput" type="number" min="0" max="86400000" step="1000" value="0" />
+                        </label>
+                      </div>
+                      <label class="reports-field">
+                        <span class="settings-note" data-i18n="settings.reports.openclawClientsFilter">Included tools (comma-separated, empty = all)</span>
+                        <input id="reportsOpenClawClientsInput" type="text" spellcheck="false" data-i18n-placeholder="settings.reports.openclawClientsPlaceholder" placeholder="codex, claude, cursor, antigravity" />
+                        <span class="settings-note settings-item-desc" data-i18n="settings.reports.openclawClientsNote">Leave empty to monitor all supported tools.</span>
+                      </label>
+                    </div>
+                  </div>
+                  <div id="reportsOpenClawPrivacySection" class="reports-openclaw-subsection">
+                    <div class="reports-openclaw-subsection-title" data-i18n="settings.reports.openclawPrivacyTitle">Query &amp; privacy permissions</div>
+                    <label class="checkbox-label settings-item">
+                      <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawAllowSessionDetail">Allow OpenClaw to query session turn details</span></span>
+                      <input id="reportsOpenClawAllowSessionDetailInput" type="checkbox" aria-describedby="reportsOpenClawAllowSessionDetailNote" />
+                      <span id="reportsOpenClawAllowSessionDetailNote" class="settings-note settings-item-desc" data-i18n="settings.reports.openclawAllowSessionDetailNote">Lets OpenClaw MCP / HTTP queries inspect turn-by-turn metrics, tool names, and prompt previews.</span>
+                    </label>
+                    <label id="reportsOpenClawAllowConversationTextRow" class="checkbox-label settings-item">
+                      <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawAllowConversationText">Allow OpenClaw to read full conversation text</span></span>
+                      <input id="reportsOpenClawAllowConversationTextInput" type="checkbox" aria-describedby="reportsOpenClawAllowConversationTextNote" disabled />
+                      <span id="reportsOpenClawAllowConversationTextNote" class="settings-note settings-item-desc reports-openclaw-privacy-warning" data-i18n="settings.reports.openclawAllowConversationTextNote">Sensitive: exposes full user/assistant transcripts to OpenClaw queries. Requires session detail permission above.</span>
+                    </label>
+                  </div>
+                  <div id="reportsOpenClawLocalBridgeSection" class="reports-openclaw-subsection" hidden>
+                    <div class="reports-openclaw-subsection-title" data-i18n="settings.reports.openclawLocalBridgeTitle">Local loopback bridge (127.0.0.1)</div>
+                    <label class="checkbox-label settings-item">
+                      <span class="settings-item-text"><span class="settings-item-title" data-i18n="settings.reports.openclawLocalBridgeEnabled">Enable local MCP &amp; query endpoint</span></span>
+                      <input id="reportsOpenClawLocalBridgeEnabledInput" type="checkbox" />
+                    </label>
+                    <div class="reports-openclaw-bridge-grid">
+                      <label class="reports-field">
+                        <span class="settings-note" data-i18n="settings.reports.openclawLocalBridgePort">Loopback port</span>
+                        <input id="reportsOpenClawLocalBridgePortInput" type="number" min="1" max="65535" step="1" value="17322" />
+                      </label>
+                      <div class="reports-field">
+                        <span class="settings-note" data-i18n="settings.reports.openclawLocalBridgeEndpoint">MCP endpoint</span>
+                        <code id="reportsOpenClawLocalBridgeEndpoint" class="reports-openclaw-bridge-endpoint">http://127.0.0.1:17322/api/mcp</code>
+                      </div>
+                    </div>
+                    <p id="reportsOpenClawLocalBridgeStatusText" class="settings-note reports-openclaw-bridge-status"></p>
+                    <div class="settings-actions reports-openclaw-bridge-actions">
+                      <button id="reportsOpenClawLocalBridgeCopyTokenButton" type="button" class="settings-mini-button" data-i18n="settings.reports.openclawLocalBridgeCopyToken">Copy Token</button>
+                      <button id="reportsOpenClawLocalBridgeCopyMcpButton" type="button" class="settings-mini-button" data-i18n="settings.reports.openclawLocalBridgeCopyMcp">Copy MCP Config</button>
+                      <button id="reportsOpenClawLocalBridgeRegenTokenButton" type="button" class="settings-mini-button" data-i18n="settings.reports.openclawLocalBridgeRegenToken">Regenerate Token</button>
+                    </div>
+                  </div>
+                  <div class="export-manual-row reports-openclaw-actions-row">
                     <span id="reportsOpenClawStatusText" class="settings-note export-manual-note"></span>
-                    <div class="settings-actions">
+                    <div class="settings-actions reports-openclaw-action-buttons">
                       <button id="reportsOpenClawSaveButton" type="button" data-i18n="settings.common.save">Save</button>
+                      <button id="reportsOpenClawTestPushButton" type="button" class="settings-mini-button" data-i18n="settings.reports.openclawTestPush">Test OpenClaw Push</button>
+                      <button id="reportsOpenClawPushUsageButton" type="button" class="settings-mini-button" data-i18n="settings.reports.openclawPushUsageNow">Push Usage Now</button>
                       <button id="reportsOpenClawPushNowButton" type="button" data-i18n="settings.reports.openclawPushNow">Push to WeChat</button>
                     </div>
+                  </div>
+                  <div id="reportsOpenClawHistorySection" class="reports-openclaw-subsection reports-openclaw-history">
+                    <div class="reports-openclaw-history-head">
+                      <span class="reports-openclaw-subsection-title" data-i18n="settings.reports.openclawHistoryTitle">Recent push history</span>
+                      <button id="reportsOpenClawHistoryRefreshButton" type="button" class="settings-mini-button" data-i18n="settings.reports.openclawHistoryRefresh">Refresh</button>
+                    </div>
+                    <p id="reportsOpenClawHistoryEmpty" class="settings-note" data-i18n="settings.reports.openclawHistoryEmpty">No recent OpenClaw pushes yet.</p>
+                    <ul id="reportsOpenClawHistoryList" class="reports-openclaw-history-list" hidden></ul>
                   </div>
                 </div>
               </div>
@@ -1948,7 +2070,13 @@
       </section>
 
       <section class="total-panel">
-        <div class="label-row"><span>TOTAL TOKENS</span></div>
+        <div class="label-row">
+          <span>TOTAL TOKENS</span>
+          <button id="openClawQuickPushButton" class="openclaw-quick-push hidden" type="button" aria-label="Push current usage summary to OpenClaw" data-i18n-aria-label="openclaw.quickPush.usage" hidden>
+            <svg class="openclaw-quick-push-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M14.2 1.8 1.9 6.6a.6.6 0 0 0 .04 1.13l3.48 1.15 1.38 4.14a.6.6 0 0 0 1.07.15l1.97-2.66 3.22 2.41a.6.6 0 0 0 .94-.35l1.8-9.95a.6.6 0 0 0-.8-.82ZM6.2 8.4l5.8-4.1-4.6 5.2-.45 1.92-.75-2.25Z" fill="currentColor"/></svg>
+            <span class="openclaw-quick-push-label" data-i18n="openclaw.quickPush.short">WeChat</span>
+          </button>
+        </div>
         <div class="total-number-row"><div id="totalTokens" class="total-number">0</div><div id="totalTokensCompact" class="total-compact hidden" aria-hidden="true"></div></div>
         <div class="total-cost-row">
           <div id="cost" class="cost">$0.00</div>
@@ -2031,6 +2159,7 @@
         </div>
         <div id="appUpdatePopoverBody" class="app-update-popover-body" tabindex="0"></div>
       </div>
+      <div id="openClawToast" class="openclaw-toast hidden" role="status" aria-live="polite" hidden></div>
     </main>
     <div id="syncContentTitleHelpPopover" class="settings-help-popover" popover="auto" role="tooltip">
       <strong data-i18n="settings.sync.content.helpTitle">Enable title sync on the server</strong>

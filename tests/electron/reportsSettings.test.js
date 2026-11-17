@@ -39,16 +39,19 @@ function createSvgNodeStub(tagName) {
   };
 }
 
-function createElementStub() {
+function createElementStub(tagName = 'div') {
   const listeners = new Map();
   const classes = new Set();
   const attributes = new Map();
   const children = [];
+  let classNameValue = '';
   const stub = {
+    tagName,
     checked: false,
     disabled: false,
     hidden: false,
     inert: false,
+    type: '',
     value: '',
     placeholder: '',
     textContent: '',
@@ -57,6 +60,14 @@ function createElementStub() {
     _focused: false,
     attributes,
     children,
+    get className() {
+      return classNameValue;
+    },
+    set className(val) {
+      classNameValue = String(val || '');
+      classes.clear();
+      for (const cls of classNameValue.split(/\s+/).filter(Boolean)) classes.add(cls);
+    },
     classList: {
       toggle(name, force) {
         if (force === undefined) {
@@ -66,6 +77,12 @@ function createElementStub() {
         }
         if (force) classes.add(name);
         else classes.delete(name);
+      },
+      add(...names) {
+        for (const name of names) classes.add(name);
+      },
+      remove(...names) {
+        for (const name of names) classes.delete(name);
       },
       contains(name) {
         return classes.has(name);
@@ -96,6 +113,15 @@ function createElementStub() {
     },
     replaceChildren(...nodes) {
       children.splice(0, children.length, ...nodes);
+    },
+    querySelector(selector) {
+      const cls = selector.startsWith('.') ? selector.slice(1) : '';
+      for (const child of children) {
+        if (cls && child?.classList?.contains?.(cls)) return child;
+        const found = child?.querySelector?.(selector);
+        if (found) return found;
+      }
+      return null;
     },
     addEventListener(type, handler) {
       const existing = listeners.get(type);
@@ -156,6 +182,34 @@ function createRendererReportsHarness() {
     reportsOpenClawToInput: createElementStub(),
     reportsOpenClawAgentIdInput: createElementStub(),
     reportsOpenClawPushOnRolloverInput: createElementStub(),
+    reportsOpenClawEventSessionCompletedInput: createElementStub(),
+    reportsOpenClawEventApprovalAlertsInput: createElementStub(),
+    reportsOpenClawEventQuotaAlertsInput: createElementStub(),
+    reportsOpenClawQuotaOptions: createElementStub(),
+    reportsOpenClawQuotaThresholdInput: createElementStub(),
+    reportsOpenClawQuotaNotifyRecoveryInput: createElementStub(),
+    reportsOpenClawEventServiceIncidentsInput: createElementStub(),
+    reportsOpenClawSessionToggle: createElementStub(),
+    reportsOpenClawSessionDetails: createElementStub(),
+    reportsOpenClawExcludeSubagentsInput: createElementStub(),
+    reportsOpenClawExcludeBackgroundReviewInput: createElementStub(),
+    reportsOpenClawSessionIncludeDetailInput: createElementStub(),
+    reportsOpenClawSessionIncludeAiInput: createElementStub(),
+    reportsOpenClawMinTurnTokensInput: createElementStub(),
+    reportsOpenClawMinTotalTokensInput: createElementStub(),
+    reportsOpenClawDebounceMsInput: createElementStub(),
+    reportsOpenClawCooldownMsInput: createElementStub(),
+    reportsOpenClawClientsInput: createElementStub(),
+    reportsOpenClawAllowSessionDetailInput: createElementStub(),
+    reportsOpenClawAllowConversationTextInput: createElementStub(),
+    reportsOpenClawLocalBridgeSection: createElementStub(),
+    reportsOpenClawLocalBridgeEnabledInput: createElementStub(),
+    reportsOpenClawLocalBridgePortInput: createElementStub(),
+    reportsOpenClawLocalBridgeEndpoint: createElementStub(),
+    reportsOpenClawLocalBridgeStatusText: createElementStub(),
+    reportsOpenClawLocalBridgeCopyTokenButton: createElementStub(),
+    reportsOpenClawLocalBridgeCopyMcpButton: createElementStub(),
+    reportsOpenClawLocalBridgeRegenTokenButton: createElementStub(),
     reportsOpenClawIncludeAiInput: createElementStub(),
     reportsOpenClawIncludeLimitsInput: createElementStub(),
     reportsOpenClawEnvSummary: createElementStub(),
@@ -173,9 +227,20 @@ function createRendererReportsHarness() {
     reportsOpenClawQrGuideText: createElementStub(),
     reportsOpenClawStatusText: createElementStub(),
     reportsOpenClawSaveButton: createElementStub(),
-    reportsOpenClawPushNowButton: createElementStub()
+    reportsOpenClawTestPushButton: createElementStub(),
+    reportsOpenClawPushUsageButton: createElementStub(),
+    reportsOpenClawPushNowButton: createElementStub(),
+    reportsOpenClawHistorySection: createElementStub(),
+    reportsOpenClawHistoryRefreshButton: createElementStub(),
+    reportsOpenClawHistoryEmpty: createElementStub(),
+    reportsOpenClawHistoryList: createElementStub(),
+    openClawQuickPushButton: createElementStub(),
+    openClawToast: createElementStub()
   };
   const state = {
+    period: 'today',
+    breakdown: 'home',
+    openSession: null,
     settings: {
       hubMode: 'host',
       hubHostPort: 17321,
@@ -194,17 +259,73 @@ function createRendererReportsHarness() {
   const savedIntegrationsPatches = [];
   const analyzeCalls = [];
   const pushCalls = [];
+  const testPushCalls = [];
+  const queryPushCalls = [];
+  const copyBridgeCalls = [];
+  let regenBridgeCalls = 0;
+  let historyCalls = 0;
   const cancelledQrSessions = [];
   const provisionCalls = [];
   const copiedTexts = [];
   let integrationsState = {
     ok: true,
     ai: { enabled: false, protocol: 'openai-compatible', providerLabel: '', baseUrl: '', model: '', language: 'zh-CN', apiKeyConfigured: false, autoAnalyzeOnRollover: false },
-    openclaw: { enabled: false, mode: 'openclaw-agent', webhookUrl: '', channel: 'openclaw-weixin', to: '', agentId: 'main', hookTokenConfigured: false, pushOnRollover: false, includeAiSummary: true, includeLimitsSnapshot: true },
+    openclaw: {
+      enabled: false,
+      mode: 'openclaw-agent',
+      webhookUrl: '',
+      channel: 'openclaw-weixin',
+      to: '',
+      agentId: 'main',
+      hookTokenConfigured: false,
+      pushOnRollover: false,
+      includeAiAnalysis: true,
+      includeLimits: true,
+      events: { rollover: false, sessionCompleted: false, approvalAlerts: false, quotaAlerts: false, serviceIncidents: false },
+      sessionCompletion: {
+        clients: [],
+        excludeSubagents: true,
+        excludeBackgroundReview: true,
+        minTurnTokens: 0,
+        minTotalTokens: 0,
+        debounceMs: 2500,
+        cooldownMs: 0,
+        includeDetailSummary: false,
+        includeAiSummary: false
+      },
+      quotaAlerts: { thresholdPercent: 20, notifyRecovery: true },
+      queryPermissions: { allowSessionDetail: false, allowConversationText: false },
+      localBridge: { enabled: false, port: 17322 }
+    },
     lastPush: null
   };
   let analyzeResult = { ok: true, aiAnalysis: { model: 'deepseek-chat', summaryMarkdown: 'AI OK' } };
   let pushResult = { ok: true, channel: 'openclaw-weixin', lastPush: { ok: true, at: '2026-11-16T22:00:00Z' } };
+  let testPushResult = { ok: true, eventType: 'test', channel: 'openclaw-weixin', lastPush: { ok: true, at: '2026-11-17T08:00:00Z' } };
+  let queryPushResult = { ok: true, eventType: 'query_digest', channel: 'openclaw-weixin', lastPush: { ok: true, at: '2026-11-17T08:05:00Z' } };
+  let pushHistoryState = { ok: true, count: 0, lastPush: null, history: [] };
+  let localBridgeStatusState = {
+    ok: true,
+    enabled: false,
+    running: false,
+    port: 17322,
+    endpointUrl: 'http://127.0.0.1:17322/api/mcp',
+    baseUrl: 'http://127.0.0.1:17322',
+    tokenConfigured: false,
+    maskedToken: ''
+  };
+  let regenBridgeResult = {
+    ok: true,
+    enabled: true,
+    running: true,
+    port: 17322,
+    endpointUrl: 'http://127.0.0.1:17322/api/mcp',
+    tokenConfigured: true,
+    maskedToken: '••••new1'
+  };
+  let copyBridgeResult = { ok: true, copied: true };
+  let testPushHandler = null;
+  let queryPushHandler = null;
   let saveIntegrationsHandler = null;
   let openclawEnvResult = {
     ok: true,
@@ -274,6 +395,32 @@ function createRendererReportsHarness() {
       pushCalls.push(payload);
       return pushResult;
     },
+    async getOpenClawPushHistory() {
+      historyCalls += 1;
+      return pushHistoryState;
+    },
+    async testOpenClawPush(payload) {
+      testPushCalls.push(payload);
+      if (testPushHandler) return testPushHandler(payload);
+      return testPushResult;
+    },
+    async pushQueryToOpenClaw(payload) {
+      queryPushCalls.push(payload);
+      if (queryPushHandler) return queryPushHandler(payload);
+      return queryPushResult;
+    },
+    async getOpenClawLocalBridgeStatus() {
+      return localBridgeStatusState;
+    },
+    async copyLocalBridgeConfig(payload) {
+      copyBridgeCalls.push(payload);
+      return copyBridgeResult;
+    },
+    async regenerateOpenClawLocalBridgeToken() {
+      regenBridgeCalls += 1;
+      localBridgeStatusState = { ...regenBridgeResult };
+      return regenBridgeResult;
+    },
     async getOpenClawEnv() {
       return openclawEnvResult;
     },
@@ -327,6 +474,9 @@ function createRendererReportsHarness() {
     URL,
     TokenMonitorQrSvg: qrSvg,
     document: {
+      createElement(tagName) {
+        return createElementStub(tagName);
+      },
       createElementNS(ns, tagName) {
         const node = createSvgNodeStub(tagName);
         node.namespaceURI = ns;
@@ -358,18 +508,33 @@ function createRendererReportsHarness() {
   };
 
   vm.runInNewContext(
-    `${rendererSource.slice(start, end)}\nthis.renderReportsSettings = renderReportsSettings;\nthis.formatReportsError = formatReportsError;\nthis.cancelOpenClawQrIfActive = cancelOpenClawQrIfActive;`,
+    `${rendererSource.slice(start, end)}
+this.renderReportsSettings = renderReportsSettings;
+this.formatReportsError = formatReportsError;
+this.cancelOpenClawQrIfActive = cancelOpenClawQrIfActive;
+this.isOpenClawQuickPushAvailable = isOpenClawQuickPushAvailable;
+this.syncOpenClawQuickPushButton = syncOpenClawQuickPushButton;
+this.triggerOpenClawQuickPush = triggerOpenClawQuickPush;
+this.createSessionDetailOpenClawPushButton = createSessionDetailOpenClawPushButton;
+this.quickPushQueryForCurrentView = quickPushQueryForCurrentView;
+this.syncReportIntegrationsFromSettings = syncReportIntegrationsFromSettings;`,
     context
   );
 
   return {
     els,
     state,
+    tokenMonitor,
     context,
     savedPatches,
     savedIntegrationsPatches,
     analyzeCalls,
     pushCalls,
+    testPushCalls,
+    queryPushCalls,
+    copyBridgeCalls,
+    getRegenBridgeCalls: () => regenBridgeCalls,
+    getHistoryCalls: () => historyCalls,
     cancelledQrSessions,
     provisionCalls,
     copiedTexts,
@@ -390,6 +555,14 @@ function createRendererReportsHarness() {
     setSaveIntegrationsHandler(fn) { saveIntegrationsHandler = fn; },
     setAnalyzeResult(value) { analyzeResult = value; },
     setPushResult(value) { pushResult = value; },
+    setTestPushResult(value) { testPushResult = value; },
+    setTestPushHandler(fn) { testPushHandler = fn; },
+    setQueryPushResult(value) { queryPushResult = value; },
+    setQueryPushHandler(fn) { queryPushHandler = fn; },
+    setPushHistoryState(value) { pushHistoryState = value; },
+    setLocalBridgeStatusState(value) { localBridgeStatusState = value; },
+    setRegenBridgeResult(value) { regenBridgeResult = value; },
+    setCopyBridgeResult(value) { copyBridgeResult = value; },
     setOpenClawEnvResult(value) { openclawEnvResult = value; },
     setQrStartHandler(fn) { qrStartHandler = fn; },
     setQrPollHandler(fn) { qrPollHandler = fn; },
@@ -451,7 +624,45 @@ test('index.html exposes all required report control IDs and localized keys', ()
     'reportsOpenClawQrRefreshButton',
     'reportsOpenClawQrCopyLinkButton',
     'reportsOpenClawQrCancelButton',
-    'reportsOpenClawQrGuideText'
+    'reportsOpenClawQrGuideText',
+    'reportsOpenClawEventsSection',
+    'reportsOpenClawEventSessionCompletedInput',
+    'reportsOpenClawEventApprovalAlertsInput',
+    'reportsOpenClawEventQuotaAlertsInput',
+    'reportsOpenClawQuotaThresholdInput',
+    'reportsOpenClawQuotaNotifyRecoveryInput',
+    'reportsOpenClawEventServiceIncidentsInput',
+    'reportsOpenClawSessionSection',
+    'reportsOpenClawSessionToggle',
+    'reportsOpenClawSessionDetails',
+    'reportsOpenClawExcludeSubagentsInput',
+    'reportsOpenClawExcludeBackgroundReviewInput',
+    'reportsOpenClawSessionIncludeDetailInput',
+    'reportsOpenClawSessionIncludeAiInput',
+    'reportsOpenClawMinTurnTokensInput',
+    'reportsOpenClawMinTotalTokensInput',
+    'reportsOpenClawDebounceMsInput',
+    'reportsOpenClawCooldownMsInput',
+    'reportsOpenClawClientsInput',
+    'reportsOpenClawPrivacySection',
+    'reportsOpenClawAllowSessionDetailInput',
+    'reportsOpenClawAllowConversationTextInput',
+    'reportsOpenClawLocalBridgeSection',
+    'reportsOpenClawLocalBridgeEnabledInput',
+    'reportsOpenClawLocalBridgePortInput',
+    'reportsOpenClawLocalBridgeEndpoint',
+    'reportsOpenClawLocalBridgeStatusText',
+    'reportsOpenClawLocalBridgeCopyTokenButton',
+    'reportsOpenClawLocalBridgeCopyMcpButton',
+    'reportsOpenClawLocalBridgeRegenTokenButton',
+    'reportsOpenClawTestPushButton',
+    'reportsOpenClawPushUsageButton',
+    'reportsOpenClawHistorySection',
+    'reportsOpenClawHistoryRefreshButton',
+    'reportsOpenClawHistoryEmpty',
+    'reportsOpenClawHistoryList',
+    'openClawQuickPushButton',
+    'openClawToast'
   ]) {
     assert.match(htmlSource, new RegExp(`id="${id}"`), `index.html missing #${id}`);
   }
@@ -467,9 +678,9 @@ test('index.html exposes all required report control IDs and localized keys', ()
   const attrKeys = [
     ...section.matchAll(/data-i18n(?:-(?:aria-label|placeholder))?="([^"]+)"/g)
   ].map((match) => match[1]);
-  const enReportKeys = Object.keys(MESSAGES.en).filter((key) => key.startsWith('settings.reports.'));
+  const enReportKeys = Object.keys(MESSAGES.en).filter((key) => key.startsWith('settings.reports.') || key.startsWith('openclaw.quickPush.'));
   const allKeys = [...new Set([...attrKeys, ...enReportKeys])];
-  assert.ok(allKeys.length >= 25);
+  assert.ok(allKeys.length >= 60);
   for (const locale of LANGUAGE_OPTIONS.map((opt) => opt.value).filter((value) => value !== 'auto')) {
     for (const key of allKeys) {
       assert.ok(MESSAGES[locale][key]?.trim(), `${locale} missing ${key}`);
@@ -492,8 +703,13 @@ test('renderReportsSettings adapts visibility, disabled states, and MCP status a
   assert.equal(els.reportsAiPanel.hidden, true);
   assert.equal(els.reportsAiPanel.inert, true);
   assert.equal(els.reportsOpenClawPanel.hidden, false);
-  assert.equal(els.reportsOpenClawSaveButton.disabled, true);
-  assert.equal(els.reportsOpenClawPushNowButton.disabled, true);
+  assert.equal(els.reportsOpenClawPanel.inert, false);
+  assert.equal(els.reportsOpenClawLocalBridgeSection.hidden, false);
+  assert.equal(els.reportsOpenClawLocalBridgeSection.inert, false);
+  assert.equal(els.reportsOpenClawSaveButton.disabled, false);
+  assert.equal(els.reportsOpenClawTestPushButton.disabled, false);
+  assert.equal(els.reportsOpenClawPushUsageButton.disabled, false);
+  assert.equal(els.reportsOpenClawPushNowButton.disabled, false);
   assert.equal(els.reportsOpenClawQrScanButton.disabled, false);
 
   await els.reportsEnableHostButton.trigger('click');
@@ -502,6 +718,20 @@ test('renderReportsSettings adapts visibility, disabled states, and MCP status a
   assert.equal(els.reportsHostControls.hidden, false);
   assert.equal(els.reportsAiPanel.hidden, false);
   assert.equal(els.reportsAiPanel.inert, false);
+  assert.equal(els.reportsOpenClawLocalBridgeSection.hidden, true);
+  assert.equal(els.reportsOpenClawLocalBridgeSection.inert, true);
+
+  state.settings.hubMode = 'icloud';
+  context.renderReportsSettings();
+  assert.equal(els.reportsIntegrationsControls.hidden, true);
+  assert.equal(els.reportsIntegrationsControls.inert, true);
+  assert.equal(els.reportsOpenClawPanel.hidden, true);
+  assert.equal(els.reportsOpenClawPanel.inert, true);
+  assert.equal(els.reportsOpenClawSaveButton.disabled, true);
+  assert.equal(els.reportsOpenClawTestPushButton.disabled, true);
+  assert.equal(els.reportsOpenClawPushUsageButton.disabled, true);
+  assert.equal(els.reportsOpenClawPushNowButton.disabled, true);
+  assert.equal(els.reportsOpenClawQrScanButton.disabled, true);
 
   state.settings.hubMode = 'local';
   context.renderReportsSettings();
@@ -512,6 +742,8 @@ test('renderReportsSettings adapts visibility, disabled states, and MCP status a
   assert.equal(els.reportsHostControls.hidden, true);
   assert.equal(els.reportsActionsRow.hidden, false);
   assert.equal(els.reportsGenerateNowButton.disabled, false);
+  assert.equal(els.reportsOpenClawSaveButton.disabled, false);
+  assert.equal(els.reportsOpenClawLocalBridgeSection.hidden, true);
   assert.match(els.reportsStatusText.textContent, /\/api\/mcp/);
 
   state.settings.hubMode = 'host';
@@ -916,4 +1148,346 @@ test('OpenClaw WeChat QR onboarding renders SVG, polls through verify code and c
   assert.equal(provisionCalls[0].agentId, 'ops-agent');
   assert.equal(els.reportsOpenClawWebhookUrlInput.value, 'http://127.0.0.1:18789/hooks/agent');
   assert.ok(els.reportsOpenClawStatusText.textContent.trim().length > 0);
+});
+
+test('local mode persists nested OpenClaw config, collapsible filters, and dirty unfocused edits', async () => {
+  const harness = createRendererReportsHarness();
+  const { els, state, context, savedIntegrationsPatches } = harness;
+  state.settings.hubMode = 'local';
+  context.renderReportsSettings();
+  await Promise.resolve();
+
+  // Collapsible Session completion & filters starts collapsed and toggles cleanly
+  assert.equal(els.reportsOpenClawSessionToggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(els.reportsOpenClawSessionDetails.hidden, true);
+  assert.equal(els.reportsOpenClawSessionDetails.inert, true);
+  await els.reportsOpenClawSessionToggle.trigger('click');
+  assert.equal(els.reportsOpenClawSessionToggle.getAttribute('aria-expanded'), 'true');
+  assert.equal(els.reportsOpenClawSessionDetails.hidden, false);
+  assert.equal(els.reportsOpenClawSessionDetails.inert, false);
+
+  // Edit top-level, event matrix, sessionCompletion filters, quotaAlerts, and localBridge
+  els.reportsOpenClawEnabledInput.checked = true;
+  await els.reportsOpenClawEnabledInput.trigger('change');
+  els.reportsOpenClawWebhookUrlInput.value = 'http://127.0.0.1:18789/hooks/agent';
+  await els.reportsOpenClawWebhookUrlInput.trigger('input');
+  els.reportsOpenClawToInput.value = 'wxid_local_user';
+  await els.reportsOpenClawToInput.trigger('input');
+
+  els.reportsOpenClawPushOnRolloverInput.checked = true;
+  await els.reportsOpenClawPushOnRolloverInput.trigger('change');
+  els.reportsOpenClawEventSessionCompletedInput.checked = true;
+  await els.reportsOpenClawEventSessionCompletedInput.trigger('change');
+  els.reportsOpenClawEventApprovalAlertsInput.checked = true;
+  await els.reportsOpenClawEventApprovalAlertsInput.trigger('change');
+  els.reportsOpenClawEventQuotaAlertsInput.checked = true;
+  await els.reportsOpenClawEventQuotaAlertsInput.trigger('change');
+  els.reportsOpenClawEventServiceIncidentsInput.checked = true;
+  await els.reportsOpenClawEventServiceIncidentsInput.trigger('change');
+
+  els.reportsOpenClawQuotaThresholdInput.value = '15';
+  await els.reportsOpenClawQuotaThresholdInput.trigger('input');
+  els.reportsOpenClawQuotaNotifyRecoveryInput.checked = false;
+  await els.reportsOpenClawQuotaNotifyRecoveryInput.trigger('change');
+
+  els.reportsOpenClawExcludeSubagentsInput.checked = false;
+  await els.reportsOpenClawExcludeSubagentsInput.trigger('change');
+  els.reportsOpenClawExcludeBackgroundReviewInput.checked = false;
+  await els.reportsOpenClawExcludeBackgroundReviewInput.trigger('change');
+  els.reportsOpenClawSessionIncludeDetailInput.checked = true;
+  await els.reportsOpenClawSessionIncludeDetailInput.trigger('change');
+  els.reportsOpenClawSessionIncludeAiInput.checked = true;
+  await els.reportsOpenClawSessionIncludeAiInput.trigger('change');
+  els.reportsOpenClawMinTurnTokensInput.value = '500';
+  await els.reportsOpenClawMinTurnTokensInput.trigger('input');
+  els.reportsOpenClawMinTotalTokensInput.value = '1500';
+  await els.reportsOpenClawMinTotalTokensInput.trigger('input');
+  els.reportsOpenClawDebounceMsInput.value = '4000';
+  await els.reportsOpenClawDebounceMsInput.trigger('input');
+  els.reportsOpenClawCooldownMsInput.value = '60000';
+  await els.reportsOpenClawCooldownMsInput.trigger('input');
+  els.reportsOpenClawClientsInput.value = 'codex, Claude, codex';
+  await els.reportsOpenClawClientsInput.trigger('input');
+
+  els.reportsOpenClawLocalBridgeEnabledInput.checked = true;
+  await els.reportsOpenClawLocalBridgeEnabledInput.trigger('change');
+  els.reportsOpenClawLocalBridgePortInput.value = '18422';
+  await els.reportsOpenClawLocalBridgePortInput.trigger('input');
+  assert.equal(els.reportsOpenClawLocalBridgeEndpoint.textContent, 'http://127.0.0.1:18422/api/mcp');
+
+  // Unfocused dirty edits survive background settings render before Save
+  for (const el of Object.values(els)) el.blur();
+  state.settings.reportIntegrations = {
+    openclaw: { enabled: false, events: { rollover: false, sessionCompleted: false }, localBridge: { enabled: false, port: 17322 } }
+  };
+  context.renderReportsSettings();
+  assert.equal(els.reportsOpenClawEnabledInput.checked, true);
+  assert.equal(els.reportsOpenClawEventSessionCompletedInput.checked, true);
+  assert.equal(els.reportsOpenClawLocalBridgePortInput.value, '18422');
+
+  await els.reportsOpenClawSaveButton.trigger('click');
+  assert.equal(savedIntegrationsPatches.length, 1);
+  const saved = JSON.parse(JSON.stringify(savedIntegrationsPatches[0].openclaw));
+  assert.equal(saved.enabled, true);
+  assert.equal(saved.pushOnRollover, true);
+  assert.deepEqual(saved.events, {
+    rollover: true,
+    sessionCompleted: true,
+    approvalAlerts: true,
+    quotaAlerts: true,
+    serviceIncidents: true
+  });
+  assert.deepEqual(saved.sessionCompletion, {
+    clients: ['codex', 'claude'],
+    excludeSubagents: false,
+    excludeBackgroundReview: false,
+    minTurnTokens: 500,
+    minTotalTokens: 1500,
+    debounceMs: 4000,
+    cooldownMs: 60000,
+    includeDetailSummary: true,
+    includeAiSummary: true
+  });
+  assert.deepEqual(saved.quotaAlerts, { thresholdPercent: 15, notifyRecovery: false });
+  assert.deepEqual(saved.queryPermissions, { allowSessionDetail: false, allowConversationText: false });
+  assert.deepEqual(saved.localBridge, { enabled: true, port: 18422 });
+  assert.equal(els.reportsOpenClawStatusText.textContent, MESSAGES.en['settings.reports.openclawSaved']);
+});
+
+test('privacy query permissions gate allowConversationText behind allowSessionDetail', async () => {
+  const harness = createRendererReportsHarness();
+  const { els, state, context, savedIntegrationsPatches } = harness;
+  state.settings.hubMode = 'local';
+  context.renderReportsSettings();
+
+  // Default state keeps conversation text disabled
+  assert.equal(els.reportsOpenClawAllowSessionDetailInput.checked, false);
+  assert.equal(els.reportsOpenClawAllowConversationTextInput.disabled, true);
+  assert.equal(els.reportsOpenClawAllowConversationTextInput.checked, false);
+
+  // Even if conversation text checked flag is forced while detail is off, save clamps it false
+  els.reportsOpenClawAllowConversationTextInput.checked = true;
+  await els.reportsOpenClawSaveButton.trigger('click');
+  assert.deepEqual(JSON.parse(JSON.stringify(savedIntegrationsPatches.at(-1).openclaw.queryPermissions)), {
+    allowSessionDetail: false,
+    allowConversationText: false
+  });
+
+  // Enabling allowSessionDetail unlocks allowConversationText
+  els.reportsOpenClawAllowSessionDetailInput.checked = true;
+  await els.reportsOpenClawAllowSessionDetailInput.trigger('change');
+  assert.equal(els.reportsOpenClawAllowConversationTextInput.disabled, false);
+
+  els.reportsOpenClawAllowConversationTextInput.checked = true;
+  await els.reportsOpenClawAllowConversationTextInput.trigger('change');
+  await els.reportsOpenClawSaveButton.trigger('click');
+  assert.deepEqual(JSON.parse(JSON.stringify(savedIntegrationsPatches.at(-1).openclaw.queryPermissions)), {
+    allowSessionDetail: true,
+    allowConversationText: true
+  });
+
+  // Disabling allowSessionDetail immediately clears and disables allowConversationText
+  els.reportsOpenClawAllowSessionDetailInput.checked = false;
+  await els.reportsOpenClawAllowSessionDetailInput.trigger('change');
+  assert.equal(els.reportsOpenClawAllowConversationTextInput.disabled, true);
+  assert.equal(els.reportsOpenClawAllowConversationTextInput.checked, false);
+});
+
+test('local bridge status displays masked token without exposing raw secrets, copies config, and regenerates token', async () => {
+  const harness = createRendererReportsHarness();
+  const { els, state, context, copyBridgeCalls, getRegenBridgeCalls, flushNextTimer } = harness;
+  const flushMicrotasks = async () => {
+    for (let i = 0; i < 6; i += 1) await Promise.resolve();
+  };
+  harness.setLocalBridgeStatusState({
+    ok: true,
+    enabled: true,
+    running: true,
+    port: 17322,
+    endpointUrl: 'http://127.0.0.1:17322/api/mcp',
+    baseUrl: 'http://127.0.0.1:17322',
+    tokenConfigured: true,
+    maskedToken: '••••9f2a',
+    token: 'raw-secret-never-display',
+    secret: 'raw-secret-never-display'
+  });
+  harness.setRegenBridgeResult({
+    ok: true,
+    enabled: true,
+    running: true,
+    port: 17322,
+    endpointUrl: 'http://127.0.0.1:17322/api/mcp',
+    tokenConfigured: true,
+    maskedToken: '••••b3c4',
+    token: 'raw-regen-never-display'
+  });
+
+  state.settings.hubMode = 'local';
+  context.renderReportsSettings();
+  await flushMicrotasks();
+
+  assert.equal(els.reportsOpenClawLocalBridgeEndpoint.textContent, 'http://127.0.0.1:17322/api/mcp');
+  assert.match(els.reportsOpenClawLocalBridgeStatusText.textContent, /••••9f2a/);
+  assert.equal(els.reportsOpenClawLocalBridgeCopyTokenButton.disabled, false);
+  assert.equal(els.reportsOpenClawLocalBridgeCopyMcpButton.disabled, false);
+  assert.equal(els.reportsOpenClawLocalBridgeRegenTokenButton.disabled, false);
+  assert.equal(JSON.stringify(els).includes('raw-secret-never-display'), false);
+  assert.equal(JSON.stringify(state).includes('raw-secret-never-display'), false);
+
+  await els.reportsOpenClawLocalBridgeCopyTokenButton.trigger('click');
+  await els.reportsOpenClawLocalBridgeCopyMcpButton.trigger('click');
+  assert.deepEqual(copyBridgeCalls.map((c) => JSON.parse(JSON.stringify(c))), [{ kind: 'token' }, { kind: 'mcpConfig' }]);
+  assert.equal(els.reportsOpenClawLocalBridgeCopyMcpButton.textContent, MESSAGES.en['settings.reports.openclawQrCopied']);
+  assert.equal(await flushNextTimer(), true);
+  assert.equal(els.reportsOpenClawLocalBridgeCopyMcpButton.textContent, MESSAGES.en['settings.reports.openclawLocalBridgeCopyMcp']);
+
+  await els.reportsOpenClawLocalBridgeRegenTokenButton.trigger('click');
+  assert.equal(getRegenBridgeCalls(), 1);
+  assert.match(els.reportsOpenClawLocalBridgeStatusText.textContent, /••••b3c4/);
+  assert.equal(els.reportsOpenClawStatusText.textContent, MESSAGES.en['settings.reports.openclawLocalBridgeTokenRegenerated']);
+  assert.equal(JSON.stringify(els).includes('raw-regen-never-display'), false);
+});
+
+test('test push, push usage now, error codes, and recent push history (last 5) render accurately', async () => {
+  const harness = createRendererReportsHarness();
+  const { els, state, context, testPushCalls, queryPushCalls, savedIntegrationsPatches } = harness;
+  const flushMicrotasks = async () => {
+    for (let i = 0; i < 6; i += 1) await Promise.resolve();
+  };
+  harness.setPushHistoryState({
+    ok: true,
+    count: 6,
+    lastPush: { ok: true, at: '2026-11-17T08:10:00Z' },
+    history: [
+      { id: '1', at: '2026-11-17T08:10:00Z', eventType: 'session_completed', ok: true, channel: 'openclaw-weixin', summary: 'Codex · 1.2K' },
+      { id: '2', at: '2026-11-17T08:09:00Z', eventType: 'query_digest', ok: false, error: 'session_detail_disabled', channel: 'openclaw-weixin' },
+      { id: '3', at: '2026-11-17T08:08:00Z', eventType: 'quota_alert', ok: true, channel: 'openclaw-weixin', summary: '15% left' },
+      { id: '4', at: '2026-11-17T08:07:00Z', eventType: 'approval_alert', ok: true, channel: 'openclaw-weixin' },
+      { id: '5', at: '2026-11-17T08:06:00Z', eventType: 'service_incident', ok: true, channel: 'openclaw-weixin' },
+      { id: '6', at: '2026-11-17T08:05:00Z', eventType: 'test', ok: true, channel: 'openclaw-weixin' }
+    ]
+  });
+
+  state.settings.hubMode = 'local';
+  context.renderReportsSettings();
+  await flushMicrotasks();
+
+  assert.equal(els.reportsOpenClawHistoryEmpty.hidden, true);
+  assert.equal(els.reportsOpenClawHistoryList.hidden, false);
+  assert.equal(els.reportsOpenClawHistoryList.children.length, 5);
+  assert.equal(els.reportsOpenClawHistoryList.children[0].querySelector('.reports-openclaw-history-badge').textContent, 'OK');
+  assert.equal(els.reportsOpenClawHistoryList.children[0].querySelector('.reports-openclaw-history-type').textContent, 'Session done');
+  assert.equal(els.reportsOpenClawHistoryList.children[1].querySelector('.reports-openclaw-history-badge').textContent, 'Failed');
+  assert.match(
+    els.reportsOpenClawHistoryList.children[1].querySelector('.reports-openclaw-history-detail').textContent,
+    /privacy permissions/
+  );
+
+  // Dirty edit auto-saves before running test push
+  els.reportsOpenClawEnabledInput.checked = true;
+  await els.reportsOpenClawEnabledInput.trigger('change');
+  await els.reportsOpenClawTestPushButton.trigger('click');
+  assert.equal(savedIntegrationsPatches.length, 1);
+  assert.equal(testPushCalls.length, 1);
+  assert.equal(testPushCalls[0].message, MESSAGES.en['settings.reports.openclawTestPushMessage']);
+  assert.equal(els.reportsOpenClawStatusText.textContent, 'Test message sent to OpenClaw (openclaw-weixin)');
+
+  // Push Usage Now calls pushQueryToOpenClaw with current period
+  state.period = 'month';
+  await els.reportsOpenClawPushUsageButton.trigger('click');
+  assert.equal(queryPushCalls.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(queryPushCalls[0])), {
+    type: 'usage',
+    params: { period: 'month', groupBy: 'summary' },
+    includeAi: true
+  });
+  assert.equal(els.reportsOpenClawStatusText.textContent, 'Delivered to OpenClaw (openclaw-weixin)');
+
+  // Privacy/bridge error codes localize properly
+  for (const [code, key] of [
+    ['session_detail_disabled', 'settings.reports.errSessionDetailDisabled'],
+    ['conversation_text_disabled', 'settings.reports.errConversationTextDisabled'],
+    ['bridge_unavailable', 'settings.reports.errBridgeUnavailable']
+  ]) {
+    assert.equal(context.formatReportsError(code), MESSAGES.en[key]);
+  }
+});
+
+test('main-view quick push buttons respect OpenClaw enabled state, IPC guards, view params, and toast feedback', async () => {
+  const harness = createRendererReportsHarness();
+  const { els, state, tokenMonitor, context, queryPushCalls, flushNextTimer } = harness;
+
+  // Disabled initially -> quick push hidden and unavailable
+  state.settings.hubMode = 'local';
+  context.renderReportsSettings();
+  assert.equal(context.isOpenClawQuickPushAvailable(), false);
+  assert.equal(els.openClawQuickPushButton.hidden, true);
+  const disabledResult = await context.triggerOpenClawQuickPush({ type: 'usage' });
+  assert.equal(disabledResult.ok, false);
+  assert.equal(queryPushCalls.length, 0);
+
+  // Enable OpenClaw via background settings push
+  context.syncReportIntegrationsFromSettings({
+    hubMode: 'local',
+    reportIntegrations: { openclaw: { enabled: true, includeAiAnalysis: false, channel: 'openclaw-weixin' } }
+  });
+  assert.equal(context.isOpenClawQuickPushAvailable(), true);
+  assert.equal(els.openClawQuickPushButton.hidden, false);
+
+  // Home overview quick push
+  state.breakdown = 'home';
+  state.period = 'today';
+  context.syncOpenClawQuickPushButton();
+  await els.openClawQuickPushButton.trigger('click');
+  assert.equal(queryPushCalls.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(queryPushCalls[0])), {
+    type: 'usage',
+    params: { period: 'today', groupBy: 'summary' },
+    includeAi: false
+  });
+  assert.equal(els.openClawToast.hidden, false);
+  assert.equal(els.openClawToast.textContent, 'Sent to OpenClaw (openclaw-weixin)');
+  assert.equal(await flushNextTimer(), true);
+  assert.equal(els.openClawToast.hidden, true);
+
+  // Limits header quick push
+  state.breakdown = 'limits';
+  context.syncOpenClawQuickPushButton();
+  await els.openClawQuickPushButton.trigger('click');
+  assert.deepEqual(JSON.parse(JSON.stringify(queryPushCalls.at(-1))), {
+    type: 'limits',
+    params: {},
+    includeAi: false
+  });
+  assert.equal(await flushNextTimer(), true);
+
+  // Session detail header button
+  const detailBtn = context.createSessionDetailOpenClawPushButton({
+    client: 'codex',
+    sessionId: 'sess-123',
+    period: 'month'
+  });
+  harness.setQueryPushResult({ ok: false, error: 'session_detail_disabled' });
+  await detailBtn.trigger('click');
+  assert.deepEqual(JSON.parse(JSON.stringify(queryPushCalls.at(-1))), {
+    type: 'session_detail',
+    params: { client: 'codex', sessionId: 'sess-123', period: 'month' },
+    includeAi: false
+  });
+  assert.equal(els.openClawToast.hidden, false);
+  assert.match(els.openClawToast.textContent, /Session detail queries are disabled/);
+  assert.equal(await flushNextTimer(), true);
+
+  // iCloud hides quick push
+  state.settings.hubMode = 'icloud';
+  context.syncOpenClawQuickPushButton();
+  assert.equal(context.isOpenClawQuickPushAvailable(), false);
+  assert.equal(els.openClawQuickPushButton.hidden, true);
+
+  // Guardrail when preload helper pushQueryToOpenClaw is absent
+  state.settings.hubMode = 'local';
+  delete tokenMonitor.pushQueryToOpenClaw;
+  context.syncOpenClawQuickPushButton();
+  assert.equal(context.isOpenClawQuickPushAvailable(), false);
+  assert.equal(els.openClawQuickPushButton.hidden, true);
 });

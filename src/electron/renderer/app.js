@@ -605,11 +605,47 @@ Object.assign(els, {
   reportsOpenClawToInput: document.getElementById('reportsOpenClawToInput'),
   reportsOpenClawAgentIdInput: document.getElementById('reportsOpenClawAgentIdInput'),
   reportsOpenClawPushOnRolloverInput: document.getElementById('reportsOpenClawPushOnRolloverInput'),
+  reportsOpenClawEventSessionCompletedInput: document.getElementById('reportsOpenClawEventSessionCompletedInput'),
+  reportsOpenClawEventApprovalAlertsInput: document.getElementById('reportsOpenClawEventApprovalAlertsInput'),
+  reportsOpenClawEventQuotaAlertsInput: document.getElementById('reportsOpenClawEventQuotaAlertsInput'),
+  reportsOpenClawQuotaOptions: document.getElementById('reportsOpenClawQuotaOptions'),
+  reportsOpenClawQuotaThresholdInput: document.getElementById('reportsOpenClawQuotaThresholdInput'),
+  reportsOpenClawQuotaNotifyRecoveryInput: document.getElementById('reportsOpenClawQuotaNotifyRecoveryInput'),
+  reportsOpenClawEventServiceIncidentsInput: document.getElementById('reportsOpenClawEventServiceIncidentsInput'),
+  reportsOpenClawSessionToggle: document.getElementById('reportsOpenClawSessionToggle'),
+  reportsOpenClawSessionDetails: document.getElementById('reportsOpenClawSessionDetails'),
+  reportsOpenClawExcludeSubagentsInput: document.getElementById('reportsOpenClawExcludeSubagentsInput'),
+  reportsOpenClawExcludeBackgroundReviewInput: document.getElementById('reportsOpenClawExcludeBackgroundReviewInput'),
+  reportsOpenClawSessionIncludeDetailInput: document.getElementById('reportsOpenClawSessionIncludeDetailInput'),
+  reportsOpenClawSessionIncludeAiInput: document.getElementById('reportsOpenClawSessionIncludeAiInput'),
+  reportsOpenClawMinTurnTokensInput: document.getElementById('reportsOpenClawMinTurnTokensInput'),
+  reportsOpenClawMinTotalTokensInput: document.getElementById('reportsOpenClawMinTotalTokensInput'),
+  reportsOpenClawDebounceMsInput: document.getElementById('reportsOpenClawDebounceMsInput'),
+  reportsOpenClawCooldownMsInput: document.getElementById('reportsOpenClawCooldownMsInput'),
+  reportsOpenClawClientsInput: document.getElementById('reportsOpenClawClientsInput'),
+  reportsOpenClawAllowSessionDetailInput: document.getElementById('reportsOpenClawAllowSessionDetailInput'),
+  reportsOpenClawAllowConversationTextInput: document.getElementById('reportsOpenClawAllowConversationTextInput'),
+  reportsOpenClawLocalBridgeSection: document.getElementById('reportsOpenClawLocalBridgeSection'),
+  reportsOpenClawLocalBridgeEnabledInput: document.getElementById('reportsOpenClawLocalBridgeEnabledInput'),
+  reportsOpenClawLocalBridgePortInput: document.getElementById('reportsOpenClawLocalBridgePortInput'),
+  reportsOpenClawLocalBridgeEndpoint: document.getElementById('reportsOpenClawLocalBridgeEndpoint'),
+  reportsOpenClawLocalBridgeStatusText: document.getElementById('reportsOpenClawLocalBridgeStatusText'),
+  reportsOpenClawLocalBridgeCopyTokenButton: document.getElementById('reportsOpenClawLocalBridgeCopyTokenButton'),
+  reportsOpenClawLocalBridgeCopyMcpButton: document.getElementById('reportsOpenClawLocalBridgeCopyMcpButton'),
+  reportsOpenClawLocalBridgeRegenTokenButton: document.getElementById('reportsOpenClawLocalBridgeRegenTokenButton'),
   reportsOpenClawIncludeAiInput: document.getElementById('reportsOpenClawIncludeAiInput'),
   reportsOpenClawIncludeLimitsInput: document.getElementById('reportsOpenClawIncludeLimitsInput'),
   reportsOpenClawStatusText: document.getElementById('reportsOpenClawStatusText'),
   reportsOpenClawSaveButton: document.getElementById('reportsOpenClawSaveButton'),
+  reportsOpenClawTestPushButton: document.getElementById('reportsOpenClawTestPushButton'),
+  reportsOpenClawPushUsageButton: document.getElementById('reportsOpenClawPushUsageButton'),
   reportsOpenClawPushNowButton: document.getElementById('reportsOpenClawPushNowButton'),
+  reportsOpenClawHistorySection: document.getElementById('reportsOpenClawHistorySection'),
+  reportsOpenClawHistoryRefreshButton: document.getElementById('reportsOpenClawHistoryRefreshButton'),
+  reportsOpenClawHistoryEmpty: document.getElementById('reportsOpenClawHistoryEmpty'),
+  reportsOpenClawHistoryList: document.getElementById('reportsOpenClawHistoryList'),
+  openClawQuickPushButton: document.getElementById('openClawQuickPushButton'),
+  openClawToast: document.getElementById('openClawToast'),
   collectionCadenceInput: document.getElementById('collectionCadenceInput'),
   sessionUsageArchiveInput: document.getElementById('sessionUsageArchiveInput'),
   sessionUsageArchiveStatus: document.getElementById('sessionUsageArchiveStatus'),
@@ -5703,6 +5739,14 @@ function renderSessionDetail({ detail, loading, error, preserveScroll = false } 
   const max = Math.max(1, ...rows.map((row) => row.value));
   for (const row of rows) container.append(exchangeNode(row, max, expandedKeys?.has(row.key) === true));
   } finally {
+    if (
+      typeof isOpenClawQuickPushAvailable === 'function'
+      && isOpenClawQuickPushAvailable()
+      && state.openSession?.kind === 'session'
+      && typeof createSessionDetailOpenClawPushButton === 'function'
+    ) {
+      head.append(createSessionDetailOpenClawPushButton(state.openSession));
+    }
     rendererDom.reconcileChildren(els.sessionDetailHead, [...head.childNodes]);
     const rows = [...container.childNodes];
     if (realtime) rows.unshift(realtime);
@@ -5784,10 +5828,20 @@ function refreshSessionDetailHeading() {
     }
   }
   const head = els.sessionDetailHead;
-  if (state.openSession.headingSignature === sessionDetailHeadingSignature()) return;
+  const wantsOpenClawPush = typeof isOpenClawQuickPushAvailable === 'function'
+    && isOpenClawQuickPushAvailable()
+    && state.openSession?.kind === 'session'
+    && typeof createSessionDetailOpenClawPushButton === 'function';
+  const existingOpenClawPush = head?.querySelector?.('.detail-openclaw-push') || null;
+  const pushChanged = Boolean(existingOpenClawPush) !== wantsOpenClawPush;
+  if (!pushChanged && state.openSession.headingSignature === sessionDetailHeadingSignature()) return;
   // Retain the body, loading/error state and sort control. Unchanged headings
   // also retain their hover-reading motion through periodic stats updates.
-  rendererDom.reconcileChildren(head, [sessionDetailBackButton(), ...Array.from(head.children).slice(1)]);
+  const trailing = Array.from(head.children).slice(1).filter((node) => node !== existingOpenClawPush);
+  if (wantsOpenClawPush) {
+    trailing.push(existingOpenClawPush || createSessionDetailOpenClawPushButton(state.openSession));
+  }
+  rendererDom.reconcileChildren(head, [sessionDetailBackButton(), ...trailing]);
 }
 
 function sessionDetailBackLabel() {
@@ -7853,6 +7907,7 @@ function setRendererSettings(next) {
     allTimeSessions.ensure();
   }
   if (titlesChanged) refreshSessionDetailHeading();
+  if (typeof syncReportIntegrationsFromSettings === 'function') syncReportIntegrationsFromSettings(next);
 }
 
 function periodContentAvailability() {
@@ -7986,6 +8041,7 @@ function renderAppContent({ fromSearch = false } = {}) {
   syncSessionSearchChrome();
   if (state.breakdown !== 'session' || state.openSession) els.sessionPagerHost.classList.add('hidden');
   els.viewBackRow?.classList.toggle('hidden', state.breakdown === 'home' || !state.homeReturnVisible);
+  if (typeof syncOpenClawQuickPushButton === 'function') syncOpenClawQuickPushButton();
   // Leaving Home only CSS-hides the panel, so its heatmap scroller never sees a
   // pointerleave — dismiss the body-level tooltip here (renderHome covers rerenders).
   if (state.breakdown !== 'home') hideHomeActivityTooltip();
@@ -14694,11 +14750,82 @@ let reportsOpenClawEnvSnapshot = null;
 let reportsOpenClawEnvSyncKey = '';
 let reportsOpenClawEnvLoading = false;
 let reportsOpenClawEnvFetchSeq = 0;
+let reportsOpenClawSessionExpanded = false;
+let reportsOpenClawLocalBridgeSnapshot = null;
+let reportsOpenClawLocalBridgeSyncKey = '';
+let reportsOpenClawLocalBridgeFetchSeq = 0;
+let reportsOpenClawLocalBridgeBusy = false;
+let reportsOpenClawLocalBridgeCopiedTimer = null;
+let reportsOpenClawPushHistory = [];
+let reportsOpenClawPushHistorySyncKey = '';
+let reportsOpenClawPushHistoryFetchSeq = 0;
+let reportsOpenClawPushHistoryLoading = false;
+let openClawQuickPushBusy = false;
+let openClawToastTimer = null;
 let reportsOpenClawQrSession = null;
 let reportsOpenClawQrBusy = false;
 let reportsOpenClawQrPollToken = 0;
 let reportsOpenClawQrPollTimer = null;
 let reportsOpenClawQrCopiedTimer = null;
+
+function clampIntUi(value, min, max, fallback) {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(parsed)));
+}
+
+function parseClientsCsvUi(raw) {
+  const seen = new Set();
+  for (const part of String(raw || '').split(',')) {
+    const clean = part.trim().toLowerCase();
+    if (clean) seen.add(clean);
+    if (seen.size >= 64) break;
+  }
+  return Array.from(seen);
+}
+
+function sanitizeOpenClawSnapshot(oc = {}) {
+  if (!oc || typeof oc !== 'object') return {};
+  const {
+    hookToken: _hookToken,
+    weixinBotToken: _weixinBotToken,
+    botToken: _botToken,
+    token: _token,
+    secret: _secret,
+    ...safe
+  } = oc;
+  return safe;
+}
+
+function mergeOpenClawUiState(previous = {}, incoming = {}) {
+  const prev = sanitizeOpenClawSnapshot(previous);
+  const next = sanitizeOpenClawSnapshot(incoming);
+  return {
+    ...prev,
+    ...next,
+    events: { ...(prev.events || {}), ...(next.events || {}) },
+    sessionCompletion: { ...(prev.sessionCompletion || {}), ...(next.sessionCompletion || {}) },
+    quotaAlerts: { ...(prev.quotaAlerts || {}), ...(next.quotaAlerts || {}) },
+    queryPermissions: { ...(prev.queryPermissions || {}), ...(next.queryPermissions || {}) },
+    localBridge: { ...(prev.localBridge || {}), ...(next.localBridge || {}) }
+  };
+}
+
+function sanitizeLocalBridgeStatus(status) {
+  if (!status || typeof status !== 'object') return null;
+  return {
+    ok: status.ok !== false,
+    enabled: status.enabled === true,
+    running: status.running === true,
+    port: clampIntUi(status.port, 1, 65535, 17322),
+    endpointUrl: typeof status.endpointUrl === 'string' ? status.endpointUrl : '',
+    baseUrl: typeof status.baseUrl === 'string' ? status.baseUrl : '',
+    tokenConfigured: status.tokenConfigured === true,
+    maskedToken: typeof status.maskedToken === 'string' ? status.maskedToken : '',
+    error: typeof status.error === 'string' ? status.error : ''
+  };
+}
 
 function currentReportIntegrations() {
   if (reportsIntegrationsSnapshot && (state.settings?.hubMode || 'local') === 'client') {
@@ -14712,12 +14839,230 @@ function syncReportIntegrationsState(integrations) {
   const previous = reportsIntegrationsSnapshot || state.settings?.reportIntegrations || {};
   const next = {
     ai: integrations.ai ? { ...(previous.ai || {}), ...integrations.ai } : (previous.ai || {}),
-    openclaw: integrations.openclaw ? { ...(previous.openclaw || {}), ...integrations.openclaw } : (previous.openclaw || {}),
+    openclaw: integrations.openclaw
+      ? mergeOpenClawUiState(previous.openclaw || {}, integrations.openclaw)
+      : sanitizeOpenClawSnapshot(previous.openclaw || {}),
     lastPush: integrations.lastPush !== undefined ? integrations.lastPush : (previous.lastPush || null)
   };
   reportsIntegrationsSnapshot = next;
   if (state.settings && typeof state.settings === 'object') {
     state.settings = { ...state.settings, reportIntegrations: next };
+  }
+  if (Array.isArray(integrations.history)) {
+    reportsOpenClawPushHistory = integrations.history.slice(0, 5);
+    renderOpenClawPushHistory();
+  }
+  syncOpenClawQuickPushButton();
+}
+
+function syncReportIntegrationsFromSettings(next) {
+  const mode = next?.hubMode || 'local';
+  if (mode === 'client' || mode === 'icloud') return;
+  const incoming = next?.reportIntegrations;
+  if (!incoming || typeof incoming !== 'object') {
+    syncOpenClawQuickPushButton();
+    return;
+  }
+  const previous = reportsIntegrationsSnapshot || {};
+  reportsIntegrationsSnapshot = {
+    ai: (!reportsAiBusy && !reportsAiDirty && incoming.ai) ? incoming.ai : (previous.ai || incoming.ai || {}),
+    openclaw: (!reportsOpenClawBusy && !reportsOpenClawDirty && incoming.openclaw)
+      ? sanitizeOpenClawSnapshot(incoming.openclaw)
+      : sanitizeOpenClawSnapshot(previous.openclaw || incoming.openclaw || {}),
+    lastPush: incoming.lastPush !== undefined ? incoming.lastPush : (previous.lastPush || null)
+  };
+  syncOpenClawQuickPushButton();
+}
+
+function syncOpenClawPrivacyControls() {
+  const detailAllowed = els.reportsOpenClawAllowSessionDetailInput?.checked === true;
+  if (els.reportsOpenClawAllowConversationTextInput) {
+    els.reportsOpenClawAllowConversationTextInput.disabled = !detailAllowed;
+    if (!detailAllowed) {
+      els.reportsOpenClawAllowConversationTextInput.checked = false;
+    }
+  }
+}
+
+function renderOpenClawSessionSectionState() {
+  if (els.reportsOpenClawSessionToggle) {
+    els.reportsOpenClawSessionToggle.setAttribute('aria-expanded', String(reportsOpenClawSessionExpanded));
+    els.reportsOpenClawSessionToggle.classList?.toggle?.('is-expanded', reportsOpenClawSessionExpanded);
+  }
+  if (els.reportsOpenClawSessionDetails) {
+    els.reportsOpenClawSessionDetails.hidden = !reportsOpenClawSessionExpanded;
+    els.reportsOpenClawSessionDetails.inert = !reportsOpenClawSessionExpanded;
+    els.reportsOpenClawSessionDetails.classList?.toggle?.('hidden', !reportsOpenClawSessionExpanded);
+  }
+}
+
+function renderOpenClawLocalBridgeStatus() {
+  const mode = state.settings?.hubMode || 'local';
+  const isLocal = mode === 'local';
+  if (els.reportsOpenClawLocalBridgeSection) {
+    els.reportsOpenClawLocalBridgeSection.hidden = !isLocal;
+    els.reportsOpenClawLocalBridgeSection.inert = !isLocal;
+  }
+  if (!isLocal) return;
+  const oc = currentReportIntegrations()?.openclaw || {};
+  const bridge = reportsOpenClawLocalBridgeSnapshot;
+  const fallbackPort = clampIntUi(bridge?.port ?? oc?.localBridge?.port, 1, 65535, 17322);
+  const port = reportsOpenClawDirty && els.reportsOpenClawLocalBridgePortInput
+    ? clampIntUi(els.reportsOpenClawLocalBridgePortInput.value, 1, 65535, fallbackPort)
+    : fallbackPort;
+  const endpoint = (!reportsOpenClawDirty && bridge?.endpointUrl)
+    ? bridge.endpointUrl
+    : `http://127.0.0.1:${port}/api/mcp`;
+  if (els.reportsOpenClawLocalBridgeEndpoint) {
+    els.reportsOpenClawLocalBridgeEndpoint.textContent = endpoint;
+  }
+  if (els.reportsOpenClawLocalBridgeStatusText) {
+    const tokenLabel = bridge?.maskedToken
+      ? bridge.maskedToken
+      : (bridge?.tokenConfigured ? '••••' : t('settings.reports.openclawLocalBridgeNoToken'));
+    const baseText = bridge?.running
+      ? t('settings.reports.openclawLocalBridgeRunning', { token: tokenLabel })
+      : t('settings.reports.openclawLocalBridgeStopped', { token: tokenLabel });
+    els.reportsOpenClawLocalBridgeStatusText.textContent = bridge?.error
+      ? `${baseText} · ${formatReportsError(bridge.error, bridge.error)}`
+      : baseText;
+  }
+}
+
+async function refreshOpenClawLocalBridgeStatus(force = false) {
+  const mode = state.settings?.hubMode || 'local';
+  const syncKey = `${mode}`;
+  if (mode !== 'local') {
+    reportsOpenClawLocalBridgeSyncKey = syncKey;
+    renderOpenClawLocalBridgeStatus();
+    return;
+  }
+  if (typeof window.tokenMonitor?.getOpenClawLocalBridgeStatus !== 'function') {
+    renderOpenClawLocalBridgeStatus();
+    return;
+  }
+  if (!force && reportsOpenClawLocalBridgeSyncKey === syncKey && reportsOpenClawLocalBridgeSnapshot) return;
+  reportsOpenClawLocalBridgeSyncKey = syncKey;
+  const fetchSeq = ++reportsOpenClawLocalBridgeFetchSeq;
+  try {
+    const res = await window.tokenMonitor.getOpenClawLocalBridgeStatus();
+    if (fetchSeq !== reportsOpenClawLocalBridgeFetchSeq) return;
+    const sanitized = sanitizeLocalBridgeStatus(res);
+    if (sanitized) {
+      reportsOpenClawLocalBridgeSnapshot = sanitized;
+      if (!reportsOpenClawDirty && !reportsOpenClawBusy) {
+        if (els.reportsOpenClawLocalBridgeEnabledInput && typeof res?.enabled === 'boolean') {
+          els.reportsOpenClawLocalBridgeEnabledInput.checked = res.enabled === true;
+        }
+        if (els.reportsOpenClawLocalBridgePortInput && Number.isFinite(Number(res?.port)) && !els.reportsOpenClawLocalBridgePortInput.matches?.(':focus')) {
+          els.reportsOpenClawLocalBridgePortInput.value = String(sanitized.port);
+        }
+      }
+      renderOpenClawLocalBridgeStatus();
+      updateReportsActionButtons();
+    }
+  } catch (_) {}
+}
+
+function formatOpenClawEventTypeLabel(eventType) {
+  const key = `settings.reports.openclawEventType.${String(eventType || 'custom')}`;
+  const translated = t(key);
+  return translated === key ? String(eventType || 'custom') : translated;
+}
+
+function formatOpenClawHistoryTime(at) {
+  const raw = String(at || '').trim();
+  if (!raw) return '';
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(raw)) {
+    return raw.slice(5, 19).replace('T', ' ');
+  }
+  return raw.slice(0, 19);
+}
+
+function renderOpenClawPushHistory() {
+  const list = els.reportsOpenClawHistoryList;
+  const empty = els.reportsOpenClawHistoryEmpty;
+  if (!list && !empty) return;
+  const entries = Array.isArray(reportsOpenClawPushHistory) ? reportsOpenClawPushHistory.slice(0, 5) : [];
+  if (entries.length === 0) {
+    if (empty) empty.hidden = false;
+    if (list) {
+      list.hidden = true;
+      if (typeof list.replaceChildren === 'function') list.replaceChildren();
+      else list.textContent = '';
+    }
+    return;
+  }
+  if (empty) empty.hidden = true;
+  if (!list) return;
+  list.hidden = false;
+  if (typeof document?.createElement !== 'function') return;
+  const nodes = entries.map((entry) => {
+    const li = document.createElement('li');
+    li.className = 'reports-openclaw-history-item';
+    const top = document.createElement('div');
+    top.className = 'reports-openclaw-history-top';
+    const left = document.createElement('span');
+    left.className = 'reports-openclaw-history-left';
+    const badge = document.createElement('span');
+    const ok = entry?.ok === true;
+    badge.className = `reports-openclaw-history-badge ${ok ? 'is-ok' : 'is-fail'}`;
+    badge.textContent = ok ? t('settings.reports.openclawHistoryOk') : t('settings.reports.openclawHistoryFail');
+    const typeSpan = document.createElement('span');
+    typeSpan.className = 'reports-openclaw-history-type';
+    typeSpan.textContent = formatOpenClawEventTypeLabel(entry?.eventType);
+    left.append(badge, typeSpan);
+    const timeSpan = document.createElement('span');
+    timeSpan.className = 'reports-openclaw-history-time';
+    timeSpan.textContent = formatOpenClawHistoryTime(entry?.at);
+    top.append(left, timeSpan);
+    const detail = document.createElement('div');
+    detail.className = 'reports-openclaw-history-detail';
+    const detailText = ok
+      ? [entry?.channel || entry?.mode, entry?.summary].filter(Boolean).join(' · ')
+      : [entry?.error ? formatReportsError(entry.error, entry.error) : '', entry?.channel || entry?.mode].filter(Boolean).join(' · ');
+    detail.textContent = detailText;
+    li.append(top);
+    if (detailText) li.append(detail);
+    return li;
+  });
+  if (typeof list.replaceChildren === 'function') list.replaceChildren(...nodes);
+  else {
+    list.textContent = '';
+    for (const node of nodes) list.appendChild?.(node);
+  }
+}
+
+async function refreshOpenClawPushHistory(force = false) {
+  const mode = state.settings?.hubMode || 'local';
+  const syncKey = `${mode}|${String(state.settings?.hubUrl || '').trim()}`;
+  if (mode === 'icloud') return;
+  if (typeof window.tokenMonitor?.getOpenClawPushHistory !== 'function') {
+    renderOpenClawPushHistory();
+    return;
+  }
+  if (!force && reportsOpenClawPushHistorySyncKey === syncKey && reportsOpenClawPushHistoryLoading) return;
+  if (!force && reportsOpenClawPushHistorySyncKey === syncKey && reportsOpenClawPushHistory.length > 0) return;
+  reportsOpenClawPushHistorySyncKey = syncKey;
+  const fetchSeq = ++reportsOpenClawPushHistoryFetchSeq;
+  reportsOpenClawPushHistoryLoading = true;
+  if (els.reportsOpenClawHistoryRefreshButton) els.reportsOpenClawHistoryRefreshButton.disabled = true;
+  try {
+    const res = await window.tokenMonitor.getOpenClawPushHistory();
+    if (fetchSeq !== reportsOpenClawPushHistoryFetchSeq) return;
+    const rows = Array.isArray(res?.history) ? res.history : (Array.isArray(res) ? res : null);
+    if (rows) {
+      reportsOpenClawPushHistory = rows.slice(0, 5);
+      if (res?.lastPush) syncReportIntegrationsState({ lastPush: res.lastPush });
+      renderOpenClawPushHistory();
+      renderReportsSettingsStatusOnly();
+    }
+  } catch (_) {
+  } finally {
+    if (fetchSeq === reportsOpenClawPushHistoryFetchSeq) {
+      reportsOpenClawPushHistoryLoading = false;
+      updateReportsActionButtons();
+    }
   }
 }
 
@@ -14751,7 +15096,14 @@ function populateAiIntegrationFields(ai = {}, options = {}) {
 
 function populateOpenClawIntegrationFields(oc = {}, options = {}) {
   if (!options.force && (reportsOpenClawBusy || reportsOpenClawDirty)) return;
-  const src = oc || {};
+  const src = sanitizeOpenClawSnapshot(oc || {});
+  const events = src.events && typeof src.events === 'object' ? src.events : {};
+  const sc = src.sessionCompletion && typeof src.sessionCompletion === 'object' ? src.sessionCompletion : {};
+  const qa = src.quotaAlerts && typeof src.quotaAlerts === 'object' ? src.quotaAlerts : {};
+  const qp = src.queryPermissions && typeof src.queryPermissions === 'object' ? src.queryPermissions : {};
+  const lb = src.localBridge && typeof src.localBridge === 'object' ? src.localBridge : {};
+  const rollover = typeof events.rollover === 'boolean' ? events.rollover : src.pushOnRollover === true;
+
   if (els.reportsOpenClawEnabledInput) els.reportsOpenClawEnabledInput.checked = src.enabled === true;
   if (els.reportsOpenClawModeInput && (options.force || !els.reportsOpenClawModeInput.matches?.(':focus'))) {
     els.reportsOpenClawModeInput.value = src.mode || 'openclaw-agent';
@@ -14768,7 +15120,51 @@ function populateOpenClawIntegrationFields(oc = {}, options = {}) {
   if (els.reportsOpenClawAgentIdInput && (options.force || !els.reportsOpenClawAgentIdInput.matches?.(':focus'))) {
     els.reportsOpenClawAgentIdInput.value = src.agentId || 'main';
   }
-  if (els.reportsOpenClawPushOnRolloverInput) els.reportsOpenClawPushOnRolloverInput.checked = src.pushOnRollover === true;
+  if (els.reportsOpenClawPushOnRolloverInput) els.reportsOpenClawPushOnRolloverInput.checked = rollover;
+  if (els.reportsOpenClawEventSessionCompletedInput) els.reportsOpenClawEventSessionCompletedInput.checked = events.sessionCompleted === true;
+  if (els.reportsOpenClawEventApprovalAlertsInput) els.reportsOpenClawEventApprovalAlertsInput.checked = events.approvalAlerts === true;
+  if (els.reportsOpenClawEventQuotaAlertsInput) els.reportsOpenClawEventQuotaAlertsInput.checked = events.quotaAlerts === true;
+  if (els.reportsOpenClawEventServiceIncidentsInput) els.reportsOpenClawEventServiceIncidentsInput.checked = events.serviceIncidents === true;
+
+  if (els.reportsOpenClawQuotaThresholdInput && (options.force || !els.reportsOpenClawQuotaThresholdInput.matches?.(':focus'))) {
+    els.reportsOpenClawQuotaThresholdInput.value = String(clampIntUi(qa.thresholdPercent, 1, 99, 20));
+  }
+  if (els.reportsOpenClawQuotaNotifyRecoveryInput) {
+    els.reportsOpenClawQuotaNotifyRecoveryInput.checked = qa.notifyRecovery !== false;
+  }
+
+  if (els.reportsOpenClawExcludeSubagentsInput) els.reportsOpenClawExcludeSubagentsInput.checked = sc.excludeSubagents !== false;
+  if (els.reportsOpenClawExcludeBackgroundReviewInput) els.reportsOpenClawExcludeBackgroundReviewInput.checked = sc.excludeBackgroundReview !== false;
+  if (els.reportsOpenClawSessionIncludeDetailInput) els.reportsOpenClawSessionIncludeDetailInput.checked = sc.includeDetailSummary === true;
+  if (els.reportsOpenClawSessionIncludeAiInput) els.reportsOpenClawSessionIncludeAiInput.checked = sc.includeAiSummary === true;
+  if (els.reportsOpenClawMinTurnTokensInput && (options.force || !els.reportsOpenClawMinTurnTokensInput.matches?.(':focus'))) {
+    els.reportsOpenClawMinTurnTokensInput.value = String(clampIntUi(sc.minTurnTokens, 0, Number.MAX_SAFE_INTEGER, 0));
+  }
+  if (els.reportsOpenClawMinTotalTokensInput && (options.force || !els.reportsOpenClawMinTotalTokensInput.matches?.(':focus'))) {
+    els.reportsOpenClawMinTotalTokensInput.value = String(clampIntUi(sc.minTotalTokens, 0, Number.MAX_SAFE_INTEGER, 0));
+  }
+  if (els.reportsOpenClawDebounceMsInput && (options.force || !els.reportsOpenClawDebounceMsInput.matches?.(':focus'))) {
+    els.reportsOpenClawDebounceMsInput.value = String(clampIntUi(sc.debounceMs, 0, 600000, 2500));
+  }
+  if (els.reportsOpenClawCooldownMsInput && (options.force || !els.reportsOpenClawCooldownMsInput.matches?.(':focus'))) {
+    els.reportsOpenClawCooldownMsInput.value = String(clampIntUi(sc.cooldownMs, 0, 86400000, 0));
+  }
+  if (els.reportsOpenClawClientsInput && (options.force || !els.reportsOpenClawClientsInput.matches?.(':focus'))) {
+    els.reportsOpenClawClientsInput.value = Array.isArray(sc.clients) ? sc.clients.join(', ') : '';
+  }
+
+  const allowDetail = qp.allowSessionDetail === true;
+  if (els.reportsOpenClawAllowSessionDetailInput) els.reportsOpenClawAllowSessionDetailInput.checked = allowDetail;
+  if (els.reportsOpenClawAllowConversationTextInput) {
+    els.reportsOpenClawAllowConversationTextInput.checked = allowDetail && qp.allowConversationText === true;
+  }
+  syncOpenClawPrivacyControls();
+
+  if (els.reportsOpenClawLocalBridgeEnabledInput) els.reportsOpenClawLocalBridgeEnabledInput.checked = lb.enabled === true;
+  if (els.reportsOpenClawLocalBridgePortInput && (options.force || !els.reportsOpenClawLocalBridgePortInput.matches?.(':focus'))) {
+    els.reportsOpenClawLocalBridgePortInput.value = String(clampIntUi(lb.port, 1, 65535, 17322));
+  }
+
   if (els.reportsOpenClawIncludeAiInput) els.reportsOpenClawIncludeAiInput.checked = src.includeAiAnalysis !== false;
   if (els.reportsOpenClawIncludeLimitsInput) els.reportsOpenClawIncludeLimitsInput.checked = src.includeLimits !== false;
   if (els.reportsOpenClawHookTokenInput) {
@@ -14777,6 +15173,8 @@ function populateOpenClawIntegrationFields(oc = {}, options = {}) {
       : t('settings.reports.secretPlaceholder');
   }
   if (els.reportsOpenClawClearTokenButton) els.reportsOpenClawClearTokenButton.hidden = src.hookTokenConfigured !== true;
+  renderOpenClawLocalBridgeStatus();
+  syncOpenClawQuickPushButton();
 }
 
 function populateIntegrationsFields(integrations, options = {}) {
@@ -14812,7 +15210,7 @@ function validateAiConfigForSave(ai = {}) {
 async function refreshReportIntegrations(force = false) {
   const mode = state.settings?.hubMode || 'local';
   const syncKey = `${mode}|${String(state.settings?.hubUrl || '').trim()}`;
-  if (mode !== 'host' && mode !== 'client') {
+  if (mode === 'icloud') {
     reportsIntegrationsSyncKey = syncKey;
     return;
   }
@@ -14823,7 +15221,12 @@ async function refreshReportIntegrations(force = false) {
     const res = await window.tokenMonitor?.getReportIntegrations?.();
     if (fetchSeq !== reportsIntegrationsFetchSeq) return;
     if (res?.ok) {
-      syncReportIntegrationsState({ ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null });
+      syncReportIntegrationsState({
+        ai: res.ai,
+        openclaw: res.openclaw,
+        lastPush: res.lastPush || null,
+        history: res.history
+      });
       populateIntegrationsFields(reportsIntegrationsSnapshot);
       renderReportsSettingsStatusOnly();
     }
@@ -14977,7 +15380,7 @@ function renderReportsSettingsStatusOnly() {
   const integrations = currentReportIntegrations();
   const lastPush = integrations?.lastPush || null;
   const mode = state.settings?.hubMode || 'local';
-  const hubCapable = mode === 'host' || mode === 'client';
+  const isLocal = mode === 'local';
   if (els.reportsAiStatusText) {
     els.reportsAiStatusText.textContent = reportsAiStatusFeedback || '';
   }
@@ -14988,7 +15391,7 @@ function renderReportsSettingsStatusOnly() {
       els.reportsOpenClawStatusText.textContent = lastPush.ok
         ? t('settings.reports.openclawLastPushOk', { at: String(lastPush.at).slice(0, 19).replace('T', ' ') })
         : t('settings.reports.openclawLastPushFail', { error: lastPush.message || lastPush.error || 'failed' });
-    } else if (!hubCapable) {
+    } else if (isLocal) {
       els.reportsOpenClawStatusText.textContent = t('settings.reports.openclawLocalModeHint');
     } else {
       els.reportsOpenClawStatusText.textContent = '';
@@ -15012,6 +15415,9 @@ function formatReportsError(errorCode, fallbackMessage = '') {
     return t('settings.reports.errOpenClawMissingTarget');
   }
   if (errorCode === 'openclaw_missing_token') return t('settings.reports.errOpenClawMissingToken');
+  if (errorCode === 'session_detail_disabled') return t('settings.reports.errSessionDetailDisabled');
+  if (errorCode === 'conversation_text_disabled') return t('settings.reports.errConversationTextDisabled');
+  if (errorCode === 'bridge_unavailable') return t('settings.reports.errBridgeUnavailable');
   return String(fallbackMessage || errorCode || t('settings.reports.generateFailed'));
 }
 
@@ -15019,8 +15425,14 @@ function updateReportsActionButtons() {
   const mode = state.settings?.hubMode || 'local';
   const isHost = mode === 'host';
   const isClient = mode === 'client';
+  const isLocal = mode === 'local';
   const hubCapable = isHost || isClient;
+  const openClawCapable = mode !== 'icloud';
   const qrActive = Boolean(reportsOpenClawQrSession && reportsOpenClawQrSession.status !== 'confirmed' && reportsOpenClawQrSession.status !== 'binded_redirect');
+  const hasTestPush = typeof window !== 'undefined' && typeof window.tokenMonitor?.testOpenClawPush === 'function';
+  const hasQueryPush = typeof window !== 'undefined' && typeof window.tokenMonitor?.pushQueryToOpenClaw === 'function';
+  const hasCopyBridge = typeof window !== 'undefined' && typeof window.tokenMonitor?.copyLocalBridgeConfig === 'function';
+  const hasRegenBridge = typeof window !== 'undefined' && typeof window.tokenMonitor?.regenerateOpenClawLocalBridgeToken === 'function';
 
   if (els.reportsEnableHostButton) {
     els.reportsEnableHostButton.disabled = reportsGenerating || reportsAiBusy || reportsOpenClawBusy || reportsOpenClawQrBusy;
@@ -15039,18 +15451,38 @@ function updateReportsActionButtons() {
       ? t('settings.reports.aiAnalyzing')
       : t('settings.reports.aiAnalyzeNow');
   }
-  if (els.reportsOpenClawSaveButton) els.reportsOpenClawSaveButton.disabled = reportsOpenClawBusy || !hubCapable;
+  if (els.reportsOpenClawSaveButton) {
+    els.reportsOpenClawSaveButton.disabled = reportsOpenClawBusy || !openClawCapable;
+  }
+  if (els.reportsOpenClawTestPushButton) {
+    els.reportsOpenClawTestPushButton.disabled = reportsOpenClawBusy || !openClawCapable || !hasTestPush;
+  }
+  if (els.reportsOpenClawPushUsageButton) {
+    els.reportsOpenClawPushUsageButton.disabled = reportsOpenClawBusy || !openClawCapable || !hasQueryPush;
+  }
   if (els.reportsOpenClawPushNowButton) {
-    els.reportsOpenClawPushNowButton.disabled = reportsOpenClawBusy || !hubCapable;
+    els.reportsOpenClawPushNowButton.disabled = reportsOpenClawBusy || !openClawCapable;
     els.reportsOpenClawPushNowButton.textContent = reportsOpenClawBusy
       ? t('settings.reports.openclawPushing')
       : t('settings.reports.openclawPushNow');
   }
+  if (els.reportsOpenClawHistoryRefreshButton) {
+    els.reportsOpenClawHistoryRefreshButton.disabled = reportsOpenClawPushHistoryLoading || !openClawCapable;
+  }
+  if (els.reportsOpenClawLocalBridgeCopyTokenButton) {
+    els.reportsOpenClawLocalBridgeCopyTokenButton.disabled = reportsOpenClawBusy || reportsOpenClawLocalBridgeBusy || !isLocal || !hasCopyBridge || reportsOpenClawLocalBridgeSnapshot?.tokenConfigured === false;
+  }
+  if (els.reportsOpenClawLocalBridgeCopyMcpButton) {
+    els.reportsOpenClawLocalBridgeCopyMcpButton.disabled = reportsOpenClawBusy || reportsOpenClawLocalBridgeBusy || !isLocal || !hasCopyBridge;
+  }
+  if (els.reportsOpenClawLocalBridgeRegenTokenButton) {
+    els.reportsOpenClawLocalBridgeRegenTokenButton.disabled = reportsOpenClawBusy || reportsOpenClawLocalBridgeBusy || !isLocal || !hasRegenBridge;
+  }
   if (els.reportsOpenClawQrScanButton) {
-    els.reportsOpenClawQrScanButton.disabled = reportsOpenClawQrBusy || reportsOpenClawBusy || mode === 'icloud';
+    els.reportsOpenClawQrScanButton.disabled = reportsOpenClawQrBusy || reportsOpenClawBusy || !openClawCapable;
   }
   if (els.reportsOpenClawProvisionButton) {
-    els.reportsOpenClawProvisionButton.disabled = reportsOpenClawQrBusy || reportsOpenClawBusy || mode === 'icloud';
+    els.reportsOpenClawProvisionButton.disabled = reportsOpenClawQrBusy || reportsOpenClawBusy || !openClawCapable;
   }
   if (els.reportsOpenClawQrRefreshButton) els.reportsOpenClawQrRefreshButton.disabled = reportsOpenClawQrBusy;
   if (els.reportsOpenClawQrVerifyButton) els.reportsOpenClawQrVerifyButton.disabled = reportsOpenClawQrBusy || !qrActive;
@@ -15061,6 +15493,7 @@ function renderReportsSettings() {
   const mode = state.settings?.hubMode || 'local';
   const isHost = mode === 'host';
   const isClient = mode === 'client';
+  const isLocal = mode === 'local';
   const hubCapable = isHost || isClient;
   const isIcloud = mode === 'icloud';
   const syncKey = `${mode}|${String(state.settings?.hubUrl || '').trim()}`;
@@ -15070,6 +15503,12 @@ function renderReportsSettings() {
     reportsOpenClawDirty = false;
     reportsIntegrationsSnapshot = null;
     reportsIntegrationsFetchSeq += 1;
+    reportsOpenClawLocalBridgeSyncKey = '';
+    reportsOpenClawLocalBridgeSnapshot = null;
+    reportsOpenClawLocalBridgeFetchSeq += 1;
+    reportsOpenClawPushHistorySyncKey = '';
+    reportsOpenClawPushHistory = [];
+    reportsOpenClawPushHistoryFetchSeq += 1;
     cancelOpenClawQrIfActive();
   }
 
@@ -15128,28 +15567,34 @@ function renderReportsSettings() {
     els.reportsOpenClawPanel.hidden = isIcloud;
     els.reportsOpenClawPanel.inert = isIcloud;
   }
-  if (hubCapable) {
-    if (isHost && state.settings?.reportIntegrations) {
+  renderOpenClawSessionSectionState();
+  if (!isIcloud) {
+    if ((isHost || isLocal) && state.settings?.reportIntegrations) {
       const prev = reportsIntegrationsSnapshot || {};
       const incoming = state.settings.reportIntegrations;
       reportsIntegrationsSnapshot = {
         ai: (!reportsAiBusy && !reportsAiDirty && incoming.ai) ? incoming.ai : (prev.ai || incoming.ai),
-        openclaw: (!reportsOpenClawBusy && !reportsOpenClawDirty && incoming.openclaw) ? incoming.openclaw : (prev.openclaw || incoming.openclaw),
+        openclaw: (!reportsOpenClawBusy && !reportsOpenClawDirty && incoming.openclaw)
+          ? sanitizeOpenClawSnapshot(incoming.openclaw)
+          : sanitizeOpenClawSnapshot(prev.openclaw || incoming.openclaw),
         lastPush: prev.lastPush || incoming.lastPush || null
       };
     }
     populateIntegrationsFields(currentReportIntegrations());
     void refreshReportIntegrations(false);
-  } else if (!isIcloud && state.settings?.reportIntegrations && !reportsOpenClawBusy && !reportsOpenClawDirty) {
-    populateOpenClawIntegrationFields(state.settings.reportIntegrations.openclaw || {});
-  }
-  if (!isIcloud) {
     void refreshOpenClawEnv(false);
+    void refreshOpenClawPushHistory(false);
+    if (isLocal) {
+      void refreshOpenClawLocalBridgeStatus(false);
+    }
   }
+  renderOpenClawLocalBridgeStatus();
+  renderOpenClawPushHistory();
   updateReportsActionButtons();
   renderReportsSettingsStatusOnly();
   renderOpenClawEnvSummary();
   renderOpenClawQrState();
+  syncOpenClawQuickPushButton();
 }
 
 for (const [elKey, settingKey, defaultValue] of [
@@ -15179,8 +15624,11 @@ els.reportsEnableHostButton?.addEventListener('click', async () => {
     await saveSettings({ hubMode: 'host' });
     reportsIntegrationsSyncKey = '';
     reportsOpenClawEnvSyncKey = '';
+    reportsOpenClawLocalBridgeSyncKey = '';
+    reportsOpenClawPushHistorySyncKey = '';
     void refreshReportIntegrations(true);
     void refreshOpenClawEnv(true);
+    void refreshOpenClawPushHistory(true);
   } catch (error) {
     reportsStatusFeedback = {
       kind: 'error',
@@ -15270,12 +15718,37 @@ for (const elKey of [
   'reportsOpenClawToInput',
   'reportsOpenClawAgentIdInput',
   'reportsOpenClawPushOnRolloverInput',
+  'reportsOpenClawEventSessionCompletedInput',
+  'reportsOpenClawEventApprovalAlertsInput',
+  'reportsOpenClawEventQuotaAlertsInput',
+  'reportsOpenClawQuotaThresholdInput',
+  'reportsOpenClawQuotaNotifyRecoveryInput',
+  'reportsOpenClawEventServiceIncidentsInput',
+  'reportsOpenClawExcludeSubagentsInput',
+  'reportsOpenClawExcludeBackgroundReviewInput',
+  'reportsOpenClawSessionIncludeDetailInput',
+  'reportsOpenClawSessionIncludeAiInput',
+  'reportsOpenClawMinTurnTokensInput',
+  'reportsOpenClawMinTotalTokensInput',
+  'reportsOpenClawDebounceMsInput',
+  'reportsOpenClawCooldownMsInput',
+  'reportsOpenClawClientsInput',
+  'reportsOpenClawAllowSessionDetailInput',
+  'reportsOpenClawAllowConversationTextInput',
+  'reportsOpenClawLocalBridgeEnabledInput',
+  'reportsOpenClawLocalBridgePortInput',
   'reportsOpenClawIncludeAiInput',
   'reportsOpenClawIncludeLimitsInput'
 ]) {
   const markOcDirty = () => {
     if (reportsOpenClawBusy) return;
     reportsOpenClawDirty = true;
+    if (elKey === 'reportsOpenClawAllowSessionDetailInput') {
+      syncOpenClawPrivacyControls();
+    }
+    if (elKey === 'reportsOpenClawLocalBridgePortInput') {
+      renderOpenClawLocalBridgeStatus();
+    }
     if (reportsOpenClawStatusFeedback) {
       reportsOpenClawStatusFeedback = null;
       renderReportsSettingsStatusOnly();
@@ -15284,6 +15757,11 @@ for (const elKey of [
   els[elKey]?.addEventListener('input', markOcDirty);
   els[elKey]?.addEventListener('change', markOcDirty);
 }
+
+els.reportsOpenClawSessionToggle?.addEventListener('click', () => {
+  reportsOpenClawSessionExpanded = !reportsOpenClawSessionExpanded;
+  renderOpenClawSessionSectionState();
+});
 
 function collectAiIntegrationPatch(options = {}) {
   const apiKeyRaw = String(els.reportsAiApiKeyInput?.value || '').trim();
@@ -15303,6 +15781,9 @@ function collectAiIntegrationPatch(options = {}) {
 
 function collectOpenClawIntegrationPatch(options = {}) {
   const tokenRaw = String(els.reportsOpenClawHookTokenInput?.value || '').trim();
+  const rollover = els.reportsOpenClawPushOnRolloverInput?.checked === true;
+  const allowSessionDetail = els.reportsOpenClawAllowSessionDetailInput?.checked === true;
+  const allowConversationText = allowSessionDetail && els.reportsOpenClawAllowConversationTextInput?.checked === true;
   return {
     openclaw: {
       enabled: els.reportsOpenClawEnabledInput?.checked === true,
@@ -15311,9 +15792,39 @@ function collectOpenClawIntegrationPatch(options = {}) {
       channel: String(els.reportsOpenClawChannelInput?.value || '').trim() || 'openclaw-weixin',
       to: String(els.reportsOpenClawToInput?.value || '').trim(),
       agentId: String(els.reportsOpenClawAgentIdInput?.value || '').trim() || 'main',
-      pushOnRollover: els.reportsOpenClawPushOnRolloverInput?.checked === true,
+      pushOnRollover: rollover,
       includeAiAnalysis: els.reportsOpenClawIncludeAiInput?.checked !== false,
       includeLimits: els.reportsOpenClawIncludeLimitsInput?.checked !== false,
+      events: {
+        rollover,
+        sessionCompleted: els.reportsOpenClawEventSessionCompletedInput?.checked === true,
+        approvalAlerts: els.reportsOpenClawEventApprovalAlertsInput?.checked === true,
+        quotaAlerts: els.reportsOpenClawEventQuotaAlertsInput?.checked === true,
+        serviceIncidents: els.reportsOpenClawEventServiceIncidentsInput?.checked === true
+      },
+      sessionCompletion: {
+        clients: parseClientsCsvUi(els.reportsOpenClawClientsInput?.value),
+        excludeSubagents: els.reportsOpenClawExcludeSubagentsInput?.checked !== false,
+        excludeBackgroundReview: els.reportsOpenClawExcludeBackgroundReviewInput?.checked !== false,
+        minTurnTokens: clampIntUi(els.reportsOpenClawMinTurnTokensInput?.value, 0, Number.MAX_SAFE_INTEGER, 0),
+        minTotalTokens: clampIntUi(els.reportsOpenClawMinTotalTokensInput?.value, 0, Number.MAX_SAFE_INTEGER, 0),
+        debounceMs: clampIntUi(els.reportsOpenClawDebounceMsInput?.value, 0, 600000, 2500),
+        cooldownMs: clampIntUi(els.reportsOpenClawCooldownMsInput?.value, 0, 86400000, 0),
+        includeDetailSummary: els.reportsOpenClawSessionIncludeDetailInput?.checked === true,
+        includeAiSummary: els.reportsOpenClawSessionIncludeAiInput?.checked === true
+      },
+      quotaAlerts: {
+        thresholdPercent: clampIntUi(els.reportsOpenClawQuotaThresholdInput?.value, 1, 99, 20),
+        notifyRecovery: els.reportsOpenClawQuotaNotifyRecoveryInput?.checked !== false
+      },
+      queryPermissions: {
+        allowSessionDetail,
+        allowConversationText
+      },
+      localBridge: {
+        enabled: els.reportsOpenClawLocalBridgeEnabledInput?.checked === true,
+        port: clampIntUi(els.reportsOpenClawLocalBridgePortInput?.value, 1, 65535, 17322)
+      },
       ...(options.clearHookToken ? { clearHookToken: true } : tokenRaw ? { hookToken: tokenRaw } : {})
     }
   };
@@ -15337,6 +15848,23 @@ async function saveAiIntegrationsFromForm(options = {}) {
     syncReportIntegrationsState({ ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null });
     if (els.reportsAiApiKeyInput) els.reportsAiApiKeyInput.value = '';
     populateAiIntegrationFields(reportsIntegrationsSnapshot.ai, { force: true });
+    return { ok: true, res };
+  }
+  return { ok: false, res };
+}
+
+async function saveOpenClawIntegrationsFromForm(options = {}) {
+  const patch = collectOpenClawIntegrationPatch(options);
+  reportsIntegrationsFetchSeq += 1;
+  const res = await window.tokenMonitor?.saveReportIntegrations?.(patch);
+  if (res?.ok) {
+    reportsOpenClawDirty = false;
+    syncReportIntegrationsState({ ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null });
+    if (els.reportsOpenClawHookTokenInput) els.reportsOpenClawHookTokenInput.value = '';
+    populateOpenClawIntegrationFields(reportsIntegrationsSnapshot.openclaw, { force: true });
+    if ((state.settings?.hubMode || 'local') === 'local') {
+      void refreshOpenClawLocalBridgeStatus(true);
+    }
     return { ok: true, res };
   }
   return { ok: false, res };
@@ -15450,22 +15978,16 @@ els.reportsAiAnalyzeNowButton?.addEventListener('click', async () => {
 
 els.reportsOpenClawSaveButton?.addEventListener('click', async () => {
   if (reportsOpenClawBusy) return;
-  const patch = collectOpenClawIntegrationPatch();
   reportsOpenClawBusy = true;
   reportsOpenClawStatusFeedback = null;
   updateReportsActionButtons();
   renderReportsSettingsStatusOnly();
   try {
-    reportsIntegrationsFetchSeq += 1;
-    const res = await window.tokenMonitor?.saveReportIntegrations?.(patch);
-    if (res?.ok) {
-      reportsOpenClawDirty = false;
-      syncReportIntegrationsState({ ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null });
-      if (els.reportsOpenClawHookTokenInput) els.reportsOpenClawHookTokenInput.value = '';
-      populateOpenClawIntegrationFields(reportsIntegrationsSnapshot.openclaw, { force: true });
+    const saved = await saveOpenClawIntegrationsFromForm();
+    if (saved.ok) {
       reportsOpenClawStatusFeedback = t('settings.reports.openclawSaved');
     } else {
-      reportsOpenClawStatusFeedback = formatReportsError(res?.error, res?.message);
+      reportsOpenClawStatusFeedback = formatReportsError(saved.res?.error, saved.res?.message);
     }
   } catch (error) {
     reportsOpenClawStatusFeedback = formatReportsError(error?.code || error?.message, error?.message);
@@ -15478,22 +16000,16 @@ els.reportsOpenClawSaveButton?.addEventListener('click', async () => {
 
 els.reportsOpenClawClearTokenButton?.addEventListener('click', async () => {
   if (reportsOpenClawBusy) return;
-  const patch = collectOpenClawIntegrationPatch({ clearHookToken: true });
   reportsOpenClawBusy = true;
   reportsOpenClawStatusFeedback = null;
   updateReportsActionButtons();
   renderReportsSettingsStatusOnly();
   try {
-    reportsIntegrationsFetchSeq += 1;
-    const res = await window.tokenMonitor?.saveReportIntegrations?.(patch);
-    if (res?.ok) {
-      reportsOpenClawDirty = false;
-      syncReportIntegrationsState({ ai: res.ai, openclaw: res.openclaw, lastPush: res.lastPush || null });
-      if (els.reportsOpenClawHookTokenInput) els.reportsOpenClawHookTokenInput.value = '';
-      populateOpenClawIntegrationFields(reportsIntegrationsSnapshot.openclaw, { force: true });
+    const saved = await saveOpenClawIntegrationsFromForm({ clearHookToken: true });
+    if (saved.ok) {
       reportsOpenClawStatusFeedback = t('settings.reports.openclawSaved');
     } else {
-      reportsOpenClawStatusFeedback = formatReportsError(res?.error, res?.message);
+      reportsOpenClawStatusFeedback = formatReportsError(saved.res?.error, saved.res?.message);
     }
   } catch (error) {
     reportsOpenClawStatusFeedback = formatReportsError(error?.code || error?.message, error?.message);
@@ -15504,6 +16020,86 @@ els.reportsOpenClawClearTokenButton?.addEventListener('click', async () => {
   }
 });
 
+els.reportsOpenClawTestPushButton?.addEventListener('click', async () => {
+  if (reportsOpenClawBusy || typeof window.tokenMonitor?.testOpenClawPush !== 'function') return;
+  reportsOpenClawBusy = true;
+  reportsOpenClawStatusFeedback = null;
+  updateReportsActionButtons();
+  renderReportsSettingsStatusOnly();
+  try {
+    if (reportsOpenClawDirty) {
+      const saved = await saveOpenClawIntegrationsFromForm();
+      if (!saved.ok) {
+        reportsOpenClawStatusFeedback = formatReportsError(saved.res?.error, saved.res?.message);
+        return;
+      }
+    }
+    const res = await window.tokenMonitor.testOpenClawPush({
+      message: t('settings.reports.openclawTestPushMessage')
+    });
+    if (res?.lastPush) syncReportIntegrationsState({ lastPush: res.lastPush });
+    if (res?.entry) {
+      reportsOpenClawPushHistory = [res.entry, ...reportsOpenClawPushHistory].slice(0, 5);
+      renderOpenClawPushHistory();
+    }
+    if (res?.ok) {
+      reportsOpenClawStatusFeedback = t('settings.reports.openclawTestPushOk', {
+        channel: res.channel || currentReportIntegrations()?.openclaw?.channel || 'openclaw-weixin'
+      });
+    } else {
+      reportsOpenClawStatusFeedback = formatReportsError(res?.error, res?.message);
+    }
+  } catch (error) {
+    reportsOpenClawStatusFeedback = formatReportsError(error?.code || error?.message, error?.message);
+  } finally {
+    reportsOpenClawBusy = false;
+    updateReportsActionButtons();
+    renderReportsSettingsStatusOnly();
+    void refreshOpenClawPushHistory(true);
+  }
+});
+
+els.reportsOpenClawPushUsageButton?.addEventListener('click', async () => {
+  if (reportsOpenClawBusy || typeof window.tokenMonitor?.pushQueryToOpenClaw !== 'function') return;
+  reportsOpenClawBusy = true;
+  reportsOpenClawStatusFeedback = null;
+  updateReportsActionButtons();
+  renderReportsSettingsStatusOnly();
+  try {
+    if (reportsOpenClawDirty) {
+      const saved = await saveOpenClawIntegrationsFromForm();
+      if (!saved.ok) {
+        reportsOpenClawStatusFeedback = formatReportsError(saved.res?.error, saved.res?.message);
+        return;
+      }
+    }
+    const res = await window.tokenMonitor.pushQueryToOpenClaw({
+      type: 'usage',
+      params: { period: state.period || 'today', groupBy: 'summary' },
+      includeAi: els.reportsOpenClawIncludeAiInput?.checked !== false
+    });
+    if (res?.lastPush) syncReportIntegrationsState({ lastPush: res.lastPush });
+    if (res?.entry) {
+      reportsOpenClawPushHistory = [res.entry, ...reportsOpenClawPushHistory].slice(0, 5);
+      renderOpenClawPushHistory();
+    }
+    if (res?.ok) {
+      reportsOpenClawStatusFeedback = t('settings.reports.openclawPushed', {
+        channel: res.channel || currentReportIntegrations()?.openclaw?.channel || 'openclaw-weixin'
+      });
+    } else {
+      reportsOpenClawStatusFeedback = formatReportsError(res?.error, res?.message);
+    }
+  } catch (error) {
+    reportsOpenClawStatusFeedback = formatReportsError(error?.code || error?.message, error?.message);
+  } finally {
+    reportsOpenClawBusy = false;
+    updateReportsActionButtons();
+    renderReportsSettingsStatusOnly();
+    void refreshOpenClawPushHistory(true);
+  }
+});
+
 els.reportsOpenClawPushNowButton?.addEventListener('click', async () => {
   if (reportsOpenClawBusy) return;
   reportsOpenClawBusy = true;
@@ -15511,9 +16107,20 @@ els.reportsOpenClawPushNowButton?.addEventListener('click', async () => {
   updateReportsActionButtons();
   renderReportsSettingsStatusOnly();
   try {
+    if (reportsOpenClawDirty) {
+      const saved = await saveOpenClawIntegrationsFromForm();
+      if (!saved.ok) {
+        reportsOpenClawStatusFeedback = formatReportsError(saved.res?.error, saved.res?.message);
+        return;
+      }
+    }
     const res = await window.tokenMonitor?.pushReportToOpenClaw?.({ target: 'openclaw', granularity: 'daily', periodKey: 'latest' });
     if (res?.lastPush) {
       syncReportIntegrationsState({ lastPush: res.lastPush });
+    }
+    if (res?.entry) {
+      reportsOpenClawPushHistory = [res.entry, ...reportsOpenClawPushHistory].slice(0, 5);
+      renderOpenClawPushHistory();
     }
     if (res?.ok) {
       reportsOpenClawStatusFeedback = t('settings.reports.openclawPushed', { channel: res.channel || 'openclaw-weixin' });
@@ -15526,8 +16133,223 @@ els.reportsOpenClawPushNowButton?.addEventListener('click', async () => {
     reportsOpenClawBusy = false;
     updateReportsActionButtons();
     renderReportsSettingsStatusOnly();
+    void refreshOpenClawPushHistory(true);
   }
 });
+
+els.reportsOpenClawHistoryRefreshButton?.addEventListener('click', () => {
+  void refreshOpenClawPushHistory(true);
+});
+
+async function handleCopyLocalBridgeConfig(kind, button) {
+  if (typeof window.tokenMonitor?.copyLocalBridgeConfig !== 'function') {
+    reportsOpenClawStatusFeedback = formatReportsError('bridge_unavailable');
+    renderReportsSettingsStatusOnly();
+    return;
+  }
+  try {
+    const res = await window.tokenMonitor.copyLocalBridgeConfig({ kind });
+    if (res?.ok) {
+      if (button) {
+        const key = kind === 'token'
+          ? 'settings.reports.openclawLocalBridgeCopyToken'
+          : 'settings.reports.openclawLocalBridgeCopyMcp';
+        button.textContent = t('settings.reports.openclawQrCopied');
+        if (reportsOpenClawLocalBridgeCopiedTimer) clearTimeout(reportsOpenClawLocalBridgeCopiedTimer);
+        reportsOpenClawLocalBridgeCopiedTimer = setTimeout(() => {
+          reportsOpenClawLocalBridgeCopiedTimer = null;
+          if (els.reportsOpenClawLocalBridgeCopyTokenButton) {
+            els.reportsOpenClawLocalBridgeCopyTokenButton.textContent = t('settings.reports.openclawLocalBridgeCopyToken');
+          }
+          if (els.reportsOpenClawLocalBridgeCopyMcpButton) {
+            els.reportsOpenClawLocalBridgeCopyMcpButton.textContent = t('settings.reports.openclawLocalBridgeCopyMcp');
+          }
+          if (button !== els.reportsOpenClawLocalBridgeCopyTokenButton && button !== els.reportsOpenClawLocalBridgeCopyMcpButton) {
+            button.textContent = t(key);
+          }
+        }, 1500);
+      }
+    } else {
+      reportsOpenClawStatusFeedback = formatReportsError(res?.error, res?.message);
+      renderReportsSettingsStatusOnly();
+    }
+  } catch (error) {
+    reportsOpenClawStatusFeedback = formatReportsError(error?.code || error?.message, error?.message);
+    renderReportsSettingsStatusOnly();
+  }
+}
+
+els.reportsOpenClawLocalBridgeCopyTokenButton?.addEventListener('click', () => (
+  handleCopyLocalBridgeConfig('token', els.reportsOpenClawLocalBridgeCopyTokenButton)
+));
+els.reportsOpenClawLocalBridgeCopyMcpButton?.addEventListener('click', () => (
+  handleCopyLocalBridgeConfig('mcpConfig', els.reportsOpenClawLocalBridgeCopyMcpButton)
+));
+els.reportsOpenClawLocalBridgeRegenTokenButton?.addEventListener('click', async () => {
+  if (reportsOpenClawLocalBridgeBusy || typeof window.tokenMonitor?.regenerateOpenClawLocalBridgeToken !== 'function') return;
+  reportsOpenClawLocalBridgeBusy = true;
+  reportsOpenClawStatusFeedback = null;
+  updateReportsActionButtons();
+  renderReportsSettingsStatusOnly();
+  try {
+    const res = await window.tokenMonitor.regenerateOpenClawLocalBridgeToken();
+    const sanitized = sanitizeLocalBridgeStatus(res);
+    if (res?.ok && sanitized) {
+      reportsOpenClawLocalBridgeSnapshot = sanitized;
+      reportsOpenClawStatusFeedback = t('settings.reports.openclawLocalBridgeTokenRegenerated');
+      renderOpenClawLocalBridgeStatus();
+    } else {
+      reportsOpenClawStatusFeedback = formatReportsError(res?.error, res?.message);
+    }
+  } catch (error) {
+    reportsOpenClawStatusFeedback = formatReportsError(error?.code || error?.message, error?.message);
+  } finally {
+    reportsOpenClawLocalBridgeBusy = false;
+    updateReportsActionButtons();
+    renderReportsSettingsStatusOnly();
+  }
+});
+
+function showOpenClawToast(message, tone = 'info') {
+  const toast = els.openClawToast;
+  if (!toast) return;
+  if (openClawToastTimer) {
+    clearTimeout(openClawToastTimer);
+    openClawToastTimer = null;
+  }
+  const text = String(message || '').trim();
+  if (!text) {
+    toast.hidden = true;
+    toast.classList?.add?.('hidden');
+    toast.textContent = '';
+    return;
+  }
+  toast.textContent = text;
+  toast.hidden = false;
+  toast.classList?.remove?.('hidden');
+  toast.classList?.toggle?.('is-ok', tone === 'ok');
+  toast.classList?.toggle?.('is-error', tone === 'error');
+  openClawToastTimer = setTimeout(() => {
+    openClawToastTimer = null;
+    if (!els.openClawToast) return;
+    els.openClawToast.hidden = true;
+    els.openClawToast.classList?.add?.('hidden');
+    els.openClawToast.classList?.remove?.('is-ok', 'is-error');
+  }, 2800);
+}
+
+function isOpenClawQuickPushAvailable() {
+  if (typeof window === 'undefined' || typeof window.tokenMonitor?.pushQueryToOpenClaw !== 'function') {
+    return false;
+  }
+  const mode = state.settings?.hubMode || 'local';
+  if (mode === 'icloud') return false;
+  const oc = currentReportIntegrations()?.openclaw;
+  return oc?.enabled === true;
+}
+
+function quickPushQueryForCurrentView() {
+  if (state.breakdown === 'limits') {
+    return { type: 'limits', params: {} };
+  }
+  const groupByMap = {
+    home: 'summary',
+    tool: 'client',
+    model: 'model',
+    project: 'project',
+    device: 'device'
+  };
+  return {
+    type: 'usage',
+    params: {
+      period: state.period || 'today',
+      groupBy: groupByMap[state.breakdown] || 'summary'
+    }
+  };
+}
+
+function syncOpenClawQuickPushButton() {
+  const button = els.openClawQuickPushButton;
+  if (!button) return;
+  const supportedViews = new Set(['home', 'limits', 'tool', 'model', 'project', 'device']);
+  const visible = isOpenClawQuickPushAvailable()
+    && !state.openSession
+    && supportedViews.has(state.breakdown || 'home');
+  button.hidden = !visible;
+  button.classList?.toggle?.('hidden', !visible);
+  button.disabled = openClawQuickPushBusy || !visible;
+  const ariaKey = state.breakdown === 'limits' ? 'openclaw.quickPush.limits' : 'openclaw.quickPush.usage';
+  button.setAttribute?.('aria-label', t(ariaKey));
+}
+
+async function triggerOpenClawQuickPush(payload, triggerButton = null) {
+  if (openClawQuickPushBusy || !isOpenClawQuickPushAvailable()) {
+    return { ok: false, error: 'openclaw_disabled' };
+  }
+  openClawQuickPushBusy = true;
+  if (triggerButton) triggerButton.disabled = true;
+  syncOpenClawQuickPushButton();
+  showOpenClawToast(t('openclaw.quickPush.sending'), 'info');
+  try {
+    const oc = currentReportIntegrations()?.openclaw || {};
+    const res = await window.tokenMonitor.pushQueryToOpenClaw({
+      ...(payload || {}),
+      ...(payload?.includeAi === undefined ? { includeAi: oc.includeAiAnalysis !== false } : {})
+    });
+    if (res?.lastPush) {
+      syncReportIntegrationsState({ lastPush: res.lastPush });
+    }
+    if (res?.entry) {
+      reportsOpenClawPushHistory = [res.entry, ...reportsOpenClawPushHistory].slice(0, 5);
+      renderOpenClawPushHistory();
+    } else {
+      reportsOpenClawPushHistorySyncKey = '';
+    }
+    if (res?.ok) {
+      showOpenClawToast(
+        t('openclaw.quickPush.sent', { channel: res.channel || oc.channel || 'openclaw-weixin' }),
+        'ok'
+      );
+    } else {
+      showOpenClawToast(
+        t('openclaw.quickPush.failed', { error: formatReportsError(res?.error, res?.message) }),
+        'error'
+      );
+    }
+    return res;
+  } catch (error) {
+    const errText = formatReportsError(error?.code || error?.message, error?.message);
+    showOpenClawToast(t('openclaw.quickPush.failed', { error: errText }), 'error');
+    return { ok: false, error: error?.code || error?.message || 'push_failed' };
+  } finally {
+    openClawQuickPushBusy = false;
+    if (triggerButton) triggerButton.disabled = false;
+    syncOpenClawQuickPushButton();
+    renderReportsSettingsStatusOnly();
+  }
+}
+
+function createSessionDetailOpenClawPushButton(request) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'detail-openclaw-push';
+  button.textContent = t('openclaw.quickPush.short');
+  button.setAttribute('aria-label', t('openclaw.quickPush.session'));
+  button.disabled = openClawQuickPushBusy;
+  button.addEventListener('click', () => triggerOpenClawQuickPush({
+    type: 'session_detail',
+    params: {
+      client: request?.client,
+      sessionId: request?.sessionId,
+      period: request?.period || state.period || 'today'
+    }
+  }, button));
+  return button;
+}
+
+els.openClawQuickPushButton?.addEventListener('click', () => (
+  triggerOpenClawQuickPush(quickPushQueryForCurrentView(), els.openClawQuickPushButton)
+));
 
 function applyOpenClawQrResult(res) {
   if (!reportsOpenClawQrSession) return false;
@@ -15811,8 +16633,20 @@ els.reportsOpenClawProvisionButton?.addEventListener('click', async () => {
   }
 });
 
+function cleanupOpenClawUiTimers() {
+  cancelOpenClawQrIfActive();
+  if (reportsOpenClawLocalBridgeCopiedTimer) {
+    clearTimeout(reportsOpenClawLocalBridgeCopiedTimer);
+    reportsOpenClawLocalBridgeCopiedTimer = null;
+  }
+  if (openClawToastTimer) {
+    clearTimeout(openClawToastTimer);
+    openClawToastTimer = null;
+  }
+}
+
 if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
-  window.addEventListener('unload', cancelOpenClawQrIfActive, { once: true });
+  window.addEventListener('unload', cleanupOpenClawUiTimers, { once: true });
 }
 els.resetClientDisplayOrderButton?.addEventListener('click', resetClientDisplayOrder);
 els.showAllClientsButton?.addEventListener('click', showAllClients);
