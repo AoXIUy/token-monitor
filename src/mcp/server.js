@@ -24,8 +24,6 @@ const {
   getSubscriptionsAndForecastsQuery,
   getLiveTokenRateSummary
 } = require('../shared/openclawQueries');
-const { resolveSessionDetailForPlatform } = require('../shared/sessionDetailResolver');
-const { readSessionConversation } = require('../shared/sessionConversation');
 const {
   REPORT_GRANULARITIES,
   REPORT_SCHEMA,
@@ -1144,8 +1142,11 @@ function createLocalBackendAdapter(options = {}) {
           cursor: args.cursor
         });
       } else {
+        // Lazy-load SQLite-backed session readers only on detail requests so stdio startup stays warning-free on Node 22.
+        const { resolveSessionDetailForPlatform } = require('../shared/sessionDetailResolver');
         detail = await resolveSessionDetailForPlatform({ client, sessionId, period });
         if (detail?.found && includeConversation && allowConversation) {
+          const { readSessionConversation } = require('../shared/sessionConversation');
           const conv = readSessionConversation({ key: `${client}:${sessionId}`, cursor: args.cursor || '' });
           if (conv && !conv.error) detail = { ...detail, conversation: conv };
         }
