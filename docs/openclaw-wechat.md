@@ -187,6 +187,6 @@ Point OpenClaw's MCP configuration to your Main Hub or Desktop Local Loopback Br
 
 - **URL**: `http://127.0.0.1:17321/api/mcp` (or `http://127.0.0.1:17322/api/mcp` for Desktop `local` mode bridge)
 - **Header**: `Authorization: Bearer <TOKEN_MONITOR_HUB_SECRET>`
-- **Offline fallback**: `node src/mcp/server.js --local` (reads `devices.json` and `reports/` directly from disk for reports and core usage/session/history/device/limits/subscription/rate queries)
+- **Offline fallback**: `node src/mcp/server.js --local` (reads `devices.json`, `daily-snapshots.json`, `reports/`, and `integrations.json` directly from disk for reports, usage/session/history/device/limits/subscription/rate queries, and privacy-gated local `get_session_detail`)
 
 OpenClaw can then call all **17 MCP tools** (`list_usage_reports`, `get_usage_report`, `generate_usage_report`, `analyze_project_usage`, `get_realtime_usage_and_limits`, `analyze_report_with_ai`, `push_report_to_openclaw`, `query_usage_breakdown`, `list_sessions`, `get_session_detail`, `get_usage_history`, `get_devices_and_health`, `get_limits_history`, `get_subscriptions_and_forecasts`, `get_live_token_rate`, `get_service_status_and_approvals`, `push_to_openclaw`), read **9 static resources** (including `usage://today`, `sessions://active`, `limits://current`, `devices://health`, `subscriptions://summary`, `service-status://current`), or invoke prompts such as `wechat-digest`, `session-summary`, `quota-check`, and `daily-standup-usage`. See [the reports and MCP guide](reports-mcp.md).

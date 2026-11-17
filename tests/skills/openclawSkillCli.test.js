@@ -264,7 +264,12 @@ test('OpenClaw Skill CLI executes all query, legacy, push, and privacy-gate flow
             }
           ],
           ...(parsedUrl.searchParams.get('includeHistory') === 'true'
-            ? { history: [{ recordedAt: '2026-11-17T01:00:00Z', windowName: '5h', remainingPercent: 80 }] }
+            ? {
+                limitsHistory: {
+                  available: true,
+                  series: [{ recordedAt: '2026-11-17T01:00:00Z', windowName: '5h', remainingPercent: 80 }]
+                }
+              }
             : {})
         }));
         return;
@@ -309,10 +314,11 @@ test('OpenClaw Skill CLI executes all query, legacy, push, and privacy-gate flow
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({
           serviceStatus: {
+            available: true,
             providers: [{ id: 'openai', name: 'OpenAI', status: 'operational' }]
           },
-          codexResetForecast: { status: 'active', chancePercent: 72, scheduledFor: '2026-11-17T06:00:00Z' },
-          approvals: { alerts: [] }
+          codexResetForecast: { available: true, status: 'active', chancePercent: 72, scheduledFor: '2026-11-17T06:00:00Z' },
+          approvalAlerts: { available: true, enabled: true, alerts: [{ id: 'a1' }] }
         }));
         return;
       }
@@ -507,6 +513,7 @@ test('OpenClaw Skill CLI executes all query, legacy, push, and privacy-gate flow
     assert.equal(requests.at(-1).searchParams.get('includeHistory'), 'true');
     assert.equal(requests.at(-1).searchParams.get('hours'), '24');
     assert.match(limRes.stdout, /Team Relay/);
+    assert.match(limRes.stdout, /剩余 80\.0%/);
     assert.doesNotMatch(limRes.stdout, /hidden@example\.com/);
 
     const subRes = await runCli(['subscriptions', '--date', '2026-11-17', '--no-forecasts', '--active-only', '--format', 'text'], defaultEnv);
@@ -516,12 +523,14 @@ test('OpenClaw Skill CLI executes all query, legacy, push, and privacy-gate flow
     assert.equal(requests.at(-1).searchParams.get('activeOnly'), 'true');
     assert.match(subRes.stdout, /Codex \(Plus\)/);
 
-    const svcRes = await runCli(['service-status', '--no-reset-forecast', '--no-approvals', '--format', 'text'], defaultEnv);
+    const svcRes = await runCli(['service-status', '--provider', 'openai,anthropic', '--no-reset-forecast', '--no-approvals', '--format', 'text'], defaultEnv);
     assert.equal(svcRes.code, 0);
     assert.equal(requests.at(-1).pathname, '/api/query/service-status');
+    assert.equal(requests.at(-1).searchParams.get('providerIds'), 'openai,anthropic');
     assert.equal(requests.at(-1).searchParams.get('includeResetForecast'), 'false');
     assert.equal(requests.at(-1).searchParams.get('includeApprovals'), 'false');
     assert.match(svcRes.stdout, /OpenAI/);
+    assert.match(svcRes.stdout, /待确认审批：1 条/);
 
     const appRes = await runCli(['approvals', '--format', 'text'], defaultEnv);
     assert.equal(appRes.code, 0);

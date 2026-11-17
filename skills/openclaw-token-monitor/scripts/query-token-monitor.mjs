@@ -547,9 +547,14 @@ function formatLimitsText(data) {
     if (parts.length === 0) parts.push(cleanSingleLine(prov?.status, 32) || 'unknown');
     lines.push(`• ${tag}${label}: ${parts.join(' · ')}`);
   }
-  const histEntries = Array.isArray(data?.history)
-    ? data.history
-    : (Array.isArray(data?.history?.entries) ? data.history.entries : (Array.isArray(data?.history?.points) ? data.history.points : []));
+  const histSource = data?.limitsHistory ?? data?.history;
+  const histEntries = Array.isArray(histSource)
+    ? histSource
+    : (Array.isArray(histSource?.series)
+      ? histSource.series
+      : (Array.isArray(histSource?.entries)
+        ? histSource.entries
+        : (Array.isArray(histSource?.points) ? histSource.points : [])));
   if (histEntries.length > 0) {
     lines.push('');
     lines.push(`📉 配额历史采样（最近 ${Math.min(6, histEntries.length)} 条）：`);
@@ -559,6 +564,8 @@ function formatLimitsText(data) {
       const label = cleanSingleLine(pt?.windowName || pt?.label, 32);
       lines.push(`• ${ts || '采样'}${label ? ` · ${label}` : ''}${rem !== null ? ` · 剩余 ${rem.toFixed(1)}%` : ''}`);
     }
+  } else if (histSource && histSource.available === false) {
+    lines.push(`• 配额历史：不可用 (${cleanSingleLine(histSource.reason, 48) || 'desktop_only'})`);
   }
   return truncateText(lines.join('\n'));
 }
@@ -644,9 +651,16 @@ function formatServiceStatusText(data) {
     }
   }
 
-  if (data?.approvals !== undefined) {
-    const alerts = Array.isArray(data.approvals?.alerts) ? data.approvals.alerts : (Array.isArray(data.approvals) ? data.approvals : []);
-    lines.push(`• 待确认审批：${alerts.length} 条`);
+  const approvalState = data?.approvalAlerts ?? data?.approvals;
+  if (approvalState !== undefined) {
+    if (approvalState?.enabled === false) {
+      lines.push('• 待确认审批：未启用');
+    } else {
+      const alerts = Array.isArray(approvalState?.alerts)
+        ? approvalState.alerts
+        : (Array.isArray(approvalState) ? approvalState : []);
+      lines.push(`• 待确认审批：${alerts.length} 条`);
+    }
   }
   return truncateText(lines.join('\n'));
 }
@@ -754,7 +768,7 @@ function writeOutput(format, data, textFormatter) {
   }
 }
 
-function collectPushParams(flags, granularity, periodKey) {
+function collectPushParams(flags, granularity, periodKey, pushType = '') {
   const params = {};
   const setIf = (targetKey, val) => {
     if (val !== undefined && val !== '') params[targetKey] = val;
@@ -768,12 +782,15 @@ function collectPushParams(flags, granularity, periodKey) {
   setIf('groupBy', flagString(flags, 'group-by', 'groupBy'));
   setIf('deviceId', flagString(flags, 'device', 'device-id', 'deviceId'));
   setIf('limit', flagPositiveInt(flags, ['limit']));
+  setIf('modelAliasGrouping', flagString(flags, 'model-alias-grouping', 'modelAliasGrouping'));
+  setIf('timeZone', flagString(flags, 'time-zone', 'timeZone'));
   setIf('state', flagString(flags, 'state'));
   setIf('client', flagString(flags, 'client'));
   setIf('sessionId', flagString(flags, 'session-id', 'sessionId'));
   setIf('project', flagString(flags, 'project'));
   setIf('search', flagString(flags, 'search'));
   setIf('sort', flagString(flags, 'sort'));
+  setIf('sortDirection', flagString(flags, 'sort-dir', 'sortDirection'));
   setIf('cursor', flagString(flags, 'cursor'));
   if (Object.hasOwn(flags, 'include-conversation') || Object.hasOwn(flags, 'includeConversation')) {
     params.includeConversation = flagBool(flags, ['include-conversation', 'includeConversation'], false);
@@ -784,8 +801,14 @@ function collectPushParams(flags, granularity, periodKey) {
   setIf('to', flagString(flags, 'to'));
   if (flagBool(flags, ['no-diagnostics'], false)) params.includeDiagnostics = false;
   if (flagBool(flags, ['third-party-only', 'thirdPartyOnly'], false)) params.thirdPartyOnly = true;
-  setIf('provider', flagString(flags, 'provider'));
+  if (pushType === 'service_status') {
+    const rawProviderIds = flagString(flags, 'provider-ids', 'providerIds', 'provider');
+    if (rawProviderIds) params.providerIds = rawProviderIds.split(',').map((s) => s.trim()).filter(Boolean);
+  } else {
+    setIf('provider', flagString(flags, 'provider'));
+  }
   setIf('status', flagString(flags, 'status'));
+  setIf('maxProviders', flagPositiveInt(flags, ['max-providers', 'maxProviders']));
   if (flagBool(flags, ['history', 'include-history', 'includeHistory'], false)) params.includeHistory = true;
   setIf('accountKey', flagString(flags, 'account-key', 'accountKey'));
   setIf('windowName', flagString(flags, 'window-name', 'windowName'));
@@ -795,6 +818,8 @@ function collectPushParams(flags, granularity, periodKey) {
   if (flagBool(flags, ['active-only', 'activeOnly'], false)) params.activeOnly = true;
   if (flagBool(flags, ['no-reset-forecast'], false)) params.includeResetForecast = false;
   if (flagBool(flags, ['no-approvals'], false)) params.includeApprovals = false;
+  if (flagBool(flags, ['force'], false)) params.force = true;
+  setIf('title', flagString(flags, 'title'));
   setIf('question', flagString(flags, 'question'));
   if (flagBool(flags, ['refresh'], false)) params.refresh = true;
   return params;
@@ -941,7 +966,9 @@ async function main() {
       period,
       groupBy,
       deviceId,
-      limit
+      limit,
+      modelAliasGrouping: flagString(flags, 'model-alias-grouping', 'modelAliasGrouping') || undefined,
+      timeZone: flagString(flags, 'time-zone', 'timeZone') || undefined
     });
     const res = await callHub(connection, 'GET', pathWithQuery);
     writeOutput(format, res, formatUsageText);
@@ -982,7 +1009,8 @@ async function main() {
       period: flagString(flags, 'period') || undefined,
       ...(includeConversation ? { includeConversation: 'true' } : {}),
       limit: flagPositiveInt(flags, ['limit']),
-      offset: flagNonNegInt(flags, ['offset'])
+      offset: flagNonNegInt(flags, ['offset']),
+      cursor: flagString(flags, 'cursor') || undefined
     });
     const res = await callHub(connection, 'GET', pathWithQuery);
     writeOutput(format, res, formatSessionDetailText);
@@ -1066,7 +1094,7 @@ async function main() {
     const pathWithQuery = buildQueryPath('/api/query/service-status', {
       ...(noResetForecast ? { includeResetForecast: 'false' } : {}),
       ...(noApprovals ? { includeApprovals: 'false' } : {}),
-      provider: flagString(flags, 'provider') || undefined,
+      providerIds: flagString(flags, 'provider-ids', 'providerIds', 'provider') || undefined,
       ...(force ? { force: 'true' } : {})
     });
     const res = await callHub(connection, 'GET', pathWithQuery);
@@ -1093,7 +1121,8 @@ async function main() {
     const includeLimits = hasIncludeLimits ? flagBool(flags, ['include-limits', 'includeLimits'], true) : undefined;
 
     if (isTest || pushType || customMessage) {
-      const params = collectPushParams(flags, granularity, periodKey);
+      const resolvedType = pushType || 'custom';
+      const params = collectPushParams(flags, granularity, periodKey, resolvedType);
       const body = isTest
         ? {
             test: true,
@@ -1102,7 +1131,7 @@ async function main() {
             ...(idempotencyKey ? { idempotencyKey } : {})
           }
         : {
-            type: pushType || 'custom',
+            type: resolvedType,
             ...(Object.keys(params).length > 0 ? { params } : {}),
             ...(includeAi !== undefined ? { includeAi } : {}),
             ...(includeLimits !== undefined ? { includeLimits } : {}),

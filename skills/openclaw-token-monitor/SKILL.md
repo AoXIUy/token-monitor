@@ -20,7 +20,7 @@ Both work identically against:
 Connect OpenClaw to the Streamable HTTP MCP endpoint:
 - **URL**: `<TOKEN_MONITOR_HUB_URL>/api/mcp` (default `http://127.0.0.1:17321/api/mcp`, or `http://127.0.0.1:17322/api/mcp` for Desktop `local` mode bridge)
 - **Header**: `Authorization: Bearer <TOKEN_MONITOR_HUB_SECRET>` (or `<TOKEN_MONITOR_SECRET>`)
-- **Offline fallback (`--local` stdio)**: `node src/mcp/server.js --local` reads `devices.json` and `reports/` directly from disk for reports and core queries (`query_usage_breakdown`, `list_sessions`, `get_usage_history`, `get_devices_and_health`, `get_limits_history`, `get_subscriptions_and_forecasts`, `get_live_token_rate`).
+- **Offline fallback (`--local` stdio)**: `node src/mcp/server.js --local` reads `devices.json`, `daily-snapshots.json`, `reports/`, and local `integrations.json` privacy flags directly from disk for reports, core queries (`query_usage_breakdown`, `list_sessions`, `get_usage_history`, `get_devices_and_health`, `get_limits_history`, `get_subscriptions_and_forecasts`, `get_live_token_rate`), and local transcript `get_session_detail`.
 
 Available MCP tools (**17 total**):
 - **Reports & AI (7)**:
@@ -42,7 +42,7 @@ Available MCP tools (**17 total**):
   - `get_live_token_rate` — Real-time output rate (`tok/s`), burn rate (`$/h`), or period throughput fallback
   - `get_service_status_and_approvals` — Upstream AI vendor status, Codex reset forecast, and pending Desktop approvals
 - **Unified Push (1)**:
-  - `push_to_openclaw` — Format & push `report`, `usage`, `sessions`, `session_detail`, `limits`, `subscriptions`, `service_status`, `test`, or `custom` messages to OpenClaw
+  - `push_to_openclaw` — Format & push `report`, `usage`, `sessions`, `session_detail`, `history`, `devices`, `limits`, `subscriptions`, `live_rate`, `service_status`, `test`, or `custom` messages to OpenClaw
 
 Available MCP resources (**9 static + 1 template**) & prompts (**8**):
 - Static resources: `report://latest/daily`, `report://latest/weekly`, `report://latest/monthly`, `usage://today`, `sessions://active`, `limits://current`, `devices://health`, `subscriptions://summary`, `service-status://current`
