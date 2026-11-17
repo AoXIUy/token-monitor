@@ -33,9 +33,12 @@ const { macWidgetRuntimeSupport } = require('../shared/macSystemRequirements');
 const { exportFileSet, exportSignature, EXPORT_FILENAMES } = require('../shared/exporter');
 const { createDefaultTrayLayout, normalizeTrayLayout } = require('../shared/trayLayout');
 const {
+  mergeOpenClawIntegrationConfig,
   normalizeAiIntegrationConfig,
   normalizeOpenClawIntegrationConfig
 } = require('../shared/aiReportAnalyzer');
+const { readSessionConversation } = require('../shared/sessionConversation');
+const { createOpenClawBridge, queryLimitsHistoryForOpenClaw } = require('./openclawBridge');
 const fontSettingsApi = require('../shared/fontSettings');
 const motionPreferenceApi = require('./motionPreference');
 const tokenNumberAnimationApi = require('./tokenNumberAnimation');
@@ -3777,18 +3780,17 @@ function mergeReportIntegrationsConfig(current = {}, patch = {}) {
   const mergeAi = patch?.ai && typeof patch.ai === 'object'
     ? { ...(current?.ai || {}), ...patch.ai }
     : current?.ai;
-  const mergeOpenClaw = patch?.openclaw && typeof patch.openclaw === 'object'
-    ? {
-        ...(current?.openclaw || {}),
-        ...patch.openclaw,
-        pushGranularities: {
-          ...(current?.openclaw?.pushGranularities || {}),
-          ...(patch.openclaw.pushGranularities && typeof patch.openclaw.pushGranularities === 'object'
-            ? patch.openclaw.pushGranularities
-            : {})
-        }
-      }
-    : current?.openclaw;
+  let mergeOpenClaw = current?.openclaw;
+  if (patch?.openclaw && typeof patch.openclaw === 'object') {
+    const sanitizedPatch = { ...patch.openclaw };
+    delete sanitizedPatch.hookToken;
+    delete sanitizedPatch.hookTokenConfigured;
+    delete sanitizedPatch.clearHookToken;
+    delete sanitizedPatch.weixinBotToken;
+    delete sanitizedPatch.weixinBotConfigured;
+    delete sanitizedPatch.clearWeixinBotToken;
+    mergeOpenClaw = mergeOpenClawIntegrationConfig(current?.openclaw || {}, sanitizedPatch);
+  }
   if (mergeAi && typeof mergeAi === 'object') {
     delete mergeAi.apiKey;
     delete mergeAi.apiKeyConfigured;
@@ -3798,6 +3800,9 @@ function mergeReportIntegrationsConfig(current = {}, patch = {}) {
     delete mergeOpenClaw.hookToken;
     delete mergeOpenClaw.hookTokenConfigured;
     delete mergeOpenClaw.clearHookToken;
+    delete mergeOpenClaw.weixinBotToken;
+    delete mergeOpenClaw.weixinBotConfigured;
+    delete mergeOpenClaw.clearWeixinBotToken;
   }
   return {
     ai: normalizeAiIntegrationConfig(mergeAi),
@@ -3872,6 +3877,7 @@ function redactOpenClawIpcPayload(payload) {
     resolvedHookToken: _resolvedHookToken,
     weixinBotToken: _weixinBotToken,
     openclawHookToken: _openclawHookToken,
+    openclawLocalBridgeToken: _openclawLocalBridgeToken,
     aiApiKey: _aiApiKey,
     ...safe
   } = payload;
@@ -3910,6 +3916,98 @@ async function getHubBuildStatus() {
   if (settings?.hubMode !== 'client') return { status: 'notConfigured', runtime: '', hubUrl: '' };
   const hubUrl = String(settings.hubUrl || '').trim();
   return probeHubBuild(hubUrl);
+}
+
+let openclawBridgeInstance = null;
+
+function buildOpenClawEnhancedQueryContext() {
+  const stats = latestStats || {};
+  const allTimeSessions = typeof rendererAllTimeSessions === 'function' ? rendererAllTimeSessions(stats) : [];
+  const completeHistory = typeof getCompleteHistory === 'function' ? getCompleteHistory() : null;
+  const subscriptions = typeof effectiveSubscriptions === 'function' ? effectiveSubscriptions() : null;
+  const liveRateSnapshot = (typeof edgeDockRateTracker !== 'undefined' && edgeDockRateTracker?.getSample?.())
+    || openclawBridgeInstance?.getLiveRateSnapshot?.()
+    || null;
+  const titlesAllowed = settings?.hubMode === 'host'
+    ? Boolean(settings?.sessionTitlesEnabled !== false && settings?.hubSyncSessionTitles === true)
+    : Boolean(settings?.sessionTitlesEnabled !== false);
+  const resolvedRates = (typeof effectiveRates !== 'undefined' && effectiveRates)
+    || resolveEffectiveRates(rateCache?.rates || {}, settings?.currencyRates || {});
+  return {
+    stats,
+    allTimeSessions,
+    history: completeHistory,
+    subscriptions,
+    rates: resolvedRates,
+    modelAliases: settings?.modelAliases || null,
+    modelAliasGrouping: settings?.modelAliasGrouping || 'off',
+    liveRateSnapshot,
+    sessionTitlesEnabled: titlesAllowed,
+    readSessionDetail: async ({ client, sessionId, period = 'today', includeConversation = false, cursor = '' }) => {
+      const detail = await readSessionDetailForPlatform({ client, sessionId, period }, {
+        lookupModelPricing,
+        getPricingRevision: () => pricingFingerprint({ pricingPath: customPricingPath() })
+      });
+      if (!detail || detail.found === false) return detail;
+      if (includeConversation) {
+        const conv = readSessionConversation({ key: `${client}:${sessionId}`, cursor: cursor || '' });
+        if (conv && !conv.error) return { ...detail, conversation: conv };
+      }
+      return detail;
+    },
+    getLimitsHistory: async ({ accountKey, provider, windowName, hours } = {}) => (
+      queryLimitsHistoryForOpenClaw({
+        stats,
+        scope: currentHubStatsIdentity(),
+        historyStore: getLimitsHistoryStore(),
+        params: { accountKey, provider, windowName, hours }
+      })
+    ),
+    getServiceStatus: ({ force = false, providerIds = null } = {}) => serviceStatusClient.getServiceStatus({
+      force: Boolean(force),
+      providerIds: Array.isArray(providerIds) ? providerIds : null
+    }),
+    getCodexResetForecast: ({ force = false } = {}) => {
+      if (settings?.codexResetForecastEnabled !== true) {
+        return Promise.resolve({ status: 'disabled', checkedAt: new Date().toISOString() });
+      }
+      return codexResetForecastClient.getForecast({ force: Boolean(force) });
+    },
+    ...(settings?.hubMode === 'local'
+      ? { listApprovalAlerts: () => ensureOpenClawBridge().listApprovalAlerts() }
+      : {})
+  };
+}
+
+function ensureOpenClawBridge() {
+  if (!openclawBridgeInstance) {
+    openclawBridgeInstance = createOpenClawBridge({
+      userDataDir: app.getPath('userData'),
+      getSettings: () => settings,
+      getEmbeddedHub: () => embeddedHub,
+      getCredentialStore: () => ensureCredentialStore(),
+      fetchImpl: hubReportsFetch,
+      clipboardWriteText: (text) => clipboard.writeText(String(text || '')),
+      getStats: () => latestStats || {},
+      getHistory: () => (typeof getCompleteHistory === 'function' ? getCompleteHistory() : null),
+      getSubscriptions: () => (typeof effectiveSubscriptions === 'function' ? effectiveSubscriptions() : null),
+      getEnhancedQueryContext: buildOpenClawEnhancedQueryContext,
+      serviceStatusClient,
+      codexResetForecastClient,
+      readSessionDetail: ({ client, sessionId, period = 'today', sessionCost }) => (
+        readSessionDetailForPlatform({ client, sessionId, period, sessionCost }, {
+          lookupModelPricing,
+          getPricingRevision: () => pricingFingerprint({ pricingPath: customPricingPath() })
+        })
+      ),
+      logger: {
+        log: (msg) => console.log(String(msg)),
+        warn: (msg) => console.warn(String(msg)),
+        error: (err, label) => console.log(`[openclaw] ${label ? `${label}: ` : ''}${err?.message || err}`)
+      }
+    });
+  }
+  return openclawBridgeInstance;
 }
 
 async function startEmbeddedHub() {
@@ -3951,6 +4049,7 @@ async function startEmbeddedHub() {
       reportsDir: settings.reportsDir || '',
       integrations: settings.reportIntegrations,
       integrationSecrets,
+      ...(typeof buildOpenClawEnhancedQueryContext === 'function' ? { getEnhancedQueryContext: buildOpenClawEnhancedQueryContext } : {}),
       ...(typeof hubReportsFetch === 'function' ? { integrationFetch: hubReportsFetch } : {}),
       dataFile: hubDataFile(),
       logger: { error: (err) => console.log(`[hub] ${err?.message || err}`) }
@@ -5421,6 +5520,7 @@ function publishLocalSessionActivity(patch) {
   const activityStats = electronPresentationStats(latestStats);
   pluginRuntime?.publishStats(activityStats, latestStats);
   updateEdgeDockCells(activityStats);
+  if (typeof openclawBridgeInstance !== 'undefined') openclawBridgeInstance?.onLocalSessionActivity(visiblePatch);
   sendPush({ event: 'session-activity', data: { patch: visiblePatch, snapshot } });
 }
 
@@ -5458,6 +5558,7 @@ function sendPush(payload, options = {}) {
     updateEdgeDockCells(visibleStats);
     syncCodexPresentationActiveAccount();
     updateTrayDisplay();
+    if (typeof openclawBridgeInstance !== 'undefined') openclawBridgeInstance?.onStats(latestStats);
     if (!options.skipExport && settings.exportAutoEnabled && settings.exportDir && Date.now() - lastExportAt >= exportIntervalMs()) {
       lastExportAt = Date.now();
       writeExportTo(settings.exportDir, completeLocalSyncStats(payload.data.stats).periods, { skipUnchanged: true })
@@ -6058,6 +6159,9 @@ function assertPluginSkinRequest(event, patch) {
 function reportIntegrationsForRenderer(currentSettings = settings) {
   if (settings?.hubMode === 'host' && embeddedHub?.hub?.getIntegrationsStatus) {
     return embeddedHub.hub.getIntegrationsStatus();
+  }
+  if (currentSettings === settings && settings?.hubMode === 'local' && typeof openclawBridgeInstance !== 'undefined' && openclawBridgeInstance) {
+    return openclawBridgeInstance.getLocalIntegrationsStatus();
   }
   const storedSecrets = (() => {
     try { return ensureCredentialStore().readIntegrationSecrets(); } catch (_) { return { aiApiKey: '', openclawHookToken: '', weixinBotToken: '' }; }
@@ -7248,6 +7352,8 @@ function startMode() {
     }
   }).catch((err) => {
     console.log(`[mode] reconciliation failed: ${err?.message || err}`);
+  }).finally(() => {
+    if (typeof ensureOpenClawBridge === 'function') void ensureOpenClawBridge().reconcile(settings.reportIntegrations);
   });
 }
 
@@ -7347,6 +7453,7 @@ function stopAll() {
   // hub the power to hold our own exit open. The listening socket closes with
   // the process, and a graceful hub close buys nothing on the way out.
   void stopEmbeddedHub();
+  if (typeof openclawBridgeInstance !== 'undefined') void openclawBridgeInstance?.stop?.();
   try { localWeixinQrManager?.cancelAll?.(); } catch (_) {}
   stopDiscordRpc();
   try { sessionUsageArchiveStore.close(); } catch (error) {
@@ -8464,20 +8571,28 @@ async function cursorStatusValue({ discover = false } = {}) {
 }
 
 const approvalAlertRuntime = createApprovalAlertRuntime({
-  onError: (error) => console.log(`[approval-alerts] ${error.message}`)
+  onError: (error) => console.log(`[approval-alerts] ${error.message}`),
+  onAlertSent: (alert) => ensureOpenClawBridge().onApprovalAlert(alert)
 });
 
 function reconcileApprovalAlerts() {
   const inHubMode = settings?.hubMode === 'client' || settings?.hubMode === 'host';
   const { url: hubUrl, secret } = effectiveHubConfig();
   const deviceId = String(settings?.deviceId || '').trim() || defaultDeviceId();
-  const enabled = Boolean(
+  const oc = settings?.reportIntegrations?.openclaw;
+  const openclawApprovalActive = Boolean(
+    (settings?.hubMode === 'local' || settings?.hubMode === 'host')
+    && oc?.enabled === true
+    && oc?.events?.approvalAlerts === true
+  );
+  const hubApprovalActive = Boolean(
     settings?.approvalAlertsEnabled === true
     && inHubMode
     && hubUrl
-    && !isExternalAgentActive()
   );
-  return approvalAlertRuntime.reconcile({ enabled, hubUrl, secret, deviceId });
+  const enabled = Boolean((hubApprovalActive || openclawApprovalActive) && !isExternalAgentActive());
+  const localOnly = !hubApprovalActive && openclawApprovalActive;
+  return approvalAlertRuntime.reconcile({ enabled, hubUrl, secret, deviceId, localOnly });
 }
 
 // Plugin hosts load from their own privileged scheme, which Chromium only
@@ -8540,6 +8655,8 @@ app.whenReady().then(() => {
   regenerateTokscalePricing();
   if (widgetRuntimeSupported) ensureMacWidgetDemand();
   startMode();
+  void ensureOpenClawBridge().reconcile(settings.reportIntegrations);
+  void reconcileApprovalAlerts();
   void widgetRecovery.then((result) => {
     if (result.status !== 'completed' || widgetRecoveryAbort?.signal.aborted) return;
     const config = macWidgetConfiguration();
@@ -8796,7 +8913,9 @@ app.whenReady().then(() => {
         : '',
       reportIntegrations: {
         ai: normalizeAiIntegrationConfig(patch.reportIntegrations?.ai ?? settings.reportIntegrations?.ai),
-        openclaw: normalizeOpenClawIntegrationConfig(patch.reportIntegrations?.openclaw ?? settings.reportIntegrations?.openclaw)
+        openclaw: patch.reportIntegrations?.openclaw !== undefined
+          ? mergeOpenClawIntegrationConfig(settings.reportIntegrations?.openclaw, patch.reportIntegrations.openclaw)
+          : normalizeOpenClawIntegrationConfig(settings.reportIntegrations?.openclaw)
       },
       syncContentState: normalizeSyncContentState(settings.syncContentState),
       deviceId: (patch.deviceId !== undefined ? String(patch.deviceId).trim() : settings.deviceId) || defaultDeviceId(),
@@ -9024,6 +9143,9 @@ app.whenReady().then(() => {
       }
     }
     void reconcileApprovalAlerts();
+    if (patch?.reportIntegrations !== undefined || patch?.sessionTitlesEnabled !== undefined || patch?.hubSyncSessionTitles !== undefined || patch?.reportsDir !== undefined) {
+      if (typeof ensureOpenClawBridge === 'function') void ensureOpenClawBridge().reconcile(settings.reportIntegrations);
+    }
     // A worker-hosted transform holds its own copy of the settings it reads.
     // Update it now rather than when the usage reconfigure settles: pausing the
     // session archive must stop captures from the next summary on.
@@ -9423,7 +9545,14 @@ app.whenReady().then(() => {
         fallback: { ok: true }
       });
     }
-    return { ok: false, error: 'hub_required' };
+    if (settings?.hubMode === 'icloud') {
+      return { ok: false, error: 'hub_required' };
+    }
+    try {
+      return { ok: true, ...ensureOpenClawBridge().getLocalIntegrationsStatus() };
+    } catch (error) {
+      return { ok: false, error: error?.message || 'integrations_failed' };
+    }
   });
   ipcMain.handle('reports:saveIntegrations', async (_event, patch = {}) => {
     if (settings?.hubMode === 'host') {
@@ -9435,6 +9564,8 @@ app.whenReady().then(() => {
           else if (typeof patch?.ai?.apiKey === 'string' && patch.ai.apiKey.trim()) secretPatch.aiApiKey = patch.ai.apiKey.trim();
           if (patch?.openclaw?.clearHookToken === true) secretPatch.openclawHookToken = '';
           else if (typeof patch?.openclaw?.hookToken === 'string' && patch.openclaw.hookToken.trim()) secretPatch.openclawHookToken = patch.openclaw.hookToken.trim();
+          if (patch?.openclaw?.clearWeixinBotToken === true) secretPatch.weixinBotToken = '';
+          else if (typeof patch?.openclaw?.weixinBotToken === 'string' && patch.openclaw.weixinBotToken.trim()) secretPatch.weixinBotToken = patch.openclaw.weixinBotToken.trim();
           if (Object.keys(secretPatch).length > 0) {
             ensureCredentialStore().writeIntegrationSecrets(secretPatch);
             if (!embeddedHub?.hub) {
@@ -9451,6 +9582,7 @@ app.whenReady().then(() => {
             });
           }
           applySettingsPatch({ reportIntegrations: nextConfig });
+          void ensureOpenClawBridge().reconcile(nextConfig);
           const status = embeddedHub?.hub?.getIntegrationsStatus?.() || reportIntegrationsForRenderer();
           return { ok: true, ...status };
         } catch (error) {
@@ -9466,7 +9598,21 @@ app.whenReady().then(() => {
         fallback: { ok: true }
       });
     }
-    return { ok: false, error: 'hub_required' };
+    if (settings?.hubMode === 'icloud') {
+      return { ok: false, error: 'hub_required' };
+    }
+    try {
+      const saved = ensureOpenClawBridge().saveLocalIntegrations(patch || {});
+      if (saved?.ok === false) return saved;
+      const nextConfig = mergeReportIntegrationsConfig(settings.reportIntegrations, {
+        ai: saved?.ai,
+        openclaw: saved?.openclaw
+      });
+      applySettingsPatch({ reportIntegrations: nextConfig });
+      return { ok: true, ...saved };
+    } catch (error) {
+      return { ok: false, error: error?.message || 'save_failed' };
+    }
   });
   ipcMain.handle('reports:analyzeWithAi', async (_event, options = {}) => {
     if (settings?.hubMode === 'host') {
@@ -9488,7 +9634,14 @@ app.whenReady().then(() => {
         fallback: { ok: true }
       });
     }
-    return { ok: false, error: 'hub_required' };
+    if (settings?.hubMode === 'icloud') {
+      return { ok: false, error: 'hub_required' };
+    }
+    try {
+      return await ensureOpenClawBridge().analyzeWithAi(options || {});
+    } catch (error) {
+      return { ok: false, error: error?.message || 'analyze_failed' };
+    }
   });
   ipcMain.handle('reports:pushToOpenClaw', async (_event, options = {}) => {
     if (settings?.hubMode === 'host') {
@@ -9510,7 +9663,14 @@ app.whenReady().then(() => {
         fallback: { ok: true }
       });
     }
-    return { ok: false, error: 'hub_required' };
+    if (settings?.hubMode === 'icloud') {
+      return { ok: false, error: 'hub_required' };
+    }
+    try {
+      return await ensureOpenClawBridge().pushReport(options || {});
+    } catch (error) {
+      return { ok: false, error: error?.message || 'push_failed' };
+    }
   });
   function syncHostIntegrationsToMain() {
     if (!embeddedHub?.hub) return;
@@ -9642,6 +9802,8 @@ app.whenReady().then(() => {
       bumpChannelReload: options?.bumpChannelReload !== false,
       hookToken: storedSecrets.openclawHookToken || hookSecrets.hookToken || undefined,
       agentId: currentOpenClaw.agentId || 'main'
+    }, {
+      localBridge: ensureOpenClawBridge().getLocalBridgeStatus()
     });
     const nextHookToken = String(provisionRes.resolvedHookToken || hookSecrets.hookToken || '').trim();
     if (nextHookToken && nextHookToken !== storedSecrets.openclawHookToken) {
@@ -9694,7 +9856,9 @@ app.whenReady().then(() => {
       });
     }
     try {
-      return redactOpenClawIpcPayload(await detectOpenClawEnvironment());
+      return redactOpenClawIpcPayload(await detectOpenClawEnvironment({
+        localBridge: ensureOpenClawBridge().getLocalBridgeStatus()
+      }));
     } catch (error) {
       return { ok: false, error: error?.message || 'openclaw_env_failed' };
     }
@@ -9868,6 +10032,121 @@ app.whenReady().then(() => {
       return await provisionLocalOpenClaw(options || {});
     } catch (error) {
       return { ok: false, error: error?.message || 'provision_failed' };
+    }
+  });
+  ipcMain.handle('openclaw:getPushHistory', async () => {
+    if (settings?.hubMode === 'host') {
+      await modeQueue;
+      if (settings?.hubMode === 'host') {
+        if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+        try {
+          return redactOpenClawIpcPayload({ ok: true, ...embeddedHub.hub.getOpenClawPushHistory() });
+        } catch (error) {
+          return { ok: false, error: error?.message || 'push_history_failed' };
+        }
+      }
+    }
+    if (settings?.hubMode === 'client') {
+      return redactOpenClawIpcPayload(await requestClientHubJson('/api/integrations/openclaw/history', {
+        method: 'GET',
+        timeoutMs: 15_000,
+        fallback: { ok: true, count: 0, lastPush: null, history: [] }
+      }));
+    }
+    if (settings?.hubMode === 'icloud') {
+      return { ok: false, error: 'hub_required' };
+    }
+    try {
+      return redactOpenClawIpcPayload(ensureOpenClawBridge().getPushHistory());
+    } catch (error) {
+      return { ok: false, error: error?.message || 'push_history_failed' };
+    }
+  });
+  const safeObjectOption = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : {});
+  ipcMain.handle('openclaw:testPush', async (_event, options = {}) => {
+    if (settings?.hubMode === 'host') {
+      await modeQueue;
+      if (settings?.hubMode === 'host') {
+        if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+        try {
+          return redactOpenClawIpcPayload(await embeddedHub.hub.sendOpenClawTestPush({
+            ...safeObjectOption(options),
+            source: 'desktop'
+          }));
+        } catch (error) {
+          return { ok: false, error: error?.message || 'push_failed' };
+        }
+      }
+    }
+    if (settings?.hubMode === 'client') {
+      return redactOpenClawIpcPayload(await requestClientHubJson('/api/integrations/openclaw/push', {
+        method: 'POST',
+        body: { ...safeObjectOption(options), test: true },
+        timeoutMs: 30_000,
+        fallback: { ok: false, error: 'push_failed' }
+      }));
+    }
+    if (settings?.hubMode === 'icloud') {
+      return { ok: false, error: 'hub_required' };
+    }
+    try {
+      return redactOpenClawIpcPayload(await ensureOpenClawBridge().testPush(options || {}));
+    } catch (error) {
+      return { ok: false, error: error?.message || 'push_failed' };
+    }
+  });
+  ipcMain.handle('openclaw:pushQuery', async (_event, options = {}) => {
+    if (settings?.hubMode === 'host') {
+      await modeQueue;
+      if (settings?.hubMode === 'host') {
+        if (!embeddedHub?.hub) return { ok: false, error: embeddedHubError?.message || 'hub_not_running' };
+        try {
+          return redactOpenClawIpcPayload(await embeddedHub.hub.pushQueryToOpenClaw({
+            ...safeObjectOption(options),
+            source: 'desktop'
+          }));
+        } catch (error) {
+          return { ok: false, error: error?.message || 'push_failed' };
+        }
+      }
+    }
+    if (settings?.hubMode === 'client') {
+      return redactOpenClawIpcPayload(await requestClientHubJson('/api/integrations/openclaw/push', {
+        method: 'POST',
+        body: safeObjectOption(options),
+        timeoutMs: 60_000,
+        fallback: { ok: false, error: 'push_failed' }
+      }));
+    }
+    if (settings?.hubMode === 'icloud') {
+      return { ok: false, error: 'hub_required' };
+    }
+    try {
+      return redactOpenClawIpcPayload(await ensureOpenClawBridge().pushQuery(options || {}));
+    } catch (error) {
+      return { ok: false, error: error?.message || 'push_failed' };
+    }
+  });
+  ipcMain.handle('openclaw:getLocalBridgeStatus', async () => {
+    try {
+      await ensureOpenClawBridge().reconcile(settings.reportIntegrations);
+      return redactOpenClawIpcPayload(ensureOpenClawBridge().getLocalBridgeStatus());
+    } catch (error) {
+      return { ok: false, error: error?.message || 'bridge_status_failed' };
+    }
+  });
+  ipcMain.handle('openclaw:copyLocalBridgeConfig', async (_event, options = {}) => {
+    try {
+      return ensureOpenClawBridge().copyLocalBridgeConfig(options || {});
+    } catch (error) {
+      return { ok: false, error: error?.message || 'clipboard_failed' };
+    }
+  });
+  ipcMain.handle('openclaw:regenerateLocalBridgeToken', async () => {
+    try {
+      return redactOpenClawIpcPayload(await ensureOpenClawBridge().regenerateLocalBridgeToken());
+    } catch (error) {
+      return { ok: false, error: error?.message || 'regenerate_token_failed' };
     }
   });
   ipcMain.handle('session:getDetail', (_event, args) => {

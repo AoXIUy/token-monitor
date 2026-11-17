@@ -449,6 +449,23 @@ class CredentialStore {
     return this.readIntegrationSecrets(document);
   }
 
+  readOpenClawLocalBridgeToken(document = this.readDocument()) {
+    const token = valueAt(document.credentials, ['integrations', 'reports', 'openclawLocalBridgeToken']);
+    return typeof token === 'string' ? token : '';
+  }
+
+  writeOpenClawLocalBridgeToken(token = '') {
+    const document = this.readDocument();
+    const cleaned = typeof token === 'string' ? token.trim() : '';
+    if (cleaned) {
+      setValueAt(document.credentials, ['integrations', 'reports', 'openclawLocalBridgeToken'], cleaned);
+    } else {
+      deleteValueAt(document.credentials, ['integrations', 'reports', 'openclawLocalBridgeToken']);
+    }
+    this.writeDocument(document);
+    return cleaned;
+  }
+
   migrateLegacyMimoCredentials(entries) {
     const document = this.readDocument();
     if (Number(document.migrations.mimoFiles || 0) >= MIMO_MIGRATION_VERSION) {

@@ -418,6 +418,8 @@ function createIntegrationManager({
 
   /** @type {Map<string, number>} */
   const succeededIdempotency = new Map();
+  /** @type {Map<string, Promise<any>>} */
+  const inFlightDispatches = new Map();
   const startupNowMs = now().getTime();
   for (let i = state.pushHistory.length - 1; i >= 0; i -= 1) {
     const entry = state.pushHistory[i];
@@ -680,6 +682,9 @@ function createIntegrationManager({
     if (!config.ai.enabled) {
       return { ok: false, error: 'ai_disabled', message: 'Third-party AI analysis is disabled.' };
     }
+    if (!reportManager || typeof reportManager.getReport !== 'function') {
+      return { ok: false, error: 'report_manager_unavailable', message: 'Report archive is unavailable.' };
+    }
     const fetched = reportManager.getReport(granularity, periodKey, { format: 'json' });
     if (!fetched || fetched.ok === false || !fetched.report) {
       return {
@@ -896,77 +901,103 @@ function createIntegrationManager({
       };
     }
 
-    /** @type {any} */
-    const pushResult = await trackTask(sendToOpenClawWebhook({
-      config: config.openclaw,
-      hookToken: secrets.openclawHookToken,
-      report,
-      analysis,
-      stats,
-      limitsSummary,
-      eventType: cleanEventType,
-      eventPayload: payload,
-      promptPrefix: typeof promptPrefix === 'string' ? promptPrefix : '',
-      customMessage: typeof text === 'string' ? text : '',
-      idempotencyKey: cleanKey,
-      fetchImpl: httpFetch,
-      now
-    }));
-
-    const atIso = now().toISOString();
-    const ok = pushResult.ok === true;
-    const cleanError = ok ? null : (pushResult.error || 'push_failed');
-    const cleanMessage = ok ? null : (redactPushText(pushResult.message || '', secretVals).slice(0, 300) || null);
-    const cleanSummary = derivePushSummary(cleanEventType, text, payload, summary, secretVals);
-
-    const entry = {
-      id: crypto.randomUUID(),
-      at: atIso,
-      eventType: cleanEventType,
-      ok,
-      statusCode: Number.isInteger(pushResult.statusCode) ? pushResult.statusCode : null,
-      error: cleanError,
-      message: cleanMessage,
-      channel: config.openclaw.channel,
-      mode: config.openclaw.mode,
-      source: cleanSource,
-      summary: cleanSummary || null,
-      idempotencyKey: cleanKey || null
-    };
-
-    state.lastPush = {
-      at: atIso,
-      ok,
-      error: cleanError,
-      message: cleanMessage,
-      statusCode: entry.statusCode,
-      reportId: report?.reportId || null,
-      eventType: cleanEventType,
-      channel: config.openclaw.channel,
-      mode: config.openclaw.mode,
-      source: cleanSource,
-      summary: entry.summary
-    };
-    state.pushHistory = [entry, ...state.pushHistory].slice(0, MAX_PUSH_HISTORY);
-
-    if (ok && cleanKey) {
-      succeededIdempotency.delete(cleanKey);
-      succeededIdempotency.set(cleanKey, now().getTime());
-      pruneIdempotencyWindow(now().getTime());
+    if (cleanKey && inFlightDispatches.has(cleanKey)) {
+      const existingResult = await inFlightDispatches.get(cleanKey);
+      if (existingResult && existingResult.ok === true) {
+        return {
+          ...existingResult,
+          deduplicated: true,
+          skipped: true
+        };
+      }
+      return existingResult;
     }
 
+    const executeDispatch = async () => {
+      /** @type {any} */
+      const pushResult = await trackTask(sendToOpenClawWebhook({
+        config: config.openclaw,
+        hookToken: secrets.openclawHookToken,
+        report,
+        analysis,
+        stats,
+        limitsSummary,
+        eventType: cleanEventType,
+        eventPayload: payload,
+        promptPrefix: typeof promptPrefix === 'string' ? promptPrefix : '',
+        customMessage: typeof text === 'string' ? text : '',
+        idempotencyKey: cleanKey,
+        fetchImpl: httpFetch,
+        now
+      }));
+
+      const atIso = now().toISOString();
+      const ok = pushResult.ok === true;
+      const cleanError = ok ? null : (pushResult.error || 'push_failed');
+      const cleanMessage = ok ? null : (redactPushText(pushResult.message || '', secretVals).slice(0, 300) || null);
+      const cleanSummary = derivePushSummary(cleanEventType, text, payload, summary, secretVals);
+
+      const entry = {
+        id: crypto.randomUUID(),
+        at: atIso,
+        eventType: cleanEventType,
+        ok,
+        statusCode: Number.isInteger(pushResult.statusCode) ? pushResult.statusCode : null,
+        error: cleanError,
+        message: cleanMessage,
+        channel: config.openclaw.channel,
+        mode: config.openclaw.mode,
+        source: cleanSource,
+        summary: cleanSummary || null,
+        idempotencyKey: cleanKey || null
+      };
+
+      state.lastPush = {
+        at: atIso,
+        ok,
+        error: cleanError,
+        message: cleanMessage,
+        statusCode: entry.statusCode,
+        reportId: report?.reportId || null,
+        eventType: cleanEventType,
+        channel: config.openclaw.channel,
+        mode: config.openclaw.mode,
+        source: cleanSource,
+        summary: entry.summary
+      };
+      state.pushHistory = [entry, ...state.pushHistory].slice(0, MAX_PUSH_HISTORY);
+
+      if (ok && cleanKey) {
+        succeededIdempotency.delete(cleanKey);
+        succeededIdempotency.set(cleanKey, now().getTime());
+        pruneIdempotencyWindow(now().getTime());
+      }
+
+      try {
+        saveState();
+      } catch (error) {
+        logError(error, 'failed to persist OpenClaw push state');
+      }
+
+      return {
+        ...pushResult,
+        eventType: cleanEventType,
+        lastPush: state.lastPush,
+        entry
+      };
+    };
+
+    const dispatchPromise = executeDispatch();
+    if (cleanKey) {
+      inFlightDispatches.set(cleanKey, dispatchPromise);
+    }
     try {
-      saveState();
-    } catch (error) {
-      logError(error, 'failed to persist OpenClaw push state');
+      return await dispatchPromise;
+    } finally {
+      if (cleanKey && inFlightDispatches.get(cleanKey) === dispatchPromise) {
+        inFlightDispatches.delete(cleanKey);
+      }
     }
-
-    return {
-      ...pushResult,
-      eventType: cleanEventType,
-      lastPush: state.lastPush,
-      entry
-    };
   }
 
   function getPushHistory() {
@@ -1550,6 +1581,9 @@ function createIntegrationManager({
       return { ok: false, error: 'invalid_request', message: `Unsupported push target: ${target}` };
     }
 
+    if (!reportManager || typeof reportManager.getReport !== 'function') {
+      return { ok: false, error: 'report_manager_unavailable', message: 'Report archive is unavailable.' };
+    }
     const stats = getStats();
     const fetched = reportManager.getReport(granularity, periodKey, { format: 'json' });
     if (!fetched || fetched.ok === false || !fetched.report) {

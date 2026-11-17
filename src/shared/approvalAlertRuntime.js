@@ -4,7 +4,7 @@ const { createApprovalBridge } = require('./approvalBridge');
 const { createApprovalClient } = require('./approvalClient');
 const { ensureApprovalHookLauncher } = require('./approvalHooks');
 
-function createApprovalAlertRuntime({ dataDir, onError } = {}) {
+function createApprovalAlertRuntime({ dataDir, onError, onAlertSent } = {}) {
   let epoch = 0;
   let binding = '';
   let client = null;
@@ -21,9 +21,12 @@ function createApprovalAlertRuntime({ dataDir, onError } = {}) {
     return activeBridge ? activeBridge.stop() : Promise.resolve();
   }
 
-  function reconcile({ enabled, hubUrl, secret = '', deviceId } = {}) {
-    const active = Boolean(enabled && hubUrl && deviceId);
-    const nextBinding = active ? JSON.stringify([hubUrl, secret || '', deviceId]) : '';
+  function reconcile({ enabled, hubUrl, secret = '', deviceId, localOnly = false } = {}) {
+    const isLocalOnly = Boolean(localOnly);
+    const active = Boolean(enabled && (isLocalOnly || (hubUrl && deviceId)));
+    const nextBinding = active
+      ? JSON.stringify([isLocalOnly, isLocalOnly ? '' : hubUrl, secret || '', deviceId || ''])
+      : '';
     if (nextBinding === binding) return chain;
     epoch += 1;
     const currentEpoch = epoch;
@@ -40,19 +43,33 @@ function createApprovalAlertRuntime({ dataDir, onError } = {}) {
       } catch (error) {
         onError?.(error);
       }
-      const nextClient = createApprovalClient({ hubUrl, secret, deviceId, onError });
+      const nextClient = !isLocalOnly && hubUrl && deviceId
+        ? createApprovalClient({ hubUrl, secret, deviceId, onError })
+        : null;
       const nextBridge = createApprovalBridge({
         ...(dataDir ? { dataDir } : {}),
-        onAlert: (alert) => nextClient.sendAlert(alert)
+        onAlert: async (alert) => {
+          const result = nextClient
+            ? await nextClient.sendAlert(alert)
+            : { ok: false, localOnly: true, reason: 'local_only' };
+          if (typeof onAlertSent === 'function') {
+            try {
+              await onAlertSent(alert, result);
+            } catch (error) {
+              onError?.(error);
+            }
+          }
+          return result;
+        }
       });
       const started = await nextBridge.start();
       if (currentEpoch !== epoch) {
-        nextClient.stop();
+        nextClient?.stop();
         await nextBridge.stop();
         return;
       }
       if (!started.started) {
-        nextClient.stop();
+        nextClient?.stop();
         await nextBridge.stop();
         onError?.(new Error(`Approval alert bridge unavailable: ${started.reason || 'unknown'}`));
         return;

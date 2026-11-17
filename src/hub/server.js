@@ -140,6 +140,8 @@ function parseOptionalBoolParam(raw, fallback) {
  * Shared authenticated HTTP + MCP dispatcher for `/api/query/*`, `/api/reports*`,
  * `/api/integrations/openclaw/*`, `GET /api/approval-alerts`, and `POST /api/mcp`.
  * Reused identically by both `createHub()` and Desktop `openclawBridge.js` (`local` mode).
+ *
+ * @param {Record<string, any>} [options]
  */
 function createOpenClawEndpointSurface({
   getStats = () => ({}),
@@ -675,6 +677,12 @@ function createOpenClawEndpointSurface({
     }
   }
 
+  /**
+   * @param {http.IncomingMessage} req
+   * @param {http.ServerResponse} res
+   * @param {URL | null} [urlInput]
+   * @returns {Promise<boolean>}
+   */
   async function handleRequest(req, res, urlInput = null) {
     const url = urlInput || new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 
