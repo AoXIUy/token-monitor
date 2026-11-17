@@ -7,6 +7,26 @@ const { reportContentSignature } = require('./usageReport');
 const AI_PROTOCOLS = Object.freeze(['openai-compatible', 'anthropic-messages']);
 const AI_LANGUAGES = Object.freeze(['zh-CN', 'en', 'auto']);
 const OPENCLAW_MODES = Object.freeze(['openclaw-agent', 'openclaw-wake', 'generic-webhook']);
+const OPENCLAW_EVENT_TYPES = Object.freeze([
+  'report',
+  'session_completed',
+  'approval_alert',
+  'quota_alert',
+  'service_incident',
+  'query_digest',
+  'test',
+  'custom'
+]);
+const OPENCLAW_AGENT_PROMPT_PREFIXES = Object.freeze({
+  report: '请将以下 Token Monitor 用量与项目分析简报清晰准确地整理并发送给微信用户（保留核心数字与结论，不要遗漏预警）：\n\n',
+  session_completed: '请将以下 Token Monitor 会话完成通知清晰准确地整理并发送给微信用户（保留项目、模型、本轮增量与关键结论）：\n\n',
+  approval_alert: '请立即将以下 Token Monitor 操作审批提醒准确发送给微信用户，提醒其尽快确认（保留工具、命令与设备信息）：\n\n',
+  quota_alert: '请将以下 Token Monitor 额度告警/恢复通知清晰准确地发送给微信用户（保留渠道、剩余额度与重置时间）：\n\n',
+  service_incident: '请将以下 Token Monitor 第三方服务状态异常/恢复通知清晰准确地发送给微信用户（保留服务名称、影响与状态页信息）：\n\n',
+  query_digest: '请将以下 Token Monitor 数据查询摘要清晰准确地整理并发送给微信用户（保留关键指标与明细）：\n\n',
+  test: '请将以下 Token Monitor 连通性测试消息原样或简洁清晰地发送给微信用户，用于确认通道可用：\n\n',
+  custom: '请将以下 Token Monitor 通知消息清晰准确地发送给微信用户：\n\n'
+});
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
 const DEFAULT_AI_CONFIG = Object.freeze({
@@ -38,7 +58,37 @@ const DEFAULT_OPENCLAW_CONFIG = Object.freeze({
     monthly: true
   }),
   includeAiAnalysis: true,
-  includeLimits: true
+  includeLimits: true,
+  events: Object.freeze({
+    rollover: false,
+    sessionCompleted: false,
+    approvalAlerts: false,
+    quotaAlerts: false,
+    serviceIncidents: false
+  }),
+  sessionCompletion: Object.freeze({
+    clients: Object.freeze([]),
+    excludeSubagents: true,
+    excludeBackgroundReview: true,
+    minTurnTokens: 0,
+    minTotalTokens: 0,
+    debounceMs: 2500,
+    cooldownMs: 0,
+    includeDetailSummary: false,
+    includeAiSummary: false
+  }),
+  quotaAlerts: Object.freeze({
+    thresholdPercent: 20,
+    notifyRecovery: true
+  }),
+  queryPermissions: Object.freeze({
+    allowSessionDetail: false,
+    allowConversationText: false
+  }),
+  localBridge: Object.freeze({
+    enabled: false,
+    port: 17322
+  })
 });
 
 /**
@@ -143,6 +193,38 @@ function normalizeAiIntegrationConfig(raw) {
 }
 
 /**
+ * @param {any} value
+ * @param {number} min
+ * @param {number} max
+ * @param {number} fallback
+ * @returns {number}
+ */
+function clampInt(value, min, max, fallback) {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(parsed)));
+}
+
+/**
+ * @param {any} value
+ * @returns {string[]}
+ */
+function normalizeClientList(value) {
+  if (!Array.isArray(value)) return [];
+  /** @type {Set<string>} */
+  const seen = new Set();
+  for (const item of value) {
+    const clean = cleanText(item, 64).toLowerCase();
+    if (clean) seen.add(clean);
+    if (seen.size >= 64) break;
+  }
+  return Array.from(seen);
+}
+
+/**
  * @param {any} raw
  */
 function normalizeOpenClawIntegrationConfig(raw) {
@@ -152,6 +234,18 @@ function normalizeOpenClawIntegrationConfig(raw) {
     OPENCLAW_MODES.includes(rawMode) ? rawMode : DEFAULT_OPENCLAW_CONFIG.mode
   );
   const rawGran = isPlainObject(src.pushGranularities) ? src.pushGranularities : {};
+  const rawEvents = isPlainObject(src.events) ? src.events : {};
+  const rawSessionCompletion = isPlainObject(src.sessionCompletion) ? src.sessionCompletion : {};
+  const rawQuotaAlerts = isPlainObject(src.quotaAlerts) ? src.quotaAlerts : {};
+  const rawQueryPermissions = isPlainObject(src.queryPermissions) ? src.queryPermissions : {};
+  const rawLocalBridge = isPlainObject(src.localBridge) ? src.localBridge : {};
+
+  // Keep pushOnRollover and events.rollover consistent in both directions.
+  const hasExplicitRollover = typeof rawEvents.rollover === 'boolean';
+  const rollover = hasExplicitRollover
+    ? rawEvents.rollover
+    : src.pushOnRollover === true;
+
   return {
     enabled: src.enabled === true,
     mode,
@@ -161,15 +255,104 @@ function normalizeOpenClawIntegrationConfig(raw) {
     agentId: cleanText(src.agentId, 64) || DEFAULT_OPENCLAW_CONFIG.agentId,
     senderName: cleanText(src.senderName, 64) || DEFAULT_OPENCLAW_CONFIG.senderName,
     deliver: src.deliver !== false,
-    pushOnRollover: src.pushOnRollover === true,
+    pushOnRollover: rollover,
     pushGranularities: {
       daily: rawGran.daily !== false,
       weekly: rawGran.weekly !== false,
       monthly: rawGran.monthly !== false
     },
     includeAiAnalysis: src.includeAiAnalysis !== false,
-    includeLimits: src.includeLimits !== false
+    includeLimits: src.includeLimits !== false,
+    events: {
+      rollover,
+      sessionCompleted: rawEvents.sessionCompleted === true,
+      approvalAlerts: rawEvents.approvalAlerts === true,
+      quotaAlerts: rawEvents.quotaAlerts === true,
+      serviceIncidents: rawEvents.serviceIncidents === true
+    },
+    sessionCompletion: {
+      clients: normalizeClientList(rawSessionCompletion.clients),
+      excludeSubagents: rawSessionCompletion.excludeSubagents !== false,
+      excludeBackgroundReview: rawSessionCompletion.excludeBackgroundReview !== false,
+      minTurnTokens: clampInt(rawSessionCompletion.minTurnTokens, 0, Number.MAX_SAFE_INTEGER, DEFAULT_OPENCLAW_CONFIG.sessionCompletion.minTurnTokens),
+      minTotalTokens: clampInt(rawSessionCompletion.minTotalTokens, 0, Number.MAX_SAFE_INTEGER, DEFAULT_OPENCLAW_CONFIG.sessionCompletion.minTotalTokens),
+      debounceMs: clampInt(rawSessionCompletion.debounceMs, 0, 600_000, DEFAULT_OPENCLAW_CONFIG.sessionCompletion.debounceMs),
+      cooldownMs: clampInt(rawSessionCompletion.cooldownMs, 0, 86_400_000, DEFAULT_OPENCLAW_CONFIG.sessionCompletion.cooldownMs),
+      includeDetailSummary: rawSessionCompletion.includeDetailSummary === true,
+      includeAiSummary: rawSessionCompletion.includeAiSummary === true
+    },
+    quotaAlerts: {
+      thresholdPercent: clampInt(rawQuotaAlerts.thresholdPercent, 1, 99, DEFAULT_OPENCLAW_CONFIG.quotaAlerts.thresholdPercent),
+      notifyRecovery: rawQuotaAlerts.notifyRecovery !== false
+    },
+    queryPermissions: {
+      allowSessionDetail: rawQueryPermissions.allowSessionDetail === true,
+      allowConversationText: rawQueryPermissions.allowConversationText === true
+    },
+    localBridge: {
+      enabled: rawLocalBridge.enabled === true,
+      port: clampInt(rawLocalBridge.port, 1, 65535, DEFAULT_OPENCLAW_CONFIG.localBridge.port)
+    }
   };
+}
+
+/**
+ * Deep-merge an OpenClaw integration patch onto an existing config while keeping
+ * `pushOnRollover` and `events.rollover` synchronized.
+ * @param {any} current
+ * @param {any} patch
+ */
+function mergeOpenClawIntegrationConfig(current, patch) {
+  const base = normalizeOpenClawIntegrationConfig(current);
+  if (!isPlainObject(patch)) return base;
+
+  const patchGran = isPlainObject(patch.pushGranularities) ? patch.pushGranularities : {};
+  const patchEvents = isPlainObject(patch.events) ? patch.events : {};
+  const patchSc = isPlainObject(patch.sessionCompletion) ? patch.sessionCompletion : {};
+  const patchQa = isPlainObject(patch.quotaAlerts) ? patch.quotaAlerts : {};
+  const patchQp = isPlainObject(patch.queryPermissions) ? patch.queryPermissions : {};
+  const patchLb = isPlainObject(patch.localBridge) ? patch.localBridge : {};
+
+  const hasPatchPushOnRollover = typeof patch.pushOnRollover === 'boolean';
+  const hasPatchEventsRollover = typeof patchEvents.rollover === 'boolean';
+
+  const mergedEvents = {
+    ...base.events,
+    ...patchEvents
+  };
+  let mergedPushOnRollover = hasPatchPushOnRollover ? patch.pushOnRollover : base.pushOnRollover;
+  if (hasPatchPushOnRollover && !hasPatchEventsRollover) {
+    mergedEvents.rollover = patch.pushOnRollover;
+  } else if (hasPatchEventsRollover && !hasPatchPushOnRollover) {
+    mergedPushOnRollover = patchEvents.rollover;
+  }
+
+  return normalizeOpenClawIntegrationConfig({
+    ...base,
+    ...patch,
+    pushOnRollover: mergedPushOnRollover,
+    pushGranularities: {
+      ...base.pushGranularities,
+      ...patchGran
+    },
+    events: mergedEvents,
+    sessionCompletion: {
+      ...base.sessionCompletion,
+      ...patchSc
+    },
+    quotaAlerts: {
+      ...base.quotaAlerts,
+      ...patchQa
+    },
+    queryPermissions: {
+      ...base.queryPermissions,
+      ...patchQp
+    },
+    localBridge: {
+      ...base.localBridge,
+      ...patchLb
+    }
+  });
 }
 
 /**
@@ -797,6 +980,913 @@ function formatOpenClawWeChatMessage({
 }
 
 /**
+ * Collapse newlines/control chars for single-line WeChat bullets.
+ * @param {any} value
+ * @param {number} [maxLen]
+ * @returns {string}
+ */
+function cleanSingleLine(value, maxLen = 200) {
+  if (typeof value !== 'string') return '';
+  const cleaned = value.replace(/[\r\n\t\x00-\x1f\x7f]+/gu, ' ').replace(/\s+/gu, ' ').trim();
+  return maxLen > 0 ? cleaned.slice(0, maxLen) : cleaned;
+}
+
+/**
+ * Bound a WeChat digest string strictly to `maxChars` (default 3500).
+ * @param {string} text
+ * @param {number} [maxChars]
+ * @returns {string}
+ */
+function truncateWeChatMessage(text, maxChars = 3500) {
+  const limit = typeof maxChars === 'number' && Number.isFinite(maxChars) && maxChars > 0
+    ? Math.floor(maxChars)
+    : 3500;
+  const raw = String(text || '');
+  if (raw.length <= limit) return raw;
+  const suffix = '\n…(内容过长已截断)';
+  if (limit <= 1) return raw.slice(0, limit);
+  if (limit <= suffix.length + 8) {
+    let head = raw.slice(0, limit - 1);
+    if (/[\uD800-\uDBFF]$/u.test(head)) head = head.slice(0, -1);
+    return `${head}…`;
+  }
+  let head = raw.slice(0, limit - suffix.length);
+  if (/[\uD800-\uDBFF]$/u.test(head)) head = head.slice(0, -1);
+  return `${head}${suffix}`;
+}
+
+/**
+ * @param {any} value
+ * @returns {string}
+ */
+function formatTimestampLabel(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return new Date(value).toISOString();
+  }
+  if (typeof value === 'string') {
+    const trimmed = cleanSingleLine(value, 64);
+    if (!trimmed) return '';
+    const parsed = Date.parse(trimmed);
+    return Number.isFinite(parsed) ? trimmed : '';
+  }
+  return '';
+}
+
+/**
+ * @param {number} ms
+ * @returns {string}
+ */
+function formatDurationCompact(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const totalSec = Math.round(ms / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const totalMin = Math.floor(totalSec / 60);
+  const remSec = totalSec % 60;
+  if (totalMin < 60) return remSec > 0 ? `${totalMin}m ${remSec}s` : `${totalMin}m`;
+  const hours = Math.floor(totalMin / 60);
+  const remMin = totalMin % 60;
+  return remMin > 0 ? `${hours}h ${remMin}m` : `${hours}h`;
+}
+
+/**
+ * Resolve sanitized display label for a provider/account without exposing email addresses.
+ * @param {any} obj
+ * @param {string} [fallback]
+ * @returns {string}
+ */
+function safeAccountDisplayLabel(obj, fallback = '') {
+  if (!isPlainObject(obj)) return fallback;
+  const candidates = [
+    obj.accountLabel,
+    obj.profileName,
+    obj.accountName,
+    obj.label,
+    obj.planLabel
+  ];
+  for (const cand of candidates) {
+    const clean = cleanSingleLine(cand, 80);
+    if (clean && !clean.includes('@')) return clean;
+  }
+  const rawAcctId = cleanSingleLine(obj.accountId, 80);
+  if (rawAcctId && !rawAcctId.includes('@')) return rawAcctId;
+  return fallback;
+}
+
+/**
+ * Resolve AI summary text whether passed as a string or an analysis object.
+ * @param {any} aiSummary
+ * @returns {{ text: string, label: string }}
+ */
+function resolveAiSummaryBlock(aiSummary) {
+  if (typeof aiSummary === 'string') {
+    return { text: aiSummary.trim(), label: 'AI' };
+  }
+  if (isPlainObject(aiSummary)) {
+    const label = cleanSingleLine(aiSummary.providerLabel || aiSummary.model || 'AI', 64) || 'AI';
+    if (typeof aiSummary.summaryMarkdown === 'string' && aiSummary.summaryMarkdown.trim()) {
+      return { text: aiSummary.summaryMarkdown.trim(), label };
+    }
+    if (typeof aiSummary.summary === 'string' && aiSummary.summary.trim()) {
+      return { text: aiSummary.summary.trim(), label };
+    }
+  }
+  return { text: '', label: 'AI' };
+}
+
+/**
+ * Append WeChat-friendly limits snapshot bullet lines.
+ * @param {string[]} lines
+ * @param {any} limitsSummary
+ * @param {number} [maxItems]
+ */
+function appendLimitsSnapshotBullets(lines, limitsSummary, maxItems = 6) {
+  const providers = Array.isArray(limitsSummary?.providers) ? limitsSummary.providers : [];
+  if (providers.length === 0) return;
+  const sorted = [...providers].sort((a, b) => Number(b?.isThirdParty) - Number(a?.isThirdParty));
+  for (const prov of sorted.slice(0, maxItems)) {
+    const isThirdParty = prov?.isThirdParty === true || prov?.provider === 'thirdparty';
+    const adapterId = cleanSingleLine(prov?.adapterId, 32);
+    const tag = isThirdParty ? `[三方API${adapterId ? `/${adapterId}` : ''}] ` : '';
+    const label = safeAccountDisplayLabel(prov, cleanSingleLine(prov?.providerLabel || prov?.provider, 64) || '未知渠道');
+    const bal = optionalNum(prov?.balance?.amount);
+    const cur = cleanSingleLine(prov?.balance?.currency, 12) || 'USD';
+    const monthSpend = optionalNum(prov?.balance?.monthSpend);
+    const tightWin = Array.isArray(prov?.windows) ? prov.windows[0] : null;
+    const winRem = optionalNum(tightWin?.remainingPercent);
+    const parts = [
+      bal !== null ? `余额 ${formatMoney(bal, cur)}` : '',
+      monthSpend !== null ? `本月 ${formatMoney(monthSpend, cur)}` : '',
+      winRem !== null ? `剩余 ${Number(winRem.toFixed(1))}%` : ''
+    ].filter(Boolean);
+    const detail = parts.join(' · ') || cleanSingleLine(prov?.status, 32) || 'unknown';
+    lines.push(`• ${tag}${label}: ${detail}`);
+  }
+}
+
+/**
+ * Format a WeChat-friendly digest for a completed agent session turn.
+ * @param {{
+ *   completion?: any,
+ *   detailSummary?: any,
+ *   aiSummary?: any,
+ *   limitsSummary?: any,
+ *   maxChars?: number
+ * }} [params]
+ * @returns {string}
+ */
+function formatOpenClawSessionCompletedMessage({
+  completion = null,
+  detailSummary = null,
+  aiSummary = null,
+  limitsSummary = null,
+  maxChars = 3500
+} = {}) {
+  const c = isPlainObject(completion) ? completion : {};
+  const client = cleanSingleLine(c.client, 48);
+  const device = cleanSingleLine(c.deviceName || c.hostname || c.deviceId, 80);
+  const project = cleanSingleLine(c.projectLabel || c.project, 120);
+  // Respect sessionTitlesEnabled privacy gating: only read explicit string `title`, never fallback to hidden title keys.
+  const sessionTitle = typeof c.title === 'string' ? cleanSingleLine(c.title, 160) : '';
+  const sessionId = cleanSingleLine(c.sessionId || c.key, 96);
+  const model = cleanSingleLine(c.model || c.latestModel, 80);
+  const reasoningEffort = cleanSingleLine(c.reasoningEffort, 32);
+  const modelDisplay = model ? (reasoningEffort ? `${model} (${reasoningEffort})` : model) : '';
+
+  /** @type {string[]} */
+  const lines = [];
+  lines.push(`✅ Token Monitor 会话完成通知${client ? ` (${client})` : ''}`);
+
+  const toolParts = [
+    client ? `工具 ${client}` : '',
+    modelDisplay ? `模型 ${modelDisplay}` : '',
+    device ? `设备 ${device}` : ''
+  ].filter(Boolean);
+  if (toolParts.length > 0) {
+    lines.push(`• ${toolParts.join(' · ')}`);
+  }
+
+  const contextParts = [
+    project ? `项目 ${project}` : '',
+    sessionTitle ? `标题 ${sessionTitle}` : (sessionId ? `会话 ${sessionId}` : '')
+  ].filter(Boolean);
+  if (contextParts.length > 0) {
+    lines.push(`• ${contextParts.join(' · ')}`);
+  }
+
+  if (isPlainObject(c.turnDelta)) {
+    const td = c.turnDelta;
+    const tdTokens = optionalNum(td.totalTokens);
+    const tdIn = optionalNum(td.inputTokens);
+    const tdOut = optionalNum(td.outputTokens);
+    const tdCost = optionalNum(td.costUsd);
+    const tdMsgs = optionalNum(td.messageCount);
+    const deltaParts = [
+      tdTokens !== null ? `+${formatCompactTokens(tdTokens)} tokens` : '',
+      (tdIn !== null || tdOut !== null)
+        ? `输入 ${formatCompactTokens(tdIn ?? 0)} / 输出 ${formatCompactTokens(tdOut ?? 0)}`
+        : '',
+      tdCost !== null ? `费用 ${formatMoney(tdCost)}` : '',
+      tdMsgs !== null && tdMsgs > 0 ? `+${Math.round(tdMsgs)} 条消息` : ''
+    ].filter(Boolean);
+    if (deltaParts.length > 0) {
+      lines.push(`• 本轮增量：${deltaParts.join(' · ')}`);
+    }
+  }
+
+  const totTokens = optionalNum(c.totalTokens);
+  const totCost = optionalNum(c.costUsd);
+  const cacheHit = optionalNum(c.cacheHitRatePct);
+  const msgCount = optionalNum(c.messageCount);
+  const totalParts = [
+    totTokens !== null ? `${formatCompactTokens(totTokens)} tokens` : '',
+    totCost !== null ? `费用 ${formatMoney(totCost)}` : '',
+    cacheHit !== null ? `缓存命中 ${cacheHit.toFixed(1)}%` : '',
+    msgCount !== null && msgCount > 0 ? `消息 ${Math.round(msgCount)} 条` : ''
+  ].filter(Boolean);
+  if (totalParts.length > 0) {
+    lines.push(`• 会话累计：${totalParts.join(' · ')}`);
+  }
+
+  const ctxTokens = optionalNum(c.contextTokens);
+  const ctxWindow = optionalNum(c.contextWindow);
+  const ctxLeft = optionalNum(c.contextPercentLeft);
+  if (ctxWindow !== null && ctxWindow > 0 && ctxTokens !== null) {
+    const pctLeft = ctxLeft !== null
+      ? Math.max(0, Math.round(ctxLeft))
+      : Math.max(0, Math.round(((ctxWindow - ctxTokens) / ctxWindow) * 100));
+    lines.push(`• 上下文窗口：${formatCompactTokens(ctxTokens)} / ${formatCompactTokens(ctxWindow)}（剩余 ${pctLeft}%）`);
+  }
+
+  const startedMs = Date.parse(String(c.startedAt || ''));
+  const endedMs = Date.parse(String(c.lastUsedAt || ''));
+  const durMs = optionalNum(c.durationMs)
+    ?? (Number.isFinite(startedMs) && Number.isFinite(endedMs) && endedMs >= startedMs ? endedMs - startedMs : null);
+  const lastUsedLabel = formatTimestampLabel(c.lastUsedAt);
+  if (lastUsedLabel || durMs !== null) {
+    const timeParts = [
+      lastUsedLabel ? `完成于 ${lastUsedLabel}` : '',
+      durMs !== null ? `耗时 ${formatDurationCompact(durMs)}` : ''
+    ].filter(Boolean);
+    lines.push(`• ${timeParts.join(' · ')}`);
+  }
+
+  if (lines.length === 1) {
+    lines.push('• 状态：会话轮次已完成。');
+  }
+
+  if (typeof detailSummary === 'string' && detailSummary.trim()) {
+    lines.push('');
+    lines.push('📝 会话详情摘要：');
+    lines.push(`• ${cleanSingleLine(detailSummary, 900)}`);
+  } else if (isPlainObject(detailSummary)) {
+    /** @type {string[]} */
+    const detailLines = [];
+    const summaryText = cleanSingleLine(detailSummary.summary || detailSummary.text, 700);
+    if (summaryText) detailLines.push(`• ${summaryText}`);
+    const exCount = optionalNum(detailSummary.exchangeCount ?? detailSummary.exchangesCount ?? detailSummary.turnCount);
+    if (exCount !== null && exCount > 0) detailLines.push(`• 交互轮次：${Math.round(exCount)} 轮`);
+    if (Array.isArray(detailSummary.tools) && detailSummary.tools.length > 0) {
+      const toolNames = detailSummary.tools
+        .map((/** @type {any} */ t) => cleanSingleLine(t, 48))
+        .filter(Boolean)
+        .slice(0, 8);
+      if (toolNames.length > 0) detailLines.push(`• 调用工具：${toolNames.join('、')}`);
+    }
+    if (Array.isArray(detailSummary.highlights)) {
+      for (const h of detailSummary.highlights.slice(0, 4)) {
+        const cleanH = cleanSingleLine(h, 240);
+        if (cleanH) detailLines.push(`• ${cleanH}`);
+      }
+    }
+    const promptPreview = cleanSingleLine(detailSummary.lastPrompt || detailSummary.promptPreview, 240);
+    if (promptPreview) detailLines.push(`• 最近指令：${promptPreview}`);
+    if (detailLines.length > 0) {
+      lines.push('');
+      lines.push('📝 会话详情摘要：');
+      lines.push(...detailLines);
+    }
+  }
+
+  if (isPlainObject(limitsSummary) && Array.isArray(limitsSummary.providers) && limitsSummary.providers.length > 0) {
+    lines.push('');
+    lines.push('💳 额度快照：');
+    appendLimitsSnapshotBullets(lines, limitsSummary, 4);
+  }
+
+  const ai = resolveAiSummaryBlock(aiSummary);
+  if (ai.text) {
+    lines.push('');
+    lines.push(`🧠 AI 总结 (${ai.label})：`);
+    lines.push(ai.text);
+  }
+
+  return truncateWeChatMessage(lines.join('\n'), maxChars);
+}
+
+/**
+ * Format a WeChat-friendly digest for an agent tool approval alert.
+ * @param {any} alert
+ * @param {{ maxChars?: number }} [options]
+ * @returns {string}
+ */
+function formatOpenClawApprovalAlertMessage(alert = {}, { maxChars = 3500 } = {}) {
+  const a = isPlainObject(alert) ? alert : {};
+  const client = cleanSingleLine(a.client, 48);
+  const device = cleanSingleLine(a.deviceName || a.hostname || a.deviceId, 80);
+  const project = cleanSingleLine(a.projectLabel || a.project, 120);
+  const tool = cleanSingleLine(a.tool, 96);
+  const description = cleanSingleLine(a.description || a.reason || a.summary, 400);
+  const commandPreview = cleanSingleLine(a.command, 600);
+  const sessionId = cleanSingleLine(a.sessionId, 96);
+  const createdAtLabel = formatTimestampLabel(a.createdAt || a.timestamp);
+  const expiresAtLabel = formatTimestampLabel(a.expiresAt);
+
+  /** @type {string[]} */
+  const lines = [];
+  lines.push(`⚠️ Token Monitor 操作审批提醒${client ? ` (${client})` : ''}`);
+
+  const originParts = [
+    client ? `客户端 ${client}` : '',
+    device ? `设备 ${device}` : ''
+  ].filter(Boolean);
+  if (originParts.length > 0) lines.push(`• 来源：${originParts.join(' · ')}`);
+  if (project) lines.push(`• 项目：${project}`);
+  if (tool) lines.push(`• 请求工具：${tool}`);
+  if (description) lines.push(`• 操作说明：${description}`);
+  if (commandPreview) lines.push(`• 执行内容：${commandPreview}`);
+  if (sessionId) lines.push(`• 会话ID：${sessionId}`);
+  if (createdAtLabel || expiresAtLabel) {
+    const timeParts = [
+      createdAtLabel ? `触发 ${createdAtLabel}` : '',
+      expiresAtLabel ? `过期 ${expiresAtLabel}` : ''
+    ].filter(Boolean);
+    lines.push(`• 时间：${timeParts.join(' · ')}`);
+  }
+  lines.push('• 处理建议：请尽快在桌面端或终端确认是否批准执行。');
+
+  return truncateWeChatMessage(lines.join('\n'), maxChars);
+}
+
+/**
+ * Format a WeChat-friendly digest for a quota threshold alert or recovery event.
+ * Never exposes raw account email addresses.
+ * @param {any} alert
+ * @param {{ maxChars?: number }} [options]
+ * @returns {string}
+ */
+function formatOpenClawQuotaAlertMessage(alert = {}, { maxChars = 3500 } = {}) {
+  const a = isPlainObject(alert) ? alert : {};
+  const eventKind = cleanSingleLine(String(a.event || a.alertType || a.type || a.kind || a.status || 'low'), 32).toLowerCase();
+  const isRecovery = eventKind === 'restored'
+    || eventKind === 'recovered'
+    || eventKind === 'recovery'
+    || eventKind === 'full'
+    || eventKind === 'ok';
+  const provider = cleanSingleLine(a.provider, 48);
+  const providerLabel = cleanSingleLine(a.providerLabel || a.label || a.provider, 80) || '未知渠道';
+  const accountDisplay = safeAccountDisplayLabel(a);
+  const adapterId = cleanSingleLine(a.adapterId, 48);
+  const isThirdParty = a.isThirdParty === true || provider === 'thirdparty';
+
+  const remainingPct = optionalNum(a.remainingPercent ?? a.remaining);
+  const explicitUsedPct = optionalNum(a.usedPercent);
+  const usedPct = explicitUsedPct !== null
+    ? explicitUsedPct
+    : (remainingPct !== null ? Number(Math.max(0, 100 - remainingPct).toFixed(1)) : null);
+  const thresholdPct = optionalNum(a.thresholdPercent ?? a.threshold);
+  const previousRemaining = optionalNum(a.previousRemaining ?? a.previousRemainingPercent);
+  const windows = Array.isArray(a.windows) ? a.windows : [];
+  const balance = isPlainObject(a.balance) ? a.balance : null;
+  const observedAtLabel = formatTimestampLabel(a.observedAt || a.triggeredAt || a.updatedAt || a.timestamp);
+  const summaryNote = cleanSingleLine(a.message || a.summary || a.reason, 300);
+
+  /** @type {string[]} */
+  const lines = [];
+  lines.push(`${isRecovery ? '✅ Token Monitor 额度恢复通知' : '🚨 Token Monitor 额度预警'} (${providerLabel})`);
+
+  const tag = isThirdParty ? `[三方API${adapterId ? `/${adapterId}` : ''}] ` : '';
+  const acctSuffix = accountDisplay && accountDisplay !== providerLabel ? ` · 账号 ${accountDisplay}` : '';
+  lines.push(`• 渠道：${tag}${providerLabel}${acctSuffix}`);
+
+  const statusText = eventKind === 'full'
+    ? '已恢复满额'
+    : isRecovery
+      ? '已恢复至阈值以上'
+      : '低于预警阈值';
+  const metricParts = [
+    `状态 ${statusText}`,
+    remainingPct !== null ? `剩余 ${Number(remainingPct.toFixed(1))}%` : '',
+    usedPct !== null ? `已用 ${Number(usedPct.toFixed(1))}%` : '',
+    thresholdPct !== null ? `阈值 ${Math.round(thresholdPct)}%` : '',
+    previousRemaining !== null ? `先前 ${Number(previousRemaining.toFixed(1))}%` : ''
+  ].filter(Boolean);
+  lines.push(`• 额度概况：${metricParts.join(' · ')}`);
+
+  if (balance) {
+    const cur = cleanSingleLine(balance.currency, 12) || 'USD';
+    const balAmt = optionalNum(balance.amount);
+    const balLimit = optionalNum(balance.limit);
+    const monthSpend = optionalNum(balance.monthSpend);
+    const todaySpend = optionalNum(balance.todaySpend);
+    const balParts = [
+      balAmt !== null ? `余额 ${formatMoney(balAmt, cur)}` : '',
+      balLimit !== null ? `总额度 ${formatMoney(balLimit, cur)}` : '',
+      monthSpend !== null ? `本月 ${formatMoney(monthSpend, cur)}` : '',
+      todaySpend !== null ? `今日 ${formatMoney(todaySpend, cur)}` : ''
+    ].filter(Boolean);
+    if (balParts.length > 0) {
+      lines.push(`• 账户资金：${balParts.join(' · ')}`);
+    }
+  }
+
+  for (const win of windows.slice(0, 6)) {
+    const wLabel = cleanSingleLine(win?.displayLabel || win?.label || win?.kind || win?.limitId, 64) || '窗口';
+    const wRem = optionalNum(win?.remainingPercent);
+    const wUsed = optionalNum(win?.usedPercent);
+    const wReset = formatTimestampLabel(win?.resetsAt);
+    const wParts = [
+      wRem !== null ? `剩余 ${Number(wRem.toFixed(1))}%` : '',
+      wUsed !== null ? `已用 ${Number(wUsed.toFixed(1))}%` : '',
+      wReset ? `重置 ${wReset}` : ''
+    ].filter(Boolean);
+    lines.push(`• 窗口 ${wLabel}：${wParts.join(' · ') || '状态未知'}`);
+  }
+
+  if (summaryNote) lines.push(`• 说明：${summaryNote}`);
+  if (observedAtLabel) lines.push(`• 检测时间：${observedAtLabel}`);
+
+  return truncateWeChatMessage(lines.join('\n'), maxChars);
+}
+
+/** @type {Record<string, string>} */
+const SERVICE_STATUS_LABELS = Object.freeze({
+  ok: '正常',
+  operational: '正常',
+  degraded: '性能降级',
+  outage: '服务中断',
+  major: '严重故障',
+  critical: '严重中断',
+  minor: '局部异常',
+  maintenance: '维护中',
+  unknown: '状态未知'
+});
+
+/**
+ * Format a WeChat-friendly digest for an upstream AI service status incident or recovery.
+ * @param {any} incident
+ * @param {{ maxChars?: number }} [options]
+ * @returns {string}
+ */
+function formatOpenClawServiceIncidentMessage(incident = {}, { maxChars = 3500 } = {}) {
+  const inc = isPlainObject(incident) ? incident : {};
+  const hasExplicitService = Boolean(
+    cleanSingleLine(inc.serviceName || inc.providerLabel || inc.label || inc.service || inc.provider, 80)
+  );
+  const serviceName = cleanSingleLine(
+    inc.serviceName || inc.providerLabel || inc.label || inc.service || inc.provider || inc.id || inc.name,
+    80
+  ) || '未知服务';
+  const status = cleanSingleLine(inc.status, 32).toLowerCase();
+  const previousStatus = cleanSingleLine(inc.previousStatus, 32).toLowerCase();
+  const indicator = cleanSingleLine(inc.indicator || inc.severity, 32).toLowerCase();
+  const eventKind = cleanSingleLine(inc.event || inc.eventType, 32).toLowerCase();
+
+  const isResolved = inc.resolved === true
+    || eventKind === 'resolved'
+    || status === 'ok'
+    || status === 'operational'
+    || indicator === 'none';
+  const isOutage = !isResolved && (status === 'outage' || indicator === 'critical' || indicator === 'major');
+  const icon = isResolved ? '🟢' : isOutage ? '🔴' : '🟠';
+  const statusLabel = SERVICE_STATUS_LABELS[status]
+    || SERVICE_STATUS_LABELS[indicator]
+    || (isResolved ? '已恢复正常' : '服务异常');
+
+  const rawTitle = cleanSingleLine(
+    inc.incidentTitle || inc.title || inc.headline || (hasExplicitService ? inc.name : ''),
+    200
+  );
+  const incidentTitle = rawTitle && rawTitle !== serviceName ? rawTitle : '';
+  const description = cleanSingleLine(inc.description || inc.summary || inc.message, 400);
+  const rawComponents = Array.isArray(inc.componentIssues)
+    ? inc.componentIssues
+    : Array.isArray(inc.affectedComponents)
+      ? inc.affectedComponents
+      : Array.isArray(inc.components)
+        ? inc.components
+        : [];
+  const components = rawComponents
+    .slice(0, 6)
+    .map((/** @type {any} */ comp) => {
+      if (typeof comp === 'string') return cleanSingleLine(comp, 64);
+      if (!isPlainObject(comp)) return '';
+      const name = cleanSingleLine(comp.name || comp.component || comp.id, 64);
+      const compStatus = cleanSingleLine(comp.status, 32);
+      if (!name) return '';
+      return compStatus ? `${name} (${compStatus})` : name;
+    })
+    .filter(Boolean);
+
+  const incidentCount = optionalNum(inc.incidentCount);
+  const maintenanceCount = optionalNum(inc.maintenanceCount);
+  const pageUrl = normalizeHttpUrl(inc.pageUrl || inc.url);
+  const timeLabel = formatTimestampLabel(inc.updatedAt || inc.checkedAt || inc.timestamp);
+
+  /** @type {string[]} */
+  const lines = [];
+  lines.push(`${icon} Token Monitor ${isResolved ? '服务状态恢复' : '服务故障告警'} (${serviceName})`);
+  const prevNote = previousStatus && previousStatus !== status
+    ? `（原状态：${SERVICE_STATUS_LABELS[previousStatus] || previousStatus}）`
+    : '';
+  lines.push(`• 服务与状态：${serviceName} · ${statusLabel}${prevNote}`);
+  if (incidentTitle) lines.push(`• 事件标题：${incidentTitle}`);
+  if (description && description !== incidentTitle) lines.push(`• 状态描述：${description}`);
+  if (components.length > 0) lines.push(`• 受影响组件：${components.join('、')}`);
+  if ((incidentCount !== null && incidentCount > 0) || (maintenanceCount !== null && maintenanceCount > 0)) {
+    const countParts = [
+      incidentCount !== null && incidentCount > 0 ? `活跃事件 ${Math.round(incidentCount)}` : '',
+      maintenanceCount !== null && maintenanceCount > 0 ? `维护中 ${Math.round(maintenanceCount)}` : ''
+    ].filter(Boolean);
+    lines.push(`• 影响计数：${countParts.join(' · ')}`);
+  }
+  if (pageUrl) lines.push(`• 状态页：${pageUrl}`);
+  if (timeLabel) lines.push(`• 更新时间：${timeLabel}`);
+
+  return truncateWeChatMessage(lines.join('\n'), maxChars);
+}
+
+const SENSITIVE_DIGEST_KEYS = new Set([
+  'email', 'accountemail', 'apikey', 'hooktoken', 'bottoken', 'weixinbottoken',
+  'secret', 'password', 'authorization', 'cookie', 'credentials'
+]);
+
+/**
+ * Format a WeChat-friendly digest for unified OpenClaw data query results.
+ * Uses bullet lists only (no wide Markdown tables) and strips sensitive keys.
+ * @param {{
+ *   queryType?: string,
+ *   result?: any,
+ *   title?: string,
+ *   aiSummary?: any,
+ *   maxChars?: number
+ * }} [params]
+ * @returns {string}
+ */
+function formatOpenClawQueryDigestMessage({
+  queryType = '',
+  result = null,
+  title = '',
+  aiSummary = null,
+  maxChars = 3500
+} = {}) {
+  const cleanQueryType = cleanSingleLine(queryType, 64);
+  const cleanTitle = cleanSingleLine(title, 120);
+  /** @type {string[]} */
+  const lines = [];
+  lines.push(cleanTitle ? `📋 ${cleanTitle}` : `📋 Token Monitor 查询摘要${cleanQueryType ? ` (${cleanQueryType})` : ''}`);
+
+  if (result === null || result === undefined) {
+    lines.push('• 暂无查询结果数据。');
+  } else if (typeof result === 'string') {
+    const text = result.trim();
+    if (text) lines.push(`• ${cleanSingleLine(text, 1200)}`);
+    else lines.push('• 暂无查询结果数据。');
+  } else if (Array.isArray(result)) {
+    if (result.length === 0) {
+      lines.push('• 列表为空。');
+    } else {
+      for (const [idx, item] of result.slice(0, 10).entries()) {
+        if (isPlainObject(item)) {
+          const itemLabel = safeAccountDisplayLabel(item)
+            || cleanSingleLine(item.label || item.name || item.model || item.client || item.project || item.date || item.key || item.deviceId, 80)
+            || `条目 ${idx + 1}`;
+          const toks = optionalNum(item.totalTokens ?? item.tokens);
+          const cost = optionalNum(item.costUsd ?? item.knownCostUsd);
+          const parts = [
+            toks !== null ? `${formatCompactTokens(toks)} tokens` : '',
+            cost !== null ? formatMoney(cost) : ''
+          ].filter(Boolean);
+          lines.push(`${idx + 1}. ${itemLabel}${parts.length ? `: ${parts.join(' · ')}` : ''}`);
+        } else {
+          lines.push(`${idx + 1}. ${cleanSingleLine(String(item), 200)}`);
+        }
+      }
+    }
+  } else if (isPlainObject(result)) {
+    let renderedStructured = false;
+
+    if (isPlainObject(result.period)) {
+      const p = result.period;
+      const pLabel = cleanSingleLine(p.label || p.key || p.range || p.period, 80);
+      const pRange = p.startDate && p.endDate ? `${p.startDate} ~ ${p.endDate}` : '';
+      const pLine = [pLabel, pRange].filter(Boolean).join(' · ');
+      if (pLine) {
+        lines.push(`• 统计周期：${pLine}`);
+        renderedStructured = true;
+      }
+    }
+
+    const totals = isPlainObject(result.totals) ? result.totals : (
+      optionalNum(result.totalTokens) !== null ? result : null
+    );
+    if (totals && optionalNum(totals.totalTokens ?? totals.tokens) !== null) {
+      const tTokens = optionalNum(totals.totalTokens ?? totals.tokens) ?? 0;
+      const tCost = optionalNum(totals.knownCostUsd ?? totals.costUsd);
+      const tCache = optionalNum(totals.cacheHitRatePct);
+      const tSpeed = optionalNum(totals.avgOutputTokensPerSec);
+      const tParts = [
+        `总用量 ${formatCompactTokens(tTokens)} tokens`,
+        tCost !== null ? `费用 ${formatMoney(tCost)}` : '',
+        tCache !== null ? `缓存命中 ${tCache.toFixed(1)}%` : '',
+        tSpeed !== null && tSpeed > 0 ? `均速 ${tSpeed.toFixed(1)} tok/s` : ''
+      ].filter(Boolean);
+      lines.push(`• ${tParts.join(' · ')}`);
+      renderedStructured = true;
+    }
+
+    if (optionalNum(result.activeDays) !== null || isPlainObject(result.peakDay)) {
+      const histParts = [
+        optionalNum(result.activeDays) !== null ? `活跃天数 ${Math.round(Number(result.activeDays))} 天` : '',
+        optionalNum(result.currentStreak) !== null ? `当前连续 ${Math.round(Number(result.currentStreak))} 天` : '',
+        optionalNum(result.longestStreak) !== null ? `最长连续 ${Math.round(Number(result.longestStreak))} 天` : ''
+      ].filter(Boolean);
+      if (histParts.length > 0) {
+        lines.push(`• ${histParts.join(' · ')}`);
+        renderedStructured = true;
+      }
+      if (isPlainObject(result.peakDay) && result.peakDay.date) {
+        const pkTokens = optionalNum(result.peakDay.tokens ?? result.peakDay.totalTokens);
+        lines.push(`• 峰值日：${cleanSingleLine(result.peakDay.date, 32)}${pkTokens !== null ? ` (${formatCompactTokens(pkTokens)} tokens)` : ''}`);
+        renderedStructured = true;
+      }
+    }
+
+    if (result.speed !== undefined || result.burn !== undefined || result.fallbackAvgOutputTokensPerSec !== undefined) {
+      const rateState = cleanSingleLine(result.state, 32);
+      const speedVal = optionalNum(result.speed?.outputTokensPerSec ?? result.speed?.tokensPerSec ?? result.speed);
+      const burnVal = optionalNum(result.burn?.costPerHour ?? result.burn?.usdPerHour ?? result.burn);
+      const fallbackRate = optionalNum(result.fallbackAvgOutputTokensPerSec);
+      const devCount = optionalNum(result.deviceCount);
+      const rateParts = [
+        rateState ? `状态 ${rateState}` : '',
+        speedVal !== null ? `输出速率 ${speedVal.toFixed(1)} tok/s` : '',
+        burnVal !== null ? `消耗速率 ${formatMoney(burnVal)}/h` : '',
+        fallbackRate !== null && fallbackRate > 0 ? `平均速率 ${fallbackRate.toFixed(1)} tok/s` : '',
+        devCount !== null ? `设备 ${Math.round(devCount)} 台` : ''
+      ].filter(Boolean);
+      if (rateParts.length > 0) {
+        lines.push(`• 实时速率：${rateParts.join(' · ')}`);
+        renderedStructured = true;
+      }
+    }
+
+    const breakdownRows = Array.isArray(result.rows)
+      ? result.rows
+      : Array.isArray(result.items)
+        ? result.items
+        : Array.isArray(result.days)
+          ? result.days
+          : null;
+    if (breakdownRows && breakdownRows.length > 0) {
+      lines.push('');
+      lines.push('📌 明细 Top 10：');
+      for (const [idx, row] of breakdownRows.slice(0, 10).entries()) {
+        const label = cleanSingleLine(
+          row?.label || row?.hostname || row?.deviceName || row?.model || row?.client || row?.project || row?.date || row?.key || row?.deviceId,
+          80
+        ) || `第 ${idx + 1} 项`;
+        const toks = optionalNum(row?.tokens ?? row?.totalTokens);
+        const cost = optionalNum(row?.costUsd ?? row?.knownCostUsd);
+        const share = optionalNum(row?.tokenSharePct ?? row?.sharePct);
+        const rowParts = [
+          toks !== null ? `${formatCompactTokens(toks)} tokens` : '',
+          share !== null ? `${share.toFixed(1)}%` : '',
+          cost !== null ? formatMoney(cost) : ''
+        ].filter(Boolean);
+        lines.push(`${idx + 1}. ${label}${rowParts.length ? `: ${rowParts.join(' · ')}` : ''}`);
+      }
+      renderedStructured = true;
+    }
+
+    if (Array.isArray(result.sessions) && result.sessions.length > 0) {
+      lines.push('');
+      lines.push(`💬 会话列表（展示 ${Math.min(10, result.sessions.length)}/${optionalNum(result.total) ?? result.sessions.length}）：`);
+      for (const [idx, sess] of result.sessions.slice(0, 10).entries()) {
+        const state = cleanSingleLine(sess?.state || sess?.sessionActivityState, 24);
+        const client = cleanSingleLine(sess?.client, 32);
+        const model = cleanSingleLine(sess?.latestModel || sess?.model, 64);
+        const project = cleanSingleLine(sess?.projectLabel || sess?.project, 64);
+        const sessTitle = typeof sess?.title === 'string' ? cleanSingleLine(sess.title, 80) : '';
+        const toks = optionalNum(sess?.totalTokens ?? sess?.tokens);
+        const cost = optionalNum(sess?.costUsd);
+        const label = sessTitle || project || cleanSingleLine(sess?.sessionId || sess?.key, 48) || `会话 ${idx + 1}`;
+        const meta = [
+          state ? `[${state}]` : '',
+          client,
+          model,
+          toks !== null ? `${formatCompactTokens(toks)} tokens` : '',
+          cost !== null ? formatMoney(cost) : ''
+        ].filter(Boolean).join(' · ');
+        lines.push(`${idx + 1}. ${label}${meta ? ` — ${meta}` : ''}`);
+      }
+      renderedStructured = true;
+    }
+
+    if (Array.isArray(result.devices) && result.devices.length > 0) {
+      lines.push('');
+      lines.push(`🖥 设备状态（${result.devices.length} 台）：`);
+      for (const dev of result.devices.slice(0, 10)) {
+        const name = cleanSingleLine(dev?.hostname || dev?.deviceName || dev?.deviceId, 64) || '未知设备';
+        const platform = cleanSingleLine(dev?.osName || dev?.platform, 48);
+        const statusText = dev?.stale === true ? '离线/过期' : '在线';
+        const trackedCount = Array.isArray(dev?.trackedClients) ? dev.trackedClients.length : null;
+        const devParts = [
+          statusText,
+          platform,
+          trackedCount !== null ? `监控工具 ${trackedCount} 个` : ''
+        ].filter(Boolean);
+        lines.push(`• ${name}：${devParts.join(' · ')}`);
+      }
+      renderedStructured = true;
+    }
+
+    if (Array.isArray(result.providers) && result.providers.length > 0) {
+      lines.push('');
+      lines.push('💳 渠道与额度概览：');
+      appendLimitsSnapshotBullets(lines, result, 8);
+      renderedStructured = true;
+    }
+
+    if ((Array.isArray(result.subscriptions) && result.subscriptions.length > 0)
+      || (Array.isArray(result.forecasts) && result.forecasts.length > 0)
+      || optionalNum(result.monthlyAmountUsd) !== null) {
+      const monthlyUsd = optionalNum(result.monthlyAmountUsd);
+      if (monthlyUsd !== null) {
+        lines.push(`• 月度订阅合计：${formatMoney(monthlyUsd)}`);
+      }
+      if (Array.isArray(result.subscriptions) && result.subscriptions.length > 0) {
+        lines.push('');
+        lines.push('📅 订阅计划：');
+        for (const sub of result.subscriptions.slice(0, 6)) {
+          const sName = cleanSingleLine(sub?.name || sub?.label || sub?.provider, 64) || '订阅';
+          const amt = optionalNum(sub?.amountUsd ?? sub?.amount);
+          const cur = cleanSingleLine(sub?.currency, 12) || 'USD';
+          const renew = cleanSingleLine(sub?.nextRenewalDate, 32);
+          const daysLeft = optionalNum(sub?.daysUntilRenewal);
+          const sParts = [
+            amt !== null ? formatMoney(amt, cur) : '',
+            renew ? `续费 ${renew}` : '',
+            daysLeft !== null ? `距续费 ${Math.round(daysLeft)} 天` : ''
+          ].filter(Boolean);
+          lines.push(`• ${sName}${sParts.length ? `：${sParts.join(' · ')}` : ''}`);
+        }
+      }
+      if (Array.isArray(result.forecasts) && result.forecasts.length > 0) {
+        lines.push('');
+        lines.push('⏳ 额度耗尽预测：');
+        for (const fc of result.forecasts.slice(0, 6)) {
+          const fName = safeAccountDisplayLabel(fc, cleanSingleLine(fc?.provider, 64) || '账户');
+          const burn = optionalNum(fc?.dailyBurn);
+          const days = optionalNum(fc?.daysRemaining);
+          const exhaustDate = cleanSingleLine(fc?.exhaustDate, 32);
+          const fStatus = cleanSingleLine(fc?.status, 32);
+          const fParts = [
+            burn !== null ? `日均 ${formatMoney(burn)}` : '',
+            days !== null ? `预计可用 ${Math.round(days)} 天` : '',
+            exhaustDate ? `预计耗尽 ${exhaustDate}` : '',
+            fStatus
+          ].filter(Boolean);
+          lines.push(`• ${fName}${fParts.length ? `：${fParts.join(' · ')}` : ''}`);
+        }
+      }
+      renderedStructured = true;
+    }
+
+    const summaryNote = cleanSingleLine(result.summary || result.message || result.text, 500);
+    if (summaryNote) {
+      lines.push(`• 摘要：${summaryNote}`);
+      renderedStructured = true;
+    }
+
+    if (!renderedStructured) {
+      const hasEmptyCollection = (Array.isArray(result.rows) && result.rows.length === 0)
+        || (Array.isArray(result.items) && result.items.length === 0)
+        || (Array.isArray(result.sessions) && result.sessions.length === 0)
+        || (Array.isArray(result.devices) && result.devices.length === 0)
+        || (Array.isArray(result.providers) && result.providers.length === 0);
+      if (hasEmptyCollection) {
+        lines.push('• 查询结果为空（0 条记录）。');
+      } else {
+        for (const [k, v] of Object.entries(result)) {
+          if (SENSITIVE_DIGEST_KEYS.has(k.toLowerCase())) continue;
+          if (v === null || v === undefined || typeof v === 'object') continue;
+          lines.push(`• ${cleanSingleLine(k, 48)}: ${cleanSingleLine(String(v), 200)}`);
+          if (lines.length >= 16) break;
+        }
+        if (lines.length === 1) {
+          lines.push('• 已完成查询（无可展示明细）。');
+        }
+      }
+    }
+  } else {
+    lines.push(`• 结果：${cleanSingleLine(String(result), 500)}`);
+  }
+
+  const ai = resolveAiSummaryBlock(aiSummary);
+  if (ai.text) {
+    lines.push('');
+    lines.push(`🧠 AI 智能解读 (${ai.label})：`);
+    lines.push(ai.text);
+  }
+
+  return truncateWeChatMessage(lines.join('\n'), maxChars);
+}
+
+/**
+ * Resolve normalized OpenClaw webhook eventType.
+ * @param {any} eventType
+ * @returns {'report' | 'session_completed' | 'approval_alert' | 'quota_alert' | 'service_incident' | 'query_digest' | 'test' | 'custom'}
+ */
+function resolveOpenClawEventType(eventType) {
+  const clean = cleanText(eventType, 64).toLowerCase();
+  if (!clean) return 'report';
+  return /** @type {any} */ (OPENCLAW_EVENT_TYPES.includes(clean) ? clean : 'custom');
+}
+
+/**
+ * Format event digest text for non-report events when `customMessage` is omitted.
+ * @param {{
+ *   eventType: string,
+ *   eventPayload: any,
+ *   analysis: any,
+ *   limitsSummary: any
+ * }} params
+ * @returns {string}
+ */
+function formatOpenClawEventMessage({
+  eventType,
+  eventPayload,
+  analysis,
+  limitsSummary
+}) {
+  const payload = isPlainObject(eventPayload) ? eventPayload : {};
+  if (eventType === 'session_completed') {
+    const hasWrapper = Object.hasOwn(payload, 'completion')
+      || Object.hasOwn(payload, 'detailSummary')
+      || Object.hasOwn(payload, 'aiSummary');
+    return formatOpenClawSessionCompletedMessage({
+      completion: hasWrapper ? payload.completion : eventPayload,
+      detailSummary: hasWrapper ? payload.detailSummary : null,
+      aiSummary: (hasWrapper ? payload.aiSummary : null) ?? analysis,
+      limitsSummary: (hasWrapper ? payload.limitsSummary : null) ?? limitsSummary
+    });
+  }
+  if (eventType === 'approval_alert') {
+    return formatOpenClawApprovalAlertMessage(payload.alert || eventPayload || {});
+  }
+  if (eventType === 'quota_alert') {
+    return formatOpenClawQuotaAlertMessage(payload.alert || eventPayload || {});
+  }
+  if (eventType === 'service_incident') {
+    return formatOpenClawServiceIncidentMessage(payload.incident || eventPayload || {});
+  }
+  if (eventType === 'query_digest') {
+    return formatOpenClawQueryDigestMessage({
+      queryType: payload.queryType || '',
+      result: Object.hasOwn(payload, 'result') ? payload.result : eventPayload,
+      title: payload.title || '',
+      aiSummary: payload.aiSummary ?? analysis
+    });
+  }
+  if (eventType === 'test') {
+    const note = typeof eventPayload === 'string'
+      ? cleanSingleLine(eventPayload, 500)
+      : cleanSingleLine(payload.message || payload.text, 500);
+    return truncateWeChatMessage(
+      note
+        ? `🔔 Token Monitor 连通性测试\n• ${note}`
+        : '🔔 Token Monitor 连通性测试\n• 状态：OpenClaw 通知通道配置正常。'
+    );
+  }
+  const customText = typeof eventPayload === 'string'
+    ? eventPayload.trim()
+    : cleanSingleLine(payload.text || payload.message || payload.summary, 2000);
+  if (customText) {
+    return truncateWeChatMessage(`🔔 Token Monitor 通知\n• ${customText}`);
+  }
+  if (isPlainObject(eventPayload)) {
+    return formatOpenClawQueryDigestMessage({
+      queryType: 'custom',
+      result: eventPayload,
+      title: payload.title || 'Token Monitor 自定义通知',
+      aiSummary: analysis
+    });
+  }
+  return '🔔 Token Monitor 通知\n• 状态：收到事件推送。';
+}
+
+/**
  * Build OpenClaw webhook HTTP request parameters.
  * Supports:
  * - openclaw-agent: POST /hooks/agent with { message, name, agentId, deliver, channel, to }
@@ -809,6 +1899,9 @@ function formatOpenClawWeChatMessage({
  *   analysis?: any,
  *   stats?: any,
  *   limitsSummary?: any,
+ *   eventType?: string,
+ *   eventPayload?: any,
+ *   promptPrefix?: string,
  *   customMessage?: string,
  *   idempotencyKey?: string
  * }} params
@@ -820,6 +1913,9 @@ function buildOpenClawWebhookRequest({
   analysis = null,
   stats = null,
   limitsSummary = null,
+  eventType = 'report',
+  eventPayload = null,
+  promptPrefix = '',
   customMessage = '',
   idempotencyKey = ''
 }) {
@@ -833,22 +1929,34 @@ function buildOpenClawWebhookRequest({
     return { ok: false, error: 'openclaw_missing_token', message: 'OpenClaw hook token is required for non-local gateways.' };
   }
 
+  const resolvedEventType = resolveOpenClawEventType(eventType);
   const resolvedLimits = norm.includeLimits
     ? (limitsSummary || (stats ? extractLimitsSummary(stats) : null))
     : null;
-  const briefText = cleanText(customMessage, 4000) || formatOpenClawWeChatMessage({
-    report,
-    analysis,
-    stats,
-    limitsSummary: resolvedLimits,
-    includeLimits: norm.includeLimits,
-    includeAiAnalysis: norm.includeAiAnalysis
-  });
+  const cleanCustomMessage = cleanText(customMessage, 4000);
+  const briefText = cleanCustomMessage || (
+    resolvedEventType === 'report'
+      ? formatOpenClawWeChatMessage({
+          report,
+          analysis,
+          stats,
+          limitsSummary: resolvedLimits,
+          includeLimits: norm.includeLimits,
+          includeAiAnalysis: norm.includeAiAnalysis
+        })
+      : formatOpenClawEventMessage({
+          eventType: resolvedEventType,
+          eventPayload,
+          analysis,
+          limitsSummary: resolvedLimits
+        })
+  );
 
+  const cleanIdempotencyKey = cleanText(idempotencyKey, 160);
   /** @type {Record<string, string>} */
   const headers = { 'content-type': 'application/json' };
   if (token) headers.authorization = `Bearer ${token}`;
-  if (idempotencyKey) headers['idempotency-key'] = cleanText(idempotencyKey, 160);
+  if (cleanIdempotencyKey) headers['idempotency-key'] = cleanIdempotencyKey;
 
   let body;
   if (norm.mode === 'openclaw-agent') {
@@ -859,9 +1967,11 @@ function buildOpenClawWebhookRequest({
         message: 'WeChat recipient target ("to") is required when deliver is enabled in OpenClaw agent mode.'
       };
     }
-    const promptPrefix = '请将以下 Token Monitor 用量与项目分析简报清晰准确地整理并发送给微信用户（保留核心数字与结论，不要遗漏预警）：\n\n';
+    const resolvedPrefix = typeof promptPrefix === 'string' && promptPrefix.length > 0
+      ? promptPrefix
+      : OPENCLAW_AGENT_PROMPT_PREFIXES[resolvedEventType] || OPENCLAW_AGENT_PROMPT_PREFIXES.custom;
     body = {
-      message: `${promptPrefix}${briefText}`,
+      message: `${resolvedPrefix}${briefText}`,
       name: norm.senderName,
       agentId: norm.agentId,
       deliver: norm.deliver,
@@ -873,7 +1983,7 @@ function buildOpenClawWebhookRequest({
       text: briefText,
       mode: 'now'
     };
-  } else {
+  } else if (resolvedEventType === 'report' && (eventPayload === null || eventPayload === undefined)) {
     body = {
       event: 'token_monitor.report',
       reportId: report?.reportId || null,
@@ -886,12 +1996,23 @@ function buildOpenClawWebhookRequest({
       aiAnalysis: norm.includeAiAnalysis ? (analysis || null) : null,
       limitsSummary: resolvedLimits
     };
+  } else {
+    body = {
+      event: `token_monitor.${resolvedEventType}`,
+      eventType: resolvedEventType,
+      eventId: cleanIdempotencyKey || null,
+      channel: norm.channel,
+      to: norm.to || null,
+      text: briefText,
+      payload: eventPayload ?? null
+    };
   }
 
   return {
     ok: true,
     endpoint,
     mode: norm.mode,
+    eventType: resolvedEventType,
     channel: norm.channel,
     to: norm.to,
     headers,
@@ -901,7 +2022,7 @@ function buildOpenClawWebhookRequest({
 }
 
 /**
- * Dispatch report + telemetry digest to OpenClaw Gateway webhook.
+ * Dispatch report, alert, or query digest to OpenClaw Gateway webhook.
  * @param {{
  *   config: any,
  *   hookToken?: string,
@@ -909,6 +2030,9 @@ function buildOpenClawWebhookRequest({
  *   analysis?: any,
  *   stats?: any,
  *   limitsSummary?: any,
+ *   eventType?: string,
+ *   eventPayload?: any,
+ *   promptPrefix?: string,
  *   customMessage?: string,
  *   idempotencyKey?: string,
  *   fetchImpl?: typeof fetch,
@@ -923,6 +2047,9 @@ async function sendToOpenClawWebhook({
   analysis = null,
   stats = null,
   limitsSummary = null,
+  eventType = 'report',
+  eventPayload = null,
+  promptPrefix = '',
   customMessage = '',
   idempotencyKey = '',
   fetchImpl = globalThis.fetch,
@@ -940,6 +2067,9 @@ async function sendToOpenClawWebhook({
     analysis,
     stats,
     limitsSummary,
+    eventType,
+    eventPayload,
+    promptPrefix,
     customMessage,
     idempotencyKey
   });
@@ -970,6 +2100,7 @@ async function sendToOpenClawWebhook({
       sentAt: now().toISOString(),
       statusCode: response.status,
       mode: built.mode,
+      eventType: built.eventType,
       channel: built.channel,
       to: built.to,
       reportId: report?.reportId || null,
@@ -989,14 +2120,21 @@ module.exports = {
   AI_PROTOCOLS,
   DEFAULT_AI_CONFIG,
   DEFAULT_OPENCLAW_CONFIG,
+  OPENCLAW_EVENT_TYPES,
   OPENCLAW_MODES,
   buildAiReportPromptPayload,
   buildOpenClawWebhookRequest,
   buildRealtimeOverviewSnapshot,
   extractLimitsSummary,
   formatCompactTokens,
+  formatOpenClawApprovalAlertMessage,
+  formatOpenClawQueryDigestMessage,
+  formatOpenClawQuotaAlertMessage,
+  formatOpenClawServiceIncidentMessage,
+  formatOpenClawSessionCompletedMessage,
   formatOpenClawWeChatMessage,
   invokeThirdPartyAiAnalysis,
+  mergeOpenClawIntegrationConfig,
   normalizeAiIntegrationConfig,
   normalizeHttpUrl,
   normalizeOpenClawIntegrationConfig,
