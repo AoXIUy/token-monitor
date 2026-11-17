@@ -432,7 +432,17 @@ test('Local Store direct mode serves reports, tools, resources, and prompts over
       'analyze_project_usage',
       'get_realtime_usage_and_limits',
       'analyze_report_with_ai',
-      'push_report_to_openclaw'
+      'push_report_to_openclaw',
+      'query_usage_breakdown',
+      'list_sessions',
+      'get_session_detail',
+      'get_usage_history',
+      'get_devices_and_health',
+      'get_limits_history',
+      'get_subscriptions_and_forecasts',
+      'get_live_token_rate',
+      'get_service_status_and_approvals',
+      'push_to_openclaw'
     ]
   );
 
@@ -483,14 +493,24 @@ test('Local Store direct mode serves reports, tools, resources, and prompts over
 
   assert.deepEqual(
     batch2[1].result.resources.map((r) => r.uri),
-    ['report://latest/daily', 'report://latest/weekly', 'report://latest/monthly']
+    [
+      'report://latest/daily',
+      'report://latest/weekly',
+      'report://latest/monthly',
+      'usage://today',
+      'sessions://active',
+      'limits://current',
+      'devices://health',
+      'subscriptions://summary',
+      'service-status://current'
+    ]
   );
 
   const readRes = JSON.parse(batch2[2].result.contents[0].text);
   assert.equal(readRes.schema, REPORT_SCHEMA);
   assert.equal(readRes.reportId, `daily:${todayKey}`);
 
-  assert.equal(batch2[3].result.prompts.length, 5);
+  assert.equal(batch2[3].result.prompts.length, 8);
   assert.match(batch2[4].result.messages[0].content.text, /token-monitor/);
 
   assert.equal(batch2[5].result.isError, true);
@@ -791,9 +811,9 @@ test('spawned node src/mcp/server.js handles full MCP lifecycle over stdio in lo
   assert.equal(JSON.parse(msgs[3].result.content[0].text).reports.length, 1);
   assert.equal(JSON.parse(msgs[4].result.content[0].text).schema, REPORT_SCHEMA);
   assert.equal(JSON.parse(msgs[5].result.content[0].text).projects[0].key, 'token-monitor');
-  assert.equal(msgs[6].result.resources.length, 3);
+  assert.equal(msgs[6].result.resources.length, 9);
   assert.equal(JSON.parse(msgs[7].result.contents[0].text).reportId, `daily:${todayKey}`);
-  assert.equal(msgs[8].result.prompts.length, 5);
+  assert.equal(msgs[8].result.prompts.length, 8);
   assert.match(msgs[9].result.messages[0].content.text, new RegExp(todayKey));
 });
 
@@ -900,4 +920,347 @@ test('createLocalBackendAdapter returns structured error on invalid generateRepo
   assert.equal(listed.ok, true);
   assert.deepEqual(listed.reports.map((r) => r.periodKey), ['2026-11-12']);
   assert.equal(listed.reports[0].files.markdown, null);
+});
+
+test('Local Store direct mode serves all 9 query tools, 6 live resources, 3 prompts, and session privacy gates', async (t) => {
+  const tmpDir = makeTempDir('tm-mcp-local-queries-');
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  const now = new Date();
+  const todayKey = now.toISOString().slice(0, 10);
+  const yesterdayKey = new Date(now.getTime() - 86_400_000).toISOString().slice(0, 10);
+
+  const store = createSampleDevicesStore(todayKey, yesterdayKey);
+  store.devices['dev-laptop'].periods.today.sessions['claude:s1'].title = 'Confidential Sprint Planning';
+  store.devices['dev-laptop'].periods.today.sessions['claude:s1'].liveState = 'running';
+  store.devices['dev-laptop'].limits = {
+    providers: [{
+      provider: 'codex',
+      accountLabel: 'Main Codex',
+      accountEmail: 'private@example.com',
+      status: 'ok',
+      stale: false,
+      windows: [{ label: 'Session', usedPercent: 25, remainingPercent: 75 }]
+    }]
+  };
+
+  const dataFile = path.join(tmpDir, 'devices.json');
+  const reportsDir = path.join(tmpDir, 'reports');
+  fs.mkdirSync(reportsDir, { recursive: true });
+  fs.writeFileSync(dataFile, JSON.stringify(store));
+  fs.writeFileSync(path.join(tmpDir, 'subscriptions.json'), JSON.stringify({
+    subscriptions: [{
+      id: 'sub-local-1',
+      provider: 'claude',
+      kind: 'subscription',
+      planName: 'Claude Pro',
+      amountMinor: 2000,
+      currency: 'USD',
+      interval: 'monthly',
+      startDate: '2026-01-01',
+      autoRenew: true
+    }]
+  }));
+
+  const writeIntegrationsPrivacy = (openclawPatch) => {
+    fs.writeFileSync(path.join(reportsDir, 'integrations.json'), JSON.stringify({
+      openclaw: {
+        enabled: true,
+        ...openclawPatch
+      }
+    }));
+  };
+
+  writeIntegrationsPrivacy({
+    sessionTitlesEnabled: false,
+    queryPermissions: { allowSessionDetail: false, allowConversationText: false }
+  });
+
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const stderr = new PassThrough();
+
+  const server = startMcpServer({
+    mode: 'local',
+    dataFile,
+    reportsDir,
+    timeZone: 'UTC',
+    input,
+    output,
+    stderr,
+    liveRateSnapshot: {
+      state: 'live',
+      sampledAt: Date.now(),
+      expiresAt: Date.now() + 30_000,
+      speed: 77.5,
+      burn: 42,
+      deviceCount: 1
+    },
+    readSessionDetail: async ({ client, sessionId }) => ({
+      found: true,
+      client,
+      sessionId,
+      projectLabel: 'token-monitor',
+      title: 'Confidential Sprint Planning',
+      exchanges: [{ promptPreview: 'Implement query tools', tools: ['edit_file'], turnCount: 1 }],
+      conversation: { messages: [{ role: 'user', text: 'Raw prompt text' }] }
+    }),
+    getLimitsHistory: async () => ({
+      accountEmail: 'private@example.com',
+      series: [{ ts: new Date().toISOString(), remainingPercent: 75 }]
+    }),
+    getServiceStatus: async () => ({
+      overall: 'operational',
+      providers: [{ id: 'anthropic', status: 'operational' }]
+    }),
+    getCodexResetForecast: async () => ({ status: 'active', scheduledResetType: 'weekly' }),
+    listApprovalAlerts: async () => ({
+      ok: true,
+      alerts: [{ id: 'alert-local-1', client: 'claude', tool: 'run_command' }]
+    })
+  });
+  t.after(async () => {
+    input.end();
+    await server.stop();
+  });
+
+  const waitBatch1 = collectNdjsonMessages(output, (msgs) => msgs.length >= 17);
+  const requests1 = [
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', clientInfo: { name: 'test', version: '1.0' } } },
+    { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'query_usage_breakdown', arguments: { period: 'today', groupBy: 'client' } } },
+    { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_sessions', arguments: { period: 'today', state: 'all' } } },
+    { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'get_session_detail', arguments: { client: 'claude', sessionId: 's1' } } },
+    { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'get_usage_history', arguments: { resolution: 'daily' } } },
+    { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'get_devices_and_health', arguments: {} } },
+    { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'get_limits_history', arguments: { includeHistory: true } } },
+    { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'get_subscriptions_and_forecasts', arguments: {} } },
+    { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'get_live_token_rate', arguments: {} } },
+    { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'get_service_status_and_approvals', arguments: {} } },
+    { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'push_to_openclaw', arguments: { type: 'test' } } },
+    { jsonrpc: '2.0', id: 12, method: 'resources/read', params: { uri: 'usage://today' } },
+    { jsonrpc: '2.0', id: 13, method: 'resources/read', params: { uri: 'sessions://active' } },
+    { jsonrpc: '2.0', id: 14, method: 'resources/read', params: { uri: 'limits://current' } },
+    { jsonrpc: '2.0', id: 15, method: 'resources/read', params: { uri: 'devices://health' } },
+    { jsonrpc: '2.0', id: 16, method: 'resources/read', params: { uri: 'subscriptions://summary' } },
+    { jsonrpc: '2.0', id: 17, method: 'resources/read', params: { uri: 'service-status://current' } }
+  ];
+  for (const msg of requests1) {
+    input.write(`${JSON.stringify(msg)}\n`);
+  }
+  const res1 = await waitBatch1;
+  const byId = new Map(res1.map((m) => [m.id, m]));
+
+  assert.equal(byId.get(2).result.structuredContent.totals.totalTokens, 120000);
+  const listedSessions = byId.get(3).result.structuredContent.sessions;
+  assert.equal(listedSessions.length, 2);
+  assert.equal(listedSessions[0].title, null);
+  assert.equal(byId.get(4).result.isError, true);
+  assert.match(byId.get(4).result.content[0].text, /session_detail_disabled/);
+  assert.equal(byId.get(5).result.structuredContent.ok, true);
+  assert.equal(byId.get(6).result.structuredContent.deviceCount, 1);
+  assert.equal(byId.get(7).result.structuredContent.limitsHistory.available, true);
+  assert.equal(JSON.stringify(byId.get(7)).includes('private@example.com'), false);
+  assert.equal(byId.get(8).result.structuredContent.activeCount, 1);
+  assert.equal(byId.get(9).result.structuredContent.speed, 77.5);
+  assert.equal(byId.get(10).result.structuredContent.serviceStatus.available, true);
+  assert.equal(byId.get(10).result.structuredContent.approvalAlerts.alerts[0].id, 'alert-local-1');
+  assert.equal(byId.get(11).result.isError, true);
+  assert.match(byId.get(11).result.content[0].text, /Hub HTTP mode/);
+
+  assert.equal(JSON.parse(byId.get(12).result.contents[0].text).totals.totalTokens, 120000);
+  assert.equal(JSON.parse(byId.get(13).result.contents[0].text).sessions.length, 2);
+  assert.equal(JSON.parse(byId.get(14).result.contents[0].text).providers.length, 1);
+  assert.equal(JSON.parse(byId.get(15).result.contents[0].text).deviceCount, 1);
+  assert.equal(JSON.parse(byId.get(16).result.contents[0].text).activeCount, 1);
+  assert.equal(JSON.parse(byId.get(17).result.contents[0].text).serviceStatus.overall, 'operational');
+
+  // Enable session detail only -> conversation text still blocked, title stripped
+  writeIntegrationsPrivacy({
+    sessionTitlesEnabled: false,
+    queryPermissions: { allowSessionDetail: true, allowConversationText: false }
+  });
+  const waitBatch2 = collectNdjsonMessages(output, (msgs) => msgs.length >= 5);
+  for (const msg of [
+    { jsonrpc: '2.0', id: 18, method: 'tools/call', params: { name: 'get_session_detail', arguments: { client: 'claude', sessionId: 's1', includeConversation: true } } },
+    { jsonrpc: '2.0', id: 19, method: 'tools/call', params: { name: 'get_session_detail', arguments: { client: 'claude', sessionId: 's1', includeConversation: false } } },
+    { jsonrpc: '2.0', id: 20, method: 'prompts/get', params: { name: 'session-summary', arguments: { sessionId: 's1', client: 'claude', period: 'today' } } },
+    { jsonrpc: '2.0', id: 21, method: 'prompts/get', params: { name: 'quota-check', arguments: { provider: 'codex', includeHistory: 'true' } } },
+    { jsonrpc: '2.0', id: 22, method: 'prompts/get', params: { name: 'daily-standup-usage', arguments: { date: todayKey } } }
+  ]) {
+    input.write(`${JSON.stringify(msg)}\n`);
+  }
+  const res2 = await waitBatch2;
+  const byId2 = new Map(res2.map((m) => [m.id, m]));
+  assert.equal(byId2.get(18).result.isError, true);
+  assert.match(byId2.get(18).result.content[0].text, /conversation_text_disabled/);
+  const detailNoConv = byId2.get(19).result.structuredContent;
+  assert.equal(detailNoConv.ok, true);
+  assert.equal(detailNoConv.title, undefined);
+  assert.equal(detailNoConv.conversation, undefined);
+  assert.equal(detailNoConv.exchanges.length, 1);
+  assert.match(byId2.get(20).result.messages[0].content.text, /get_session_detail/);
+  assert.match(byId2.get(21).result.messages[0].content.text, /get_limits_history/);
+  assert.match(byId2.get(22).result.messages[0].content.text, new RegExp(todayKey));
+
+  // Enable both conversation text and titles
+  writeIntegrationsPrivacy({
+    sessionTitlesEnabled: true,
+    queryPermissions: { allowSessionDetail: true, allowConversationText: true }
+  });
+  const waitBatch3 = collectNdjsonMessages(output, (msgs) => msgs.length >= 1);
+  input.write(`${JSON.stringify({
+    jsonrpc: '2.0',
+    id: 23,
+    method: 'tools/call',
+    params: { name: 'get_session_detail', arguments: { client: 'claude', sessionId: 's1', includeConversation: true } }
+  })}\n`);
+  const [res3] = await waitBatch3;
+  assert.equal(res3.result.structuredContent.ok, true);
+  assert.equal(res3.result.structuredContent.title, 'Confidential Sprint Planning');
+  assert.equal(res3.result.structuredContent.conversation.messages[0].text, 'Raw prompt text');
+});
+
+test('Hub HTTP API mode forwards all 9 query tools, push_to_openclaw, and preserves HTTP 403 privacy errors', async (t) => {
+  const { createHub } = require('../../src/hub/server');
+  const tmpDir = makeTempDir('tm-mcp-hub-queries-');
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  const now = new Date();
+  const todayKey = now.toISOString().slice(0, 10);
+  const webhookPosts = [];
+
+  const hub = createHub({
+    port: 0,
+    host: '127.0.0.1',
+    secret: 'mcp-hub-secret',
+    approvalAlerts: true,
+    dataFile: path.join(tmpDir, 'devices.json'),
+    reportsDir: path.join(tmpDir, 'reports'),
+    integrationFetch: async (url, init) => {
+      webhookPosts.push({ url: String(url), body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    },
+    getEnhancedQueryContext: () => ({
+      sessionTitlesEnabled: false,
+      liveRateSnapshot: {
+        state: 'live',
+        sampledAt: Date.now(),
+        expiresAt: Date.now() + 30_000,
+        speed: 91.2,
+        burn: 15,
+        deviceCount: 1
+      },
+      readSessionDetail: async ({ client, sessionId }) => ({
+        found: true,
+        client,
+        sessionId,
+        exchanges: [{ promptPreview: 'Hub turn', tools: ['read_file'], turnCount: 1 }],
+        conversation: { messages: [{ role: 'user', text: 'Hub conversation' }] }
+      }),
+      getLimitsHistory: async () => ({ series: [{ ts: new Date().toISOString(), remainingPercent: 50 }] }),
+      getServiceStatus: async () => ({ overall: 'operational', providers: [{ id: 'openai', status: 'operational' }] }),
+      getCodexResetForecast: async () => ({ status: 'active', scheduledResetType: 'weekly' })
+    }),
+    logger: { error() {}, warn() {}, log() {} }
+  });
+
+  await hub.start();
+  t.after(() => hub.stop());
+  const baseUrl = `http://127.0.0.1:${hub.server.address().port}`;
+  const auth = { authorization: 'Bearer mcp-hub-secret', 'content-type': 'application/json' };
+
+  const store = createSampleDevicesStore(todayKey, todayKey);
+  await fetch(`${baseUrl}/api/ingest`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify(store.devices['dev-laptop'])
+  });
+  const putIntegrations = await fetch(`${baseUrl}/api/reports/integrations`, {
+    method: 'PUT',
+    headers: auth,
+    body: JSON.stringify({
+      openclaw: {
+        enabled: true,
+        mode: 'generic-webhook',
+        webhookUrl: 'http://127.0.0.1:18789/hooks/agent',
+        hookToken: 'mcp-oc-tok',
+        queryPermissions: { allowSessionDetail: false, allowConversationText: false }
+      }
+    })
+  });
+  assert.equal(putIntegrations.status, 200);
+  const alertPostRes = await fetch(`${baseUrl}/api/approval-alerts`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ deviceId: 'dev-laptop', client: 'codex', sessionId: 's1', tool: 'run_command', command: 'ls' })
+  });
+  assert.equal(alertPostRes.status, 200);
+  const alertPostData = await alertPostRes.json();
+  assert.equal(alertPostData.ok, true);
+
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const stderr = new PassThrough();
+  const server = startMcpServer({
+    mode: 'hub',
+    hubUrl: baseUrl,
+    secret: 'mcp-hub-secret',
+    input,
+    output,
+    stderr
+  });
+  t.after(async () => {
+    input.end();
+    await server.stop();
+  });
+
+  const waitRes = collectNdjsonMessages(output, (msgs) => msgs.length >= 11);
+  for (const msg of [
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', clientInfo: { name: 'test', version: '1.0' } } },
+    { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'query_usage_breakdown', arguments: { period: 'today', groupBy: 'model' } } },
+    { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_sessions', arguments: { period: 'today' } } },
+    { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'get_session_detail', arguments: { client: 'claude', sessionId: 's1' } } },
+    { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'get_usage_history', arguments: { resolution: 'daily' } } },
+    { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'get_devices_and_health', arguments: {} } },
+    { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'get_limits_history', arguments: { includeHistory: true } } },
+    { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'get_live_token_rate', arguments: {} } },
+    { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'get_service_status_and_approvals', arguments: {} } },
+    { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'push_to_openclaw', arguments: { type: 'usage', params: { period: 'today' } } } },
+    { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'get_subscriptions_and_forecasts', arguments: {} } }
+  ]) {
+    input.write(`${JSON.stringify(msg)}\n`);
+  }
+
+  const msgs = await waitRes;
+  const byId = new Map(msgs.map((m) => [m.id, m]));
+  assert.equal(byId.get(2).result.structuredContent.totals.totalTokens, 120000);
+  assert.equal(byId.get(3).result.structuredContent.sessions.length, 2);
+  assert.equal(byId.get(4).result.isError, true);
+  assert.match(byId.get(4).result.content[0].text, /session_detail_disabled/);
+  assert.equal(byId.get(5).result.structuredContent.ok, true);
+  assert.equal(byId.get(6).result.structuredContent.deviceCount, 1);
+  assert.equal(byId.get(7).result.structuredContent.limitsHistory.available, true);
+  assert.equal(byId.get(8).result.structuredContent.speed, 91.2);
+  assert.equal(byId.get(9).result.structuredContent.serviceStatus.overall, 'operational');
+  assert.equal(byId.get(9).result.structuredContent.approvalAlerts.alerts.length, 1);
+  assert.equal(byId.get(10).result.structuredContent.ok, true);
+  assert.equal(byId.get(10).result.structuredContent.eventType, 'query_digest');
+  assert.equal(byId.get(11).result.structuredContent.ok, true);
+  assert.ok(webhookPosts.some((p) => p.body.event === 'token_monitor.query_digest'));
+
+  await fetch(`${baseUrl}/api/reports/integrations`, {
+    method: 'PUT',
+    headers: auth,
+    body: JSON.stringify({ openclaw: { queryPermissions: { allowSessionDetail: true, allowConversationText: false } } })
+  });
+  const waitConvDenied = collectNdjsonMessages(output, (m) => m.length >= 1);
+  input.write(`${JSON.stringify({
+    jsonrpc: '2.0',
+    id: 12,
+    method: 'tools/call',
+    params: { name: 'get_session_detail', arguments: { client: 'claude', sessionId: 's1', includeConversation: true } }
+  })}\n`);
+  const [convDenied] = await waitConvDenied;
+  assert.equal(convDenied.result.isError, true);
+  assert.match(convDenied.result.content[0].text, /conversation_text_disabled/);
 });

@@ -674,7 +674,17 @@ test('createMcpReportServer implements MCP JSON-RPC 2.0 lifecycle, tools, resour
       'analyze_project_usage',
       'get_realtime_usage_and_limits',
       'analyze_report_with_ai',
-      'push_report_to_openclaw'
+      'push_report_to_openclaw',
+      'query_usage_breakdown',
+      'list_sessions',
+      'get_session_detail',
+      'get_usage_history',
+      'get_devices_and_health',
+      'get_limits_history',
+      'get_subscriptions_and_forecasts',
+      'get_live_token_rate',
+      'get_service_status_and_approvals',
+      'push_to_openclaw'
     ]
   );
 
@@ -735,7 +745,17 @@ test('createMcpReportServer implements MCP JSON-RPC 2.0 lifecycle, tools, resour
   const resList = await server.handleMessage({ jsonrpc: '2.0', id: 11, method: 'resources/list' });
   assert.deepEqual(
     resList?.result.resources.map((r) => r.uri),
-    ['report://latest/daily', 'report://latest/weekly', 'report://latest/monthly']
+    [
+      'report://latest/daily',
+      'report://latest/weekly',
+      'report://latest/monthly',
+      'usage://today',
+      'sessions://active',
+      'limits://current',
+      'devices://health',
+      'subscriptions://summary',
+      'service-status://current'
+    ]
   );
 
   const tmplList = await server.handleMessage({ jsonrpc: '2.0', id: 12, method: 'resources/templates/list' });
@@ -754,7 +774,16 @@ test('createMcpReportServer implements MCP JSON-RPC 2.0 lifecycle, tools, resour
   const promptsList = await server.handleMessage({ jsonrpc: '2.0', id: 14, method: 'prompts/list' });
   assert.deepEqual(
     promptsList?.result.prompts.map((p) => p.name),
-    ['analyze-daily-report', 'analyze-weekly-report', 'analyze-monthly-report', 'project-deep-dive', 'wechat-digest']
+    [
+      'analyze-daily-report',
+      'analyze-weekly-report',
+      'analyze-monthly-report',
+      'project-deep-dive',
+      'wechat-digest',
+      'session-summary',
+      'quota-check',
+      'daily-standup-usage'
+    ]
   );
 
   const promptDeepDive = await server.handleMessage({

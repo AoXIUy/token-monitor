@@ -313,7 +313,17 @@ test('HTTP routes enforce secret, validate config, generate & deduplicate report
       'analyze_project_usage',
       'get_realtime_usage_and_limits',
       'analyze_report_with_ai',
-      'push_report_to_openclaw'
+      'push_report_to_openclaw',
+      'query_usage_breakdown',
+      'list_sessions',
+      'get_session_detail',
+      'get_usage_history',
+      'get_devices_and_health',
+      'get_limits_history',
+      'get_subscriptions_and_forecasts',
+      'get_live_token_rate',
+      'get_service_status_and_approvals',
+      'push_to_openclaw'
     ]
   );
 

@@ -194,7 +194,7 @@ function parseOpenClawJson5(rawText) {
 /**
  * @param {string} filePath
  * @param {any} value
- * @param {typeof fs} [fsApi]
+ * @param {typeof import('node:fs')} [fsApi]
  */
 function writePrivateJsonAtomic(filePath, value, fsApi = fs) {
   const dir = path.dirname(filePath);
@@ -392,15 +392,41 @@ function normalizeGatewayPort(rawPort) {
 }
 
 /**
+ * Sanitize optional local bridge / MCP endpoint status so secrets never leak.
+ * @param {any} info
+ * @returns {{ enabled: boolean, running: boolean, port: number | null, baseUrl: string | null, endpointUrl: string | null, tokenConfigured: boolean } | null}
+ */
+function sanitizeLocalBridgeDetection(info) {
+  if (!isPlainObject(info)) return null;
+  const port = Number.isInteger(info.port) && info.port >= 1 && info.port <= 65535 ? info.port : null;
+  const baseUrl = typeof info.baseUrl === 'string' && info.baseUrl.trim() ? info.baseUrl.trim() : null;
+  const endpointUrl = typeof info.endpointUrl === 'string' && info.endpointUrl.trim()
+    ? info.endpointUrl.trim()
+    : (typeof info.mcpUrl === 'string' && info.mcpUrl.trim()
+      ? info.mcpUrl.trim()
+      : (baseUrl ? `${baseUrl.replace(/\/+$/u, '')}/api/mcp` : null));
+  return {
+    enabled: info.enabled === true,
+    running: info.running === true,
+    port,
+    baseUrl,
+    endpointUrl,
+    tokenConfigured: Boolean(info.tokenConfigured)
+  };
+}
+
+/**
  * Inspect local OpenClaw installation, plugin status, hooks, gateway reachability,
  * and bound WeChat accounts. Never returns raw tokens.
  * @param {{
  *   env?: NodeJS.ProcessEnv,
- *   fsApi?: typeof fs,
+ *   fsApi?: typeof import('node:fs'),
  *   homeDir?: string,
  *   probeGateway?: boolean,
  *   probePort?: (port: number) => Promise<boolean>,
- *   cliPath?: string | null
+ *   cliPath?: string | null,
+ *   localBridge?: any,
+ *   mcpEndpoint?: string | null
  * }} [options]
  */
 async function detectOpenClawEnvironment(options = {}) {
@@ -449,10 +475,14 @@ async function detectOpenClawEnvironment(options = {}) {
     }
   }
 
-  const skillInstalled = fsApi.existsSync(
-    path.join(stateDir, 'skills', 'openclaw-token-monitor', 'SKILL.md')
-  );
+  const skillDir = path.join(stateDir, 'skills', 'openclaw-token-monitor');
+  const skillInstalled = fsApi.existsSync(path.join(skillDir, 'SKILL.md'));
+  const skillHelperInstalled = fsApi.existsSync(path.join(skillDir, 'scripts', 'query-token-monitor.mjs'));
   const accounts = listBoundWeixinAccounts(stateDir, fsApi);
+  const localBridge = sanitizeLocalBridgeDetection(options.localBridge);
+  const mcpEndpoint = typeof options.mcpEndpoint === 'string' && options.mcpEndpoint.trim()
+    ? options.mcpEndpoint.trim()
+    : (localBridge?.endpointUrl || null);
 
   return {
     ok: true,
@@ -471,7 +501,69 @@ async function detectOpenClawEnvironment(options = {}) {
     gatewayReachable,
     suggestedWebhookUrl,
     skillInstalled,
-    accounts
+    skillHelperInstalled,
+    accounts,
+    ...(localBridge ? { localBridge } : {}),
+    ...(mcpEndpoint ? { mcpEndpoint } : {})
+  };
+}
+
+/**
+ * Sync the bundled `skills/openclaw-token-monitor/` (`SKILL.md` and
+ * `scripts/query-token-monitor.mjs`) into `<stateDir>/skills/openclaw-token-monitor/`.
+ * @param {{
+ *   env?: NodeJS.ProcessEnv,
+ *   fsApi?: typeof import('node:fs'),
+ *   homeDir?: string,
+ *   stateDir?: string,
+ *   skillSourceDir?: string
+ * }} [options]
+ */
+function installOpenClawSkill(options = {}) {
+  const env = options.env || process.env;
+  const fsApi = options.fsApi || fs;
+  const homeDir = options.homeDir || os.homedir();
+  const stateDir = options.stateDir || resolveOpenClawStateDir(env, homeDir);
+  const sourceRoot = options.skillSourceDir
+    || path.resolve(__dirname, '../../skills/openclaw-token-monitor');
+  const sourceSkillMd = path.join(sourceRoot, 'SKILL.md');
+  const sourceHelper = path.join(sourceRoot, 'scripts', 'query-token-monitor.mjs');
+
+  if (!fsApi.existsSync(sourceSkillMd)) {
+    return {
+      ok: false,
+      skillInstalled: false,
+      helperInstalled: false,
+      destRoot: path.join(stateDir, 'skills', 'openclaw-token-monitor'),
+      files: /** @type {string[]} */ ([]),
+      warning: 'Bundled skills/openclaw-token-monitor was not found; skipped skill install.'
+    };
+  }
+
+  const destRoot = path.join(stateDir, 'skills', 'openclaw-token-monitor');
+  const destScripts = path.join(destRoot, 'scripts');
+  const destSkillMd = path.join(destRoot, 'SKILL.md');
+  const destHelper = path.join(destScripts, 'query-token-monitor.mjs');
+  fsApi.mkdirSync(destScripts, { recursive: true });
+  fsApi.copyFileSync(sourceSkillMd, destSkillMd);
+  const files = [destSkillMd];
+  let helperInstalled = false;
+  if (fsApi.existsSync(sourceHelper)) {
+    fsApi.copyFileSync(sourceHelper, destHelper);
+    if (process.platform !== 'win32' && typeof fsApi.chmodSync === 'function') {
+      try { fsApi.chmodSync(destHelper, 0o755); } catch {}
+    }
+    files.push(destHelper);
+    helperInstalled = true;
+  }
+
+  return {
+    ok: true,
+    skillInstalled: true,
+    helperInstalled,
+    destRoot,
+    files,
+    warning: null
   };
 }
 
@@ -640,14 +732,16 @@ function defaultExecFile(cliPath, args, options = {}) {
  * }} [configOptions]
  * @param {{
  *   env?: NodeJS.ProcessEnv,
- *   fsApi?: typeof fs,
+ *   fsApi?: typeof import('node:fs'),
  *   homeDir?: string,
  *   now?: () => Date,
  *   execFileImpl?: (cli: string, args: string[], opts?: any) => Promise<{ stdout?: string, stderr?: string }>,
  *   skillSourceDir?: string,
  *   probeGateway?: boolean,
  *   probePort?: (port: number) => Promise<boolean>,
- *   cliPath?: string | null
+ *   cliPath?: string | null,
+ *   localBridge?: any,
+ *   mcpEndpoint?: string | null
  * }} [runtimeOptions]
  */
 async function configureOpenClawHost(configOptions = {}, runtimeOptions = {}) {
@@ -765,21 +859,17 @@ async function configureOpenClawHost(configOptions = {}, runtimeOptions = {}) {
   }
 
   if (installSkill) {
-    const sourceRoot = runtimeOptions.skillSourceDir
-      || path.resolve(__dirname, '../../skills/openclaw-token-monitor');
-    const sourceSkillMd = path.join(sourceRoot, 'SKILL.md');
-    const sourceHelper = path.join(sourceRoot, 'scripts', 'query-token-monitor.mjs');
-    if (fsApi.existsSync(sourceSkillMd)) {
-      const destRoot = path.join(stateDir, 'skills', 'openclaw-token-monitor');
-      const destScripts = path.join(destRoot, 'scripts');
-      fsApi.mkdirSync(destScripts, { recursive: true });
-      fsApi.copyFileSync(sourceSkillMd, path.join(destRoot, 'SKILL.md'));
-      if (fsApi.existsSync(sourceHelper)) {
-        fsApi.copyFileSync(sourceHelper, path.join(destScripts, 'query-token-monitor.mjs'));
-      }
+    const skillRes = installOpenClawSkill({
+      env,
+      fsApi,
+      homeDir,
+      stateDir,
+      skillSourceDir: runtimeOptions.skillSourceDir
+    });
+    if (skillRes.skillInstalled) {
       steps.skillInstalled = true;
-    } else {
-      warnings.push('Bundled skills/openclaw-token-monitor was not found; skipped skill install.');
+    } else if (skillRes.warning) {
+      warnings.push(skillRes.warning);
     }
   }
 
@@ -802,7 +892,9 @@ async function configureOpenClawHost(configOptions = {}, runtimeOptions = {}) {
     homeDir,
     probeGateway: runtimeOptions.probeGateway,
     probePort: runtimeOptions.probePort,
-    cliPath: resolvedCli
+    cliPath: resolvedCli,
+    localBridge: runtimeOptions.localBridge,
+    mcpEndpoint: runtimeOptions.mcpEndpoint
   });
 
   return {
@@ -823,6 +915,7 @@ module.exports = {
   deriveRawAccountId,
   detectOpenClawEnvironment,
   findOpenClawCli,
+  installOpenClawSkill,
   listBoundWeixinAccounts,
   normalizeJson5ToJson,
   parseOpenClawJson5,

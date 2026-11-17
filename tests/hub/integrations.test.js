@@ -18,21 +18,35 @@ const {
   resolveAiCompletionEndpoint,
   resolveOpenClawWebhookEndpoint
 } = require('../../src/shared/aiReportAnalyzer');
-const { syncIntegrationSecretsFile } = require('../../src/hub/integrations');
+const { syncIntegrationSecretsFile, createIntegrationManager } = require('../../src/hub/integrations');
+const { createReportManager } = require('../../src/hub/reports');
 const { createHub } = require('../../src/hub/server');
 
 function makeTempDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-function makeSampleRecord(deviceId = 'mac-1', dayKey = '2026-11-16', totalTokens = 120_000, costUsd = 1.25) {
+function localDayKey(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function addDaysToKey(dayKey, days) {
+  const [y, m, d] = dayKey.split('-').map(Number);
+  return localDayKey(new Date(y, m - 1, d + days));
+}
+
+function makeSampleRecord(deviceId = 'mac-1', dayKey = '2026-11-16', totalTokens = 120_000, costUsd = 1.25, opts = {}) {
+  const endsAt = opts.endsAt || `${dayKey}T23:59:59.999Z`;
   return {
     deviceId,
     hostname: `${deviceId}.local`,
     platform: 'darwin',
-    updatedAt: `${dayKey}T12:00:00.000Z`,
+    updatedAt: opts.updatedAt || `${dayKey}T12:00:00.000Z`,
     periodWindows: {
-      today: { key: dayKey, start: `${dayKey}T00:00:00.000Z`, endsAt: `${dayKey}T23:59:59.999Z` },
+      today: { key: dayKey, start: `${dayKey}T00:00:00.000Z`, endsAt },
       month: { key: dayKey.slice(0, 7), start: `${dayKey.slice(0, 7)}-01T00:00:00.000Z` }
     },
     periods: {
@@ -275,6 +289,12 @@ test('Hub API + MCP + OpenClaw rollover integration end-to-end', async () => {
   const dir = makeTempDir('tm-hub-integ-');
   const aiCalls = [];
   const openclawCalls = [];
+  const day1 = localDayKey();
+  const day2 = addDaysToKey(day1, 1);
+  const day1EndsAt = new Date(Date.now() + 3_600_000).toISOString();
+  const day2EndsAt = new Date(Date.now() + 2 * 86_400_000).toISOString();
+  const day1UpdatedAt = new Date(Date.now() - 60_000).toISOString();
+  const day2UpdatedAt = new Date().toISOString();
 
   const integrationFetch = async (url, init) => {
     const targetUrl = String(url);
@@ -315,7 +335,10 @@ test('Hub API + MCP + OpenClaw rollover integration end-to-end', async () => {
     const ingestRes = await fetch(`${baseUrl}/api/ingest`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify(makeSampleRecord('dev-1', '2026-11-16', 250_000, 2.5))
+      body: JSON.stringify(makeSampleRecord('dev-1', day1, 250_000, 2.5, {
+        endsAt: day1EndsAt,
+        updatedAt: day1UpdatedAt
+      }))
     });
     assert.equal(ingestRes.status, 200);
 
@@ -352,6 +375,7 @@ test('Hub API + MCP + OpenClaw rollover integration end-to-end', async () => {
     assert.equal(putData.ok, true);
     assert.equal(putData.ai.apiKeyConfigured, true);
     assert.equal(putData.openclaw.hookTokenConfigured, true);
+    assert.equal(putData.openclaw.events.rollover, true);
     // Secrets must NEVER come back over HTTP
     assert.equal(JSON.stringify(putData).includes('sk-ds-secret'), false);
     assert.equal(JSON.stringify(putData).includes('oc-secret-token'), false);
@@ -360,7 +384,7 @@ test('Hub API + MCP + OpenClaw rollover integration end-to-end', async () => {
     const genRes = await fetch(`${baseUrl}/api/reports/generate`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify({ granularity: 'daily', periodKey: '2026-11-16', force: true })
+      body: JSON.stringify({ granularity: 'daily', periodKey: day1, force: true })
     });
     assert.equal(genRes.status, 200);
 
@@ -368,7 +392,7 @@ test('Hub API + MCP + OpenClaw rollover integration end-to-end', async () => {
     const aiRes1 = await fetch(`${baseUrl}/api/reports/ai-analyze`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify({ granularity: 'daily', periodKey: '2026-11-16' })
+      body: JSON.stringify({ granularity: 'daily', periodKey: day1 })
     });
     assert.equal(aiRes1.status, 200);
     const aiData1 = await aiRes1.json();
@@ -379,21 +403,21 @@ test('Hub API + MCP + OpenClaw rollover integration end-to-end', async () => {
     const aiRes2 = await fetch(`${baseUrl}/api/reports/ai-analyze`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify({ granularity: 'daily', periodKey: '2026-11-16' })
+      body: JSON.stringify({ granularity: 'daily', periodKey: day1 })
     });
     const aiData2 = await aiRes2.json();
     assert.equal(aiData2.cached, true);
     assert.equal(aiCalls.length, 1);
 
-    // 5. GET /api/reports & GET /api/reports/daily/2026-11-16 expose AI + integrations metadata
+    // 5. GET /api/reports & GET /api/reports/daily/:day1 expose AI + integrations metadata
     const listRes = await fetch(`${baseUrl}/api/reports`, { headers: auth });
     const listData = await listRes.json();
     assert.equal(listData.integrations.ai.apiKeyConfigured, true);
-    const dailySummary = listData.reports.find((item) => item.reportId === 'daily:2026-11-16');
+    const dailySummary = listData.reports.find((item) => item.reportId === `daily:${day1}`);
     assert.ok(dailySummary);
     assert.equal(dailySummary.hasAiAnalysis, true);
 
-    const detailRes = await fetch(`${baseUrl}/api/reports/daily/2026-11-16?format=both`, { headers: auth });
+    const detailRes = await fetch(`${baseUrl}/api/reports/daily/${day1}?format=both`, { headers: auth });
     const detailData = await detailRes.json();
     assert.equal(detailData.aiAnalysis.model, 'deepseek-chat');
     assert.match(detailData.aiAnalysis.summaryMarkdown, /AI分析/);
@@ -402,7 +426,7 @@ test('Hub API + MCP + OpenClaw rollover integration end-to-end', async () => {
     const pushRes = await fetch(`${baseUrl}/api/reports/push`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify({ granularity: 'daily', periodKey: '2026-11-16' })
+      body: JSON.stringify({ granularity: 'daily', periodKey: day1 })
     });
     assert.equal(pushRes.status, 200);
     assert.equal(openclawCalls.length, 1);
@@ -413,7 +437,7 @@ test('Hub API + MCP + OpenClaw rollover integration end-to-end', async () => {
     assert.match(openclawCalls[0].body.message, /Team NewAPI/);
     assert.match(openclawCalls[0].body.message, /AI分析/);
 
-    const briefTextRes = await fetch(`${baseUrl}/api/integrations/openclaw/brief?granularity=daily&periodKey=2026-11-16&format=text`, {
+    const briefTextRes = await fetch(`${baseUrl}/api/integrations/openclaw/brief?granularity=daily&periodKey=${day1}&format=text`, {
       headers: auth
     });
     assert.equal(briefTextRes.status, 200);
@@ -439,13 +463,16 @@ test('Hub API + MCP + OpenClaw rollover integration end-to-end', async () => {
     await fetch(`${baseUrl}/api/ingest`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify(makeSampleRecord('dev-1', '2026-11-17', 50_000, 0.5))
+      body: JSON.stringify(makeSampleRecord('dev-1', day2, 50_000, 0.5, {
+        endsAt: day2EndsAt,
+        updatedAt: day2UpdatedAt
+      }))
     });
     // Wait briefly for rollover async hook before hub.stop() awaits pendingTasks
     await new Promise((r) => setTimeout(r, 150));
     await hub.stop();
     assert.ok(openclawCalls.length >= 2, 'rollover should have triggered automatic OpenClaw WeChat delivery');
-    assert.equal(openclawCalls.at(-1).headers['idempotency-key'], 'token-monitor-daily-2026-11-16');
+    assert.equal(openclawCalls.at(-1).headers['idempotency-key'], `token-monitor-daily-${day1}`);
   } finally {
     await hub.stop().catch(() => {});
     fs.rmSync(dir, { recursive: true, force: true });
@@ -652,4 +679,356 @@ test('Hub OpenClaw QR login & provisioning endpoints bind WeChat, persist creden
     await hub.stop().catch(() => {});
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('createIntegrationManager supports deep config merge, idempotency retry/dedup, bounded pushHistory, and test/query pushes', async (t) => {
+  const dir = makeTempDir('tm-integ-dispatch-');
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const dataFile = path.join(dir, 'devices.json');
+  const reportsDir = path.join(dir, 'reports');
+  const dayKey = localDayKey();
+  let currentStats = {
+    devices: [makeSampleRecord('mac-1', dayKey, 150_000, 1.5, { endsAt: new Date(Date.now() + 3_600_000).toISOString() })],
+    periods: {
+      today: {
+        totalTokens: 150_000,
+        costUsd: 1.5,
+        inputTokens: 75_000,
+        outputTokens: 30_000,
+        cacheReadTokens: 45_000,
+        cacheWriteTokens: 0,
+        clients: { codex: 150_000 },
+        clientCosts: { codex: 1.5 },
+        models: { 'gpt-5': 150_000 },
+        modelCosts: { 'gpt-5': 1.5 },
+        projects: {
+          'token-monitor': { label: 'token-monitor', tokens: 150_000, costUsd: 1.5, clients: { codex: 150_000 }, models: { 'gpt-5': 150_000 } }
+        },
+        sessions: {
+          'codex:s1': {
+            client: 'codex',
+            sessionId: 's1',
+            title: 'Private Secret Session Title',
+            projectLabel: 'token-monitor',
+            totalTokens: 150_000,
+            costUsd: 1.5,
+            lastUsedAt: new Date(Date.now() - 5000).toISOString(),
+            turnEnded: true
+          }
+        }
+      }
+    },
+    limits: makeSampleRecord('mac-1', dayKey).limits
+  };
+
+  let clockMs = Date.parse('2026-11-17T10:00:00.000Z');
+  const sentCalls = [];
+  let failNext = false;
+
+  const reportManager = createReportManager({
+    dataFile,
+    reportsDir,
+    config: { enabled: false },
+    getStats: () => currentStats
+  });
+
+  const manager = createIntegrationManager({
+    dataFile,
+    reportsDir,
+    reportManager,
+    getStats: () => currentStats,
+    getQueryContext: () => ({
+      stats: currentStats,
+      sessionTitlesEnabled: false,
+      readSessionDetail: async ({ client, sessionId }) => ({
+        found: true,
+        client,
+        sessionId,
+        title: 'Should Be Stripped',
+        exchanges: [{ promptPreview: 'Fix auth check', tools: ['read_file', 'edit_file'], turnCount: 1 }],
+        totals: { total: 1000, costUsd: 0.05 }
+      })
+    }),
+    initialConfig: {
+      openclaw: {
+        enabled: true,
+        mode: 'generic-webhook',
+        webhookUrl: 'https://oc.mock.local/webhook',
+        hookToken: 'tok-super-secret',
+        events: { rollover: true, sessionCompleted: true, approvalAlerts: true },
+        sessionCompletion: { debounceMs: 0, includeDetailSummary: true },
+        queryPermissions: { allowSessionDetail: false, allowConversationText: false }
+      }
+    },
+    initialSecrets: { openclawHookToken: 'tok-super-secret' },
+    fetchImpl: async (url, init) => {
+      sentCalls.push({ url, headers: init.headers, body: JSON.parse(init.body) });
+      if (failNext) {
+        failNext = false;
+        return new Response('boom tok-super-secret user@example.com', { status: 500 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    },
+    now: () => new Date(clockMs),
+    logger: { error() {}, warn() {}, log() {} }
+  });
+
+  // Deep config merge preserves nested sibling keys while toggling individual flags
+  const merged = manager.updateConfig({
+    openclaw: {
+      events: { approvalAlerts: false },
+      sessionCompletion: { minTurnTokens: 50 }
+    }
+  });
+  assert.equal(merged.openclaw.events.rollover, true);
+  assert.equal(merged.openclaw.events.sessionCompleted, true);
+  assert.equal(merged.openclaw.events.approvalAlerts, false);
+  assert.equal(merged.openclaw.sessionCompletion.debounceMs, 0);
+  assert.equal(merged.openclaw.sessionCompletion.minTurnTokens, 50);
+  assert.equal(JSON.stringify(merged).includes('tok-super-secret'), false);
+
+  // Failed send with idempotencyKey must allow retry; once ok: true, subsequent send deduplicates
+  failNext = true;
+  const failedAttempt = await manager.dispatchEvent({
+    eventType: 'custom',
+    text: 'First attempt',
+    idempotencyKey: 'key-retry-1',
+    source: 'unit'
+  });
+  assert.equal(failedAttempt.ok, false);
+  assert.equal(failedAttempt.entry.ok, false);
+  assert.equal(failedAttempt.entry.message.includes('tok-super-secret'), false);
+
+  clockMs += 1000;
+  const retryOk = await manager.dispatchEvent({
+    eventType: 'custom',
+    text: 'Retry attempt',
+    idempotencyKey: 'key-retry-1',
+    source: 'unit'
+  });
+  assert.equal(retryOk.ok, true);
+  assert.equal(sentCalls.length, 2);
+
+  clockMs += 1000;
+  const deduped = await manager.dispatchEvent({
+    eventType: 'custom',
+    text: 'Duplicate attempt',
+    idempotencyKey: 'key-retry-1',
+    source: 'unit'
+  });
+  assert.equal(deduped.ok, true);
+  assert.equal(deduped.deduplicated, true);
+  assert.equal(sentCalls.length, 2);
+
+  // Test notification works without reports
+  clockMs += 1000;
+  const testRes = await manager.sendTestNotification({ message: 'Ping from test' });
+  assert.equal(testRes.ok, true);
+  assert.equal(testRes.eventType, 'test');
+  assert.equal(sentCalls.at(-1).body.event, 'token_monitor.test');
+  assert.match(sentCalls.at(-1).body.text, /Ping from test/);
+
+  // Privacy gates in pushQueryToOpenClaw
+  const deniedDetail = await manager.pushQueryToOpenClaw({
+    type: 'session_detail',
+    params: { client: 'codex', sessionId: 's1' }
+  });
+  assert.equal(deniedDetail.ok, false);
+  assert.equal(deniedDetail.error, 'session_detail_disabled');
+
+  manager.updateConfig({ openclaw: { queryPermissions: { allowSessionDetail: true, allowConversationText: false } } });
+  const deniedConv = await manager.pushQueryToOpenClaw({
+    type: 'session_detail',
+    params: { client: 'codex', sessionId: 's1', includeConversation: true }
+  });
+  assert.equal(deniedConv.ok, false);
+  assert.equal(deniedConv.error, 'conversation_text_disabled');
+
+  clockMs += 1000;
+  const sessionsDigest = await manager.pushQueryToOpenClaw({ type: 'sessions' });
+  assert.equal(sessionsDigest.ok, true);
+  assert.equal(JSON.stringify(sentCalls.at(-1).body).includes('Private Secret Session Title'), false);
+
+  // Ring buffer caps pushHistory at 50 entries and persists across restart
+  for (let i = 0; i < 55; i += 1) {
+    clockMs += 1000;
+    await manager.dispatchEvent({
+      eventType: 'custom',
+      text: `msg-${i}`,
+      idempotencyKey: `ring-${i}`
+    });
+  }
+  const hist = manager.getPushHistory();
+  assert.equal(hist.count, 50);
+  assert.equal(hist.history.length, 50);
+  assert.equal(hist.history[0].idempotencyKey, 'ring-54');
+  assert.equal(hist.lastPush.summary, 'msg-54');
+
+  await manager.stop();
+  reportManager.stop();
+
+  // Reopen manager from persisted state -> pushHistory & idempotency dedup survive restart
+  const reopened = createIntegrationManager({
+    dataFile,
+    reportsDir,
+    reportManager: createReportManager({ dataFile, reportsDir, config: { enabled: false }, getStats: () => currentStats }),
+    getStats: () => currentStats,
+    initialSecrets: { openclawHookToken: 'tok-super-secret' },
+    fetchImpl: async () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    now: () => new Date(clockMs + 1000),
+    logger: { error() {}, warn() {}, log() {} }
+  });
+  assert.equal(reopened.getPushHistory().count, 50);
+  const postRestartDedup = await reopened.dispatchEvent({
+    eventType: 'custom',
+    text: 'msg-54',
+    idempotencyKey: 'ring-54'
+  });
+  assert.equal(postRestartDedup.deduplicated, true);
+  await reopened.stop();
+});
+
+test('createIntegrationManager dispatches approvalAlerts and sessionCompleted events with detail & AI summaries', async (t) => {
+  const dir = makeTempDir('tm-integ-events-');
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const dataFile = path.join(dir, 'devices.json');
+  const reportsDir = path.join(dir, 'reports');
+  const dayKey = localDayKey();
+  const baseTime = Date.parse(`${dayKey}T12:00:00.000Z`);
+  let clockMs = baseTime;
+
+  const sent = [];
+  let aiCalled = 0;
+  let detailCalled = 0;
+
+  const makeSessionStats = ({ turnEnded, tokens, liveState }) => ({
+    devices: [
+      {
+        deviceId: 'mac-1',
+        deviceName: 'MacBook Pro',
+        stale: false,
+        updatedAt: new Date(clockMs).toISOString(),
+        periodWindows: {
+          today: { key: dayKey, start: `${dayKey}T00:00:00.000Z`, endsAt: new Date(baseTime + 86_400_000).toISOString() },
+          month: { key: dayKey.slice(0, 7), start: `${dayKey.slice(0, 7)}-01T00:00:00.000Z` }
+        },
+        periods: {
+          today: {
+            sessions: {
+              'claude:sess-1': {
+                client: 'claude',
+                sessionId: 'sess-1',
+                title: 'Sensitive Title',
+                projectLabel: 'token-monitor',
+                latestModel: 'claude-sonnet-4-5',
+                totalTokens: tokens,
+                inputTokens: Math.round(tokens * 0.6),
+                outputTokens: Math.round(tokens * 0.4),
+                cacheReadTokens: 0,
+                cacheWriteTokens: 0,
+                costUsd: Number((tokens * 0.00001).toFixed(4)),
+                messageCount: turnEnded ? 4 : 2,
+                startedAt: new Date(baseTime - 30_000).toISOString(),
+                lastUsedAt: new Date(clockMs).toISOString(),
+                turnEnded,
+                liveActivity: { state: liveState, observedAt: new Date(clockMs).toISOString() }
+              }
+            }
+          }
+        }
+      }
+    ]
+  });
+
+  let statsSnapshot = makeSessionStats({ turnEnded: false, tokens: 1000, liveState: 'running' });
+
+  const manager = createIntegrationManager({
+    dataFile,
+    reportsDir,
+    reportManager: createReportManager({ dataFile, reportsDir, config: { enabled: false }, getStats: () => statsSnapshot }),
+    getStats: () => statsSnapshot,
+    getQueryContext: () => ({
+      stats: statsSnapshot,
+      sessionTitlesEnabled: false,
+      readSessionDetail: async ({ client, sessionId }) => {
+        detailCalled += 1;
+        return {
+          found: true,
+          client,
+          sessionId,
+          exchanges: [{ promptPreview: 'Implement OpenClaw integration', tools: ['read_file', 'edit_file'], turnCount: 1 }]
+        };
+      }
+    }),
+    initialConfig: {
+      ai: {
+        enabled: true,
+        protocol: 'openai-compatible',
+        baseUrl: 'https://ai.mock.local/v1',
+        model: 'deepseek-chat'
+      },
+      openclaw: {
+        enabled: true,
+        mode: 'generic-webhook',
+        webhookUrl: 'https://oc.mock.local/hook',
+        events: { rollover: false, approvalAlerts: true, sessionCompleted: true },
+        sessionCompletion: { debounceMs: 0, includeDetailSummary: true, includeAiSummary: true },
+        queryPermissions: { allowSessionDetail: true, allowConversationText: false }
+      }
+    },
+    initialSecrets: { aiApiKey: 'sk-ai-test', openclawHookToken: 'oc-hook-test' },
+    fetchImpl: async (url, init) => {
+      const target = String(url);
+      const body = JSON.parse(init.body);
+      if (target.startsWith('https://ai.mock.local')) {
+        aiCalled += 1;
+        return new Response(JSON.stringify({
+          model: 'deepseek-chat',
+          choices: [{ message: { content: '完成一轮代码修改与测试。' } }],
+          usage: { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 }
+        }), { status: 200 });
+      }
+      sent.push({ url: target, headers: init.headers, body });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    },
+    now: () => new Date(clockMs),
+    logger: { error() {}, warn() {}, log() {} }
+  });
+
+  // Approval alert event
+  const alertRes = await manager.onApprovalAlertCreated({
+    id: 'alert-42',
+    deviceId: 'mac-1',
+    deviceName: 'MacBook Pro',
+    client: 'codex',
+    tool: 'run_command',
+    command: 'npm test',
+    projectLabel: 'token-monitor'
+  });
+  assert.equal(alertRes.ok, true);
+  assert.equal(sent.at(-1).body.event, 'token_monitor.approval_alert');
+  assert.equal(sent.at(-1).headers['idempotency-key'], 'approval:alert-42');
+
+  // Duplicate approval alert dedups
+  const dupAlert = await manager.onApprovalAlertCreated({ id: 'alert-42', tool: 'run_command' });
+  assert.equal(dupAlert.deduplicated, true);
+
+  // Session completion: baseline active snapshot -> ended snapshot
+  manager.onStatsSnapshot(statsSnapshot);
+  clockMs += 5000;
+  statsSnapshot = makeSessionStats({ turnEnded: true, tokens: 3500, liveState: 'idle' });
+  manager.onStatsSnapshot(statsSnapshot);
+  await manager.flush();
+  await manager.stop();
+
+  const completionPayload = sent.find((item) => item.body.event === 'token_monitor.session_completed');
+  assert.ok(completionPayload);
+  assert.equal(detailCalled, 1);
+  assert.equal(aiCalled, 1);
+  assert.equal(completionPayload.body.payload.completion.title, null);
+  assert.equal(completionPayload.body.payload.completion.turnDelta.totalTokens, 2500);
+  assert.match(completionPayload.body.text, /read_file/);
+  assert.match(completionPayload.body.text, /完成一轮代码修改与测试/);
 });

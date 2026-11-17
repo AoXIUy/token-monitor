@@ -11,8 +11,38 @@ const {
   buildRealtimeOverviewSnapshot,
   extractLimitsSummary
 } = require('./aiReportAnalyzer');
+const {
+  BREAKDOWN_GROUPS,
+  BREAKDOWN_PERIODS,
+  HISTORY_GROUPS,
+  HISTORY_RESOLUTIONS,
+  SESSION_PERIODS,
+  SESSION_SORTS,
+  SESSION_STATES,
+  getDevicesAndHealthQuery,
+  getLimitsOverviewQuery,
+  getLiveTokenRateSummary,
+  getSubscriptionsAndForecastsQuery,
+  listSessionsQuery,
+  queryUsageBreakdown,
+  queryUsageHistory
+} = require('./openclawQueries');
 
 const MCP_SUPPORTED_VERSIONS = Object.freeze(['2025-06-18', '2025-03-26', '2024-11-05']);
+const PUSH_TO_OPENCLAW_TYPES = Object.freeze([
+  'report',
+  'usage',
+  'sessions',
+  'session_detail',
+  'history',
+  'devices',
+  'limits',
+  'subscriptions',
+  'live_rate',
+  'service_status',
+  'test',
+  'custom'
+]);
 
 const JSON_RPC_ERRORS = Object.freeze({
   PARSE_ERROR: -32700,
@@ -208,6 +238,344 @@ const MCP_TOOLS = Object.freeze([
       },
       additionalProperties: false
     }
+  },
+  {
+    name: 'query_usage_breakdown',
+    description: 'Query token usage, known cost, unpriced tokens, cache hit rate, and throughput broken down by summary, model, client, project, or device.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        period: {
+          type: 'string',
+          enum: [...BREAKDOWN_PERIODS],
+          description: 'Target usage period (today, month, week, last7, last30, allTime).'
+        },
+        range: {
+          type: 'string',
+          enum: [...BREAKDOWN_PERIODS],
+          description: 'Alias for period.'
+        },
+        groupBy: {
+          type: 'string',
+          enum: [...BREAKDOWN_GROUPS],
+          description: 'Breakdown dimension (summary, model, client, project, device).'
+        },
+        deviceId: {
+          type: 'string',
+          description: 'Optional device ID filter.'
+        },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 500,
+          description: 'Maximum breakdown rows to return (1..500).'
+        },
+        modelAliasGrouping: {
+          type: 'string',
+          description: 'Optional model alias grouping mode.'
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'list_sessions',
+    description: 'List and filter coding sessions with live activity state, context window usage, prompt cache status, model, and project metadata.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        period: {
+          type: 'string',
+          enum: [...SESSION_PERIODS],
+          description: 'Session period (today, month, allTime).'
+        },
+        state: {
+          type: 'string',
+          enum: [...SESSION_STATES],
+          description: 'Activity state filter (all, running, waiting, ended, idle).'
+        },
+        client: {
+          type: 'string',
+          description: 'Optional client filter (e.g. codex, claude, cursor).'
+        },
+        project: {
+          type: 'string',
+          description: 'Optional project name or key filter.'
+        },
+        deviceId: {
+          type: 'string',
+          description: 'Optional device ID filter.'
+        },
+        search: {
+          type: 'string',
+          description: 'Optional case-insensitive text search across allowed session fields.'
+        },
+        sort: {
+          type: 'string',
+          enum: [...SESSION_SORTS],
+          description: 'Sort field (lastUsedAt, totalTokens, costUsd).'
+        },
+        sortDirection: {
+          type: 'string',
+          enum: ['asc', 'desc'],
+          description: 'Sort direction (asc or desc).'
+        },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 500,
+          description: 'Maximum sessions per page (1..500).'
+        },
+        cursor: {
+          type: 'string',
+          description: 'Pagination cursor returned by a previous call.'
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'get_session_detail',
+    description: 'Fetch per-turn exchange breakdown and optional conversation transcript for a session (gated by queryPermissions.allowSessionDetail and allowConversationText).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        client: {
+          type: 'string',
+          description: 'Client identifier (e.g. codex, claude, codebuddy).'
+        },
+        sessionId: {
+          type: 'string',
+          description: 'Session identifier.'
+        },
+        deviceId: {
+          type: 'string',
+          description: 'Optional device identifier.'
+        },
+        period: {
+          type: 'string',
+          enum: ['today', 'month', 'total', 'allTime'],
+          description: 'Exchange filter period (defaults to total).'
+        },
+        includeConversation: {
+          type: 'boolean',
+          description: 'Include full conversation messages (requires allowConversationText).'
+        },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 200,
+          description: 'Maximum exchanges to return.'
+        },
+        offset: {
+          type: 'integer',
+          minimum: 0,
+          description: 'Zero-based exchange offset for pagination.'
+        },
+        cursor: {
+          type: 'string',
+          description: 'Optional conversation pagination cursor.'
+        }
+      },
+      required: ['client', 'sessionId'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'get_usage_history',
+    description: 'Query daily, monthly, or summary historical usage trends, active days, streaks, peak day, and client/model breakdowns.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        resolution: {
+          type: 'string',
+          enum: [...HISTORY_RESOLUTIONS],
+          description: 'History resolution (daily, monthly, summary).'
+        },
+        from: {
+          type: 'string',
+          description: 'Optional start date (YYYY-MM-DD or YYYY-MM).'
+        },
+        to: {
+          type: 'string',
+          description: 'Optional end date (YYYY-MM-DD or YYYY-MM).'
+        },
+        groupBy: {
+          type: 'string',
+          enum: [...HISTORY_GROUPS],
+          description: 'Optional breakdown group (none, client, model).'
+        },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 500,
+          description: 'Maximum rows/breakdown items to return (1..500).'
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'get_devices_and_health',
+    description: 'Query connected/stale devices, tracked clients, clientStatus, sanitized clientHealth diagnostics, and WSL status.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deviceId: {
+          type: 'string',
+          description: 'Optional device ID filter.'
+        },
+        includeDiagnostics: {
+          type: 'boolean',
+          description: 'Include sanitized clientHealth diagnostic codes (defaults to true).'
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'get_limits_history',
+    description: 'Query current provider & third-party API quota limits along with historical quota snapshots when available from the Desktop host.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        thirdPartyOnly: {
+          type: 'boolean',
+          description: 'Filter to third-party API providers only.'
+        },
+        provider: {
+          type: 'string',
+          description: 'Optional comma-separated provider ID filter.'
+        },
+        status: {
+          type: 'string',
+          description: 'Optional comma-separated status filter.'
+        },
+        accountKey: {
+          type: 'string',
+          description: 'Optional account key filter for quota history.'
+        },
+        windowName: {
+          type: 'string',
+          description: 'Optional quota window name filter for quota history.'
+        },
+        hours: {
+          type: 'number',
+          minimum: 1,
+          maximum: 720,
+          description: 'History lookback hours (1..720, defaults to 24).'
+        },
+        maxProviders: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 100,
+          description: 'Maximum provider accounts to return (1..100).'
+        },
+        includeHistory: {
+          type: 'boolean',
+          description: 'Include historical quota series when available (defaults to true).'
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'get_subscriptions_and_forecasts',
+    description: 'Query active subscriptions, normalized monthly USD spend, renewal countdowns, and top-up balance exhaustion forecasts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        date: {
+          type: 'string',
+          description: 'Optional evaluation date YYYY-MM-DD.'
+        },
+        includeForecasts: {
+          type: 'boolean',
+          description: 'Include top-up exhaustion forecasts (defaults to true).'
+        },
+        activeOnly: {
+          type: 'boolean',
+          description: 'Return only currently active subscriptions.'
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'get_live_token_rate',
+    description: 'Query current live output token speed (tok/s) and cost burn rate, falling back to period throughput counters when idle.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deviceId: {
+          type: 'string',
+          description: 'Optional device ID filter.'
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'get_service_status_and_approvals',
+    description: 'Query official upstream AI service status incidents, Codex reset forecast, and pending Desktop tool approval alerts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        force: {
+          type: 'boolean',
+          description: 'Bypass cached status checks when supported by the Desktop host.'
+        },
+        providerIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional list of upstream service status provider IDs.'
+        },
+        includeResetForecast: {
+          type: 'boolean',
+          description: 'Include Codex reset forecast section (defaults to true).'
+        },
+        includeApprovals: {
+          type: 'boolean',
+          description: 'Include pending approval alerts section (defaults to true).'
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'push_to_openclaw',
+    description: 'Format and push a report, live query digest, connectivity test, or custom notification via OpenClaw Gateway (e.g. WeChat).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        type: {
+          type: 'string',
+          enum: [...PUSH_TO_OPENCLAW_TYPES],
+          description: 'Push payload type (report, usage, sessions, session_detail, history, devices, limits, subscriptions, live_rate, service_status, test, custom).'
+        },
+        params: {
+          type: 'object',
+          description: 'Optional query or report parameters matching the chosen type.'
+        },
+        includeAi: {
+          type: 'boolean',
+          description: 'Include optional third-party AI summary when enabled.'
+        },
+        customMessage: {
+          type: 'string',
+          description: 'Optional custom message body or prefix.'
+        },
+        idempotencyKey: {
+          type: 'string',
+          description: 'Optional idempotency key for sliding-window duplicate prevention.'
+        },
+        test: {
+          type: 'boolean',
+          description: 'Shortcut to send a connectivity test notification.'
+        }
+      },
+      additionalProperties: false
+    }
   }
 ]);
 
@@ -228,6 +596,42 @@ const MCP_STATIC_RESOURCES = Object.freeze([
     uri: 'report://latest/monthly',
     name: 'Latest Monthly Usage Report',
     description: 'Current monthly Token Monitor usage & project analysis report (JSON).',
+    mimeType: 'application/json'
+  },
+  {
+    uri: 'usage://today',
+    name: 'Today Usage Breakdown',
+    description: 'Live today token usage, known cost, cache efficiency, and throughput summary (JSON).',
+    mimeType: 'application/json'
+  },
+  {
+    uri: 'sessions://active',
+    name: 'Active and Recent Sessions',
+    description: 'Live session list with activity state, context window usage, model, and project metadata (JSON).',
+    mimeType: 'application/json'
+  },
+  {
+    uri: 'limits://current',
+    name: 'Current Quota Limits',
+    description: 'Sanitized provider and third-party API quota balances and reset countdowns (JSON).',
+    mimeType: 'application/json'
+  },
+  {
+    uri: 'devices://health',
+    name: 'Devices and Client Health',
+    description: 'Connected/stale devices, tracked clients, clientHealth diagnostics, and WSL status (JSON).',
+    mimeType: 'application/json'
+  },
+  {
+    uri: 'subscriptions://summary',
+    name: 'Subscriptions and Top-Up Forecasts',
+    description: 'Active subscriptions, monthly USD total, renewal dates, and top-up exhaustion forecasts (JSON).',
+    mimeType: 'application/json'
+  },
+  {
+    uri: 'service-status://current',
+    name: 'Upstream Service Status and Approvals',
+    description: 'Combined AI provider service status, Codex reset forecast, and pending approval alerts (JSON).',
     mimeType: 'application/json'
   }
 ]);
@@ -311,6 +715,54 @@ const MCP_PROMPTS = Object.freeze([
         required: false
       }
     ]
+  },
+  {
+    name: 'session-summary',
+    description: 'Summarize active or recent coding sessions, token/cost breakdown, context remaining, and optional turn details.',
+    arguments: [
+      {
+        name: 'sessionId',
+        description: 'Optional session ID (omit to inspect active/recent sessions).',
+        required: false
+      },
+      {
+        name: 'client',
+        description: 'Optional client identifier (e.g. codex, claude, cursor).',
+        required: false
+      },
+      {
+        name: 'period',
+        description: 'Session period: today, month, or allTime.',
+        required: false
+      }
+    ]
+  },
+  {
+    name: 'quota-check',
+    description: 'Check provider and third-party API quota balances, reset countdowns, top-up exhaustion forecasts, and service incidents.',
+    arguments: [
+      {
+        name: 'provider',
+        description: 'Optional provider filter (e.g. claude, codex, thirdparty).',
+        required: false
+      },
+      {
+        name: 'includeHistory',
+        description: 'Set "true" to inspect recent quota history trends.',
+        required: false
+      }
+    ]
+  },
+  {
+    name: 'daily-standup-usage',
+    description: 'Prepare a concise engineering standup summary of today/recent usage, active projects, quota health, and live throughput.',
+    arguments: [
+      {
+        name: 'date',
+        description: 'Target calendar date YYYY-MM-DD (defaults to today).',
+        required: false
+      }
+    ]
   }
 ]);
 
@@ -377,9 +829,28 @@ function toolErrorResult(text) {
  */
 function extractBackendError(result) {
   if (!result || typeof result !== 'object') return null;
-  if (result.ok === false) return String(result.error || result.message || 'Operation failed');
-  if (typeof result.error === 'string' && result.error) return result.error;
+  if (result.ok === false) {
+    const err = typeof result.error === 'string' ? result.error.trim() : '';
+    const msg = typeof result.message === 'string' ? result.message.trim() : '';
+    if (err && msg && msg !== err) return `${err}: ${msg}`;
+    return String(err || msg || 'Operation failed');
+  }
+  if (typeof result.error === 'string' && result.error) {
+    const msg = typeof result.message === 'string' ? result.message.trim() : '';
+    return msg && msg !== result.error ? `${result.error}: ${msg}` : result.error;
+  }
   return null;
+}
+
+/**
+ * Format a JSON-capable tool result cleanly.
+ * @param {any} payload
+ */
+function jsonToolResult(payload) {
+  return {
+    content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+    ...(payload && typeof payload === 'object' && !Array.isArray(payload) ? { structuredContent: payload } : {})
+  };
 }
 
 /**
@@ -434,15 +905,29 @@ function parseReportUri(uriString) {
 }
 
 /**
- * Create a zero-dependency MCP JSON-RPC 2.0 report server.
+ * Create a zero-dependency MCP JSON-RPC 2.0 report & query server.
  * @param {object} options
  * @param {(args: { granularity?: string, limit?: number }) => Promise<any> | any} [options.listReports]
  * @param {(args: { granularity: string, periodKey?: string, format?: string }) => Promise<any> | any} [options.getReport]
  * @param {(args: { granularity?: string, periodKey?: string, force?: boolean }) => Promise<any> | any} [options.generateReport]
  * @param {(args: { granularity?: string, periodKey?: string, project?: string, limit?: number }) => Promise<any> | any} [options.analyzeProjects]
  * @param {() => Promise<any> | any} [options.getStats]
+ * @param {() => Promise<any> | any} [options.getHistory]
+ * @param {() => Promise<any> | any} [options.getSubscriptions]
  * @param {(args: { granularity?: string, periodKey?: string, question?: string, language?: string, refresh?: boolean }) => Promise<any> | any} [options.analyzeWithAi]
  * @param {(args: { granularity?: string, periodKey?: string, includeAi?: boolean, includeLimits?: boolean, question?: string }) => Promise<any> | any} [options.pushToOpenClaw]
+ * @param {(args: { type?: string, test?: boolean, params?: any, includeAi?: boolean, customMessage?: string, idempotencyKey?: string }) => Promise<any> | any} [options.pushEventToOpenClaw]
+ * @param {(args: any) => Promise<any> | any} [options.queryUsageBreakdown]
+ * @param {(args: any) => Promise<any> | any} [options.listSessions]
+ * @param {(args: any) => Promise<any> | any} [options.getSessionDetail]
+ * @param {(args: any) => Promise<any> | any} [options.getUsageHistory]
+ * @param {(args: any) => Promise<any> | any} [options.getDevicesAndHealth]
+ * @param {(args: any) => Promise<any> | any} [options.getLimitsHistory]
+ * @param {(args: any) => Promise<any> | any} [options.getSubscriptionsAndForecasts]
+ * @param {(args: any) => Promise<any> | any} [options.getLiveTokenRate]
+ * @param {(args: any) => Promise<any> | any} [options.getServiceStatusAndApprovals]
+ * @param {() => Promise<any> | any} [options.listApprovalAlerts]
+ * @param {boolean} [options.sessionTitlesEnabled]
  * @param {{ name?: string, version?: string }} [options.serverInfo]
  * @returns {{ handleMessage: (message: any) => Promise<JsonRpcResponse | null>, handlePayload: (payload: any) => Promise<JsonRpcResponse | JsonRpcResponse[] | null> }}
  */
@@ -452,8 +937,22 @@ function createMcpReportServer({
   generateReport,
   analyzeProjects,
   getStats,
+  getHistory,
+  getSubscriptions,
   analyzeWithAi,
   pushToOpenClaw,
+  pushEventToOpenClaw,
+  queryUsageBreakdown: queryUsageBreakdownFn,
+  listSessions: listSessionsFn,
+  getSessionDetail: getSessionDetailFn,
+  getUsageHistory: getUsageHistoryFn,
+  getDevicesAndHealth: getDevicesAndHealthFn,
+  getLimitsHistory: getLimitsHistoryFn,
+  getSubscriptionsAndForecasts: getSubscriptionsAndForecastsFn,
+  getLiveTokenRate: getLiveTokenRateFn,
+  getServiceStatusAndApprovals: getServiceStatusAndApprovalsFn,
+  listApprovalAlerts,
+  sessionTitlesEnabled = false,
   serverInfo
 } = {}) {
   const resolvedServerInfo = {
@@ -654,10 +1153,356 @@ function createMcpReportServer({
       });
       const backendErr = extractBackendError(result);
       if (backendErr) return toolErrorResult(backendErr);
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-        ...(result && typeof result === 'object' && !Array.isArray(result) ? { structuredContent: result } : {})
+      return jsonToolResult(result);
+    }
+
+    if (name === 'query_usage_breakdown') {
+      if (args.limit !== undefined && (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 500)) {
+        return toolErrorResult('limit must be an integer between 1 and 500.');
+      }
+      const normPeriod = args.period !== undefined
+        ? (String(args.period).trim().toLowerCase() === 'alltime' ? 'allTime' : String(args.period).trim().toLowerCase())
+        : undefined;
+      if (normPeriod !== undefined && !BREAKDOWN_PERIODS.includes(normPeriod)) {
+        return toolErrorResult(`Invalid period: ${String(args.period)}`);
+      }
+      const normRange = args.range !== undefined
+        ? (String(args.range).trim().toLowerCase() === 'alltime' ? 'allTime' : String(args.range).trim().toLowerCase())
+        : undefined;
+      if (normRange !== undefined && !BREAKDOWN_PERIODS.includes(normRange)) {
+        return toolErrorResult(`Invalid range: ${String(args.range)}`);
+      }
+      const normGroup = args.groupBy !== undefined ? String(args.groupBy).trim().toLowerCase() : undefined;
+      if (normGroup !== undefined && !BREAKDOWN_GROUPS.includes(normGroup)) {
+        return toolErrorResult(`Invalid groupBy: ${String(args.groupBy)}`);
+      }
+      const queryArgs = {
+        ...(normPeriod !== undefined ? { period: normPeriod } : {}),
+        ...(normRange !== undefined ? { range: normRange } : {}),
+        ...(normGroup !== undefined ? { groupBy: normGroup } : {}),
+        ...(args.deviceId !== undefined ? { deviceId: String(args.deviceId) } : {}),
+        ...(args.limit !== undefined ? { limit: args.limit } : {}),
+        ...(args.modelAliasGrouping !== undefined ? { modelAliasGrouping: String(args.modelAliasGrouping) } : {})
       };
+      let result;
+      if (typeof queryUsageBreakdownFn === 'function') {
+        result = await queryUsageBreakdownFn(queryArgs);
+      } else if (typeof getStats === 'function') {
+        const stats = await getStats();
+        const statsErr = extractBackendError(stats);
+        if (statsErr) return toolErrorResult(statsErr);
+        const history = typeof getHistory === 'function' ? await getHistory() : stats?.history;
+        result = queryUsageBreakdown({ stats, history, ...queryArgs });
+      } else {
+        return toolErrorResult('query_usage_breakdown backend is not configured.');
+      }
+      const backendErr = extractBackendError(result);
+      if (backendErr) return toolErrorResult(backendErr);
+      return jsonToolResult(result);
+    }
+
+    if (name === 'list_sessions') {
+      if (args.limit !== undefined && (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 500)) {
+        return toolErrorResult('limit must be an integer between 1 and 500.');
+      }
+      const normPeriod = args.period !== undefined
+        ? (String(args.period).trim().toLowerCase() === 'alltime' ? 'allTime' : String(args.period).trim().toLowerCase())
+        : undefined;
+      if (normPeriod !== undefined && !SESSION_PERIODS.includes(normPeriod)) {
+        return toolErrorResult(`Invalid session period: ${String(args.period)}`);
+      }
+      const normState = args.state !== undefined ? String(args.state).trim().toLowerCase() : undefined;
+      if (normState !== undefined && !SESSION_STATES.includes(normState)) {
+        return toolErrorResult(`Invalid session state: ${String(args.state)}`);
+      }
+      const normSort = args.sort !== undefined
+        ? SESSION_SORTS.find((item) => item.toLowerCase() === String(args.sort).trim().toLowerCase())
+        : undefined;
+      if (args.sort !== undefined && !normSort) {
+        return toolErrorResult(`Invalid session sort: ${String(args.sort)}`);
+      }
+      const normDir = args.sortDirection !== undefined ? String(args.sortDirection).trim().toLowerCase() : undefined;
+      if (normDir !== undefined && normDir !== 'asc' && normDir !== 'desc') {
+        return toolErrorResult(`Invalid sortDirection: ${String(args.sortDirection)}`);
+      }
+      const queryArgs = {
+        ...(normPeriod !== undefined ? { period: normPeriod } : {}),
+        ...(normState !== undefined ? { state: normState } : {}),
+        ...(args.client !== undefined ? { client: String(args.client) } : {}),
+        ...(args.project !== undefined ? { project: String(args.project) } : {}),
+        ...(args.deviceId !== undefined ? { deviceId: String(args.deviceId) } : {}),
+        ...(args.search !== undefined ? { search: String(args.search) } : {}),
+        ...(normSort !== undefined ? { sort: normSort } : {}),
+        ...(normDir !== undefined ? { sortDirection: normDir } : {}),
+        ...(args.limit !== undefined ? { limit: args.limit } : {}),
+        ...(args.cursor !== undefined ? { cursor: String(args.cursor) } : {})
+      };
+      let result;
+      if (typeof listSessionsFn === 'function') {
+        result = await listSessionsFn(queryArgs);
+      } else if (typeof getStats === 'function') {
+        const stats = await getStats();
+        const statsErr = extractBackendError(stats);
+        if (statsErr) return toolErrorResult(statsErr);
+        result = listSessionsQuery({
+          stats,
+          sessionTitlesEnabled: sessionTitlesEnabled === true,
+          ...queryArgs
+        });
+      } else {
+        return toolErrorResult('list_sessions backend is not configured.');
+      }
+      const backendErr = extractBackendError(result);
+      if (backendErr) return toolErrorResult(backendErr);
+      return jsonToolResult(result);
+    }
+
+    if (name === 'get_session_detail') {
+      if (typeof getSessionDetailFn !== 'function') {
+        return toolErrorResult('get_session_detail backend is not configured.');
+      }
+      const client = typeof args.client === 'string' ? args.client.trim() : '';
+      const sessionId = typeof args.sessionId === 'string' ? args.sessionId.trim() : '';
+      if (!client || !sessionId) {
+        return toolErrorResult('client and sessionId are required.');
+      }
+      if (args.limit !== undefined && (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 200)) {
+        return toolErrorResult('limit must be an integer between 1 and 200.');
+      }
+      if (args.offset !== undefined && (!Number.isInteger(args.offset) || args.offset < 0)) {
+        return toolErrorResult('offset must be a non-negative integer.');
+      }
+      const period = args.period !== undefined ? String(args.period).trim() : 'total';
+      if (!['today', 'month', 'total', 'allTime'].includes(period)) {
+        return toolErrorResult(`Invalid period: ${period}`);
+      }
+      const result = await getSessionDetailFn({
+        client,
+        sessionId,
+        ...(args.deviceId !== undefined ? { deviceId: String(args.deviceId) } : {}),
+        period,
+        ...(args.includeConversation !== undefined ? { includeConversation: Boolean(args.includeConversation) } : {}),
+        ...(args.limit !== undefined ? { limit: args.limit } : {}),
+        ...(args.offset !== undefined ? { offset: args.offset } : {}),
+        ...(args.cursor !== undefined ? { cursor: String(args.cursor) } : {})
+      });
+      const backendErr = extractBackendError(result);
+      if (backendErr) return toolErrorResult(backendErr);
+      return jsonToolResult(result);
+    }
+
+    if (name === 'get_usage_history') {
+      if (args.limit !== undefined && (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 500)) {
+        return toolErrorResult('limit must be an integer between 1 and 500.');
+      }
+      const resolution = args.resolution !== undefined ? String(args.resolution).trim().toLowerCase() : undefined;
+      if (resolution !== undefined && !HISTORY_RESOLUTIONS.includes(resolution)) {
+        return toolErrorResult(`Invalid history resolution: ${String(args.resolution)}`);
+      }
+      const groupBy = args.groupBy !== undefined ? String(args.groupBy).trim().toLowerCase() : undefined;
+      if (groupBy !== undefined && !HISTORY_GROUPS.includes(groupBy)) {
+        return toolErrorResult(`Invalid history groupBy: ${String(args.groupBy)}`);
+      }
+      const queryArgs = {
+        ...(resolution !== undefined ? { resolution } : {}),
+        ...(args.from !== undefined ? { from: String(args.from) } : {}),
+        ...(args.to !== undefined ? { to: String(args.to) } : {}),
+        ...(groupBy !== undefined ? { groupBy } : {}),
+        ...(args.limit !== undefined ? { limit: args.limit } : {})
+      };
+      let result;
+      if (typeof getUsageHistoryFn === 'function') {
+        result = await getUsageHistoryFn(queryArgs);
+      } else if (typeof getHistory === 'function' || typeof getStats === 'function') {
+        const history = typeof getHistory === 'function'
+          ? await getHistory()
+          : (typeof getStats === 'function' ? (await getStats())?.history : null);
+        result = queryUsageHistory({ history, ...queryArgs });
+      } else {
+        return toolErrorResult('get_usage_history backend is not configured.');
+      }
+      const backendErr = extractBackendError(result);
+      if (backendErr) return toolErrorResult(backendErr);
+      return jsonToolResult(result);
+    }
+
+    if (name === 'get_devices_and_health') {
+      const queryArgs = {
+        ...(args.deviceId !== undefined ? { deviceId: String(args.deviceId) } : {}),
+        ...(args.includeDiagnostics !== undefined ? { includeDiagnostics: Boolean(args.includeDiagnostics) } : {})
+      };
+      let result;
+      if (typeof getDevicesAndHealthFn === 'function') {
+        result = await getDevicesAndHealthFn(queryArgs);
+      } else if (typeof getStats === 'function') {
+        const stats = await getStats();
+        const statsErr = extractBackendError(stats);
+        if (statsErr) return toolErrorResult(statsErr);
+        result = getDevicesAndHealthQuery({ stats, ...queryArgs });
+      } else {
+        return toolErrorResult('get_devices_and_health backend is not configured.');
+      }
+      const backendErr = extractBackendError(result);
+      if (backendErr) return toolErrorResult(backendErr);
+      return jsonToolResult(result);
+    }
+
+    if (name === 'get_limits_history') {
+      if (args.maxProviders !== undefined && (!Number.isInteger(args.maxProviders) || args.maxProviders < 1 || args.maxProviders > 100)) {
+        return toolErrorResult('maxProviders must be an integer between 1 and 100.');
+      }
+      if (args.hours !== undefined && (!Number.isFinite(Number(args.hours)) || Number(args.hours) < 1 || Number(args.hours) > 720)) {
+        return toolErrorResult('hours must be a number between 1 and 720.');
+      }
+      const queryArgs = {
+        ...(args.thirdPartyOnly !== undefined ? { thirdPartyOnly: Boolean(args.thirdPartyOnly) } : {}),
+        ...(args.provider !== undefined ? { provider: String(args.provider) } : {}),
+        ...(args.status !== undefined ? { status: String(args.status) } : {}),
+        ...(args.accountKey !== undefined ? { accountKey: String(args.accountKey) } : {}),
+        ...(args.windowName !== undefined ? { windowName: String(args.windowName) } : {}),
+        ...(args.hours !== undefined ? { hours: Number(args.hours) } : {}),
+        ...(args.maxProviders !== undefined ? { maxProviders: args.maxProviders } : {}),
+        includeHistory: args.includeHistory !== undefined ? Boolean(args.includeHistory) : true
+      };
+      let result;
+      if (typeof getLimitsHistoryFn === 'function') {
+        result = await getLimitsHistoryFn(queryArgs);
+      } else if (typeof getStats === 'function') {
+        const stats = await getStats();
+        const statsErr = extractBackendError(stats);
+        if (statsErr) return toolErrorResult(statsErr);
+        result = {
+          ...getLimitsOverviewQuery({
+            stats,
+            thirdPartyOnly: Boolean(queryArgs.thirdPartyOnly),
+            provider: queryArgs.provider,
+            status: queryArgs.status,
+            maxProviders: queryArgs.maxProviders
+          }),
+          ...(queryArgs.includeHistory ? { limitsHistory: { available: false, reason: 'unavailable', series: [] } } : {})
+        };
+      } else {
+        return toolErrorResult('get_limits_history backend is not configured.');
+      }
+      const backendErr = extractBackendError(result);
+      if (backendErr) return toolErrorResult(backendErr);
+      return jsonToolResult(result);
+    }
+
+    if (name === 'get_subscriptions_and_forecasts') {
+      const queryArgs = {
+        ...(args.date !== undefined ? { date: String(args.date) } : {}),
+        ...(args.includeForecasts !== undefined ? { includeForecasts: Boolean(args.includeForecasts) } : {}),
+        ...(args.activeOnly !== undefined ? { activeOnly: Boolean(args.activeOnly) } : {})
+      };
+      let result;
+      if (typeof getSubscriptionsAndForecastsFn === 'function') {
+        result = await getSubscriptionsAndForecastsFn(queryArgs);
+      } else if (typeof getStats === 'function') {
+        const stats = await getStats();
+        const statsErr = extractBackendError(stats);
+        if (statsErr) return toolErrorResult(statsErr);
+        const subscriptionsDoc = typeof getSubscriptions === 'function' ? await getSubscriptions() : stats?.subscriptions;
+        result = getSubscriptionsAndForecastsQuery({ subscriptionsDoc, stats, ...queryArgs });
+      } else {
+        return toolErrorResult('get_subscriptions_and_forecasts backend is not configured.');
+      }
+      const backendErr = extractBackendError(result);
+      if (backendErr) return toolErrorResult(backendErr);
+      return jsonToolResult(result);
+    }
+
+    if (name === 'get_live_token_rate') {
+      const queryArgs = {
+        ...(args.deviceId !== undefined ? { deviceId: String(args.deviceId) } : {})
+      };
+      let result;
+      if (typeof getLiveTokenRateFn === 'function') {
+        result = await getLiveTokenRateFn(queryArgs);
+      } else if (typeof getStats === 'function') {
+        const stats = await getStats();
+        const statsErr = extractBackendError(stats);
+        if (statsErr) return toolErrorResult(statsErr);
+        result = getLiveTokenRateSummary({ stats, ...queryArgs });
+      } else {
+        return toolErrorResult('get_live_token_rate backend is not configured.');
+      }
+      const backendErr = extractBackendError(result);
+      if (backendErr) return toolErrorResult(backendErr);
+      return jsonToolResult(result);
+    }
+
+    if (name === 'get_service_status_and_approvals') {
+      if (args.providerIds !== undefined && !Array.isArray(args.providerIds)) {
+        return toolErrorResult('providerIds must be an array of provider IDs.');
+      }
+      const queryArgs = {
+        ...(args.force !== undefined ? { force: Boolean(args.force) } : {}),
+        ...(Array.isArray(args.providerIds) ? { providerIds: args.providerIds.map((/** @type {any} */ p) => String(p)) } : {}),
+        includeResetForecast: args.includeResetForecast !== false,
+        includeApprovals: args.includeApprovals !== false
+      };
+      let result;
+      if (typeof getServiceStatusAndApprovalsFn === 'function') {
+        result = await getServiceStatusAndApprovalsFn(queryArgs);
+      } else {
+        const rawAlerts = queryArgs.includeApprovals && typeof listApprovalAlerts === 'function'
+          ? await listApprovalAlerts()
+          : null;
+        result = {
+          ok: true,
+          checkedAt: new Date().toISOString(),
+          serviceStatus: { available: false, reason: 'unavailable', providers: [] },
+          ...(queryArgs.includeResetForecast ? { codexResetForecast: { available: false, reason: 'unavailable' } } : {}),
+          ...(queryArgs.includeApprovals
+            ? {
+                approvalAlerts: rawAlerts && rawAlerts.ok
+                  ? { available: true, enabled: true, alerts: rawAlerts.alerts || [] }
+                  : { available: false, enabled: false, alerts: [] }
+              }
+            : {})
+        };
+      }
+      const backendErr = extractBackendError(result);
+      if (backendErr) return toolErrorResult(backendErr);
+      return jsonToolResult(result);
+    }
+
+    if (name === 'push_to_openclaw') {
+      const resolvedType = args.test === true
+        ? 'test'
+        : (args.type !== undefined ? String(args.type).trim().toLowerCase().replace(/-/g, '_') : 'usage');
+      if (!PUSH_TO_OPENCLAW_TYPES.includes(resolvedType)) {
+        return toolErrorResult(`Unsupported push type "${String(args.type)}".`);
+      }
+      if (args.params !== undefined && (typeof args.params !== 'object' || args.params === null || Array.isArray(args.params))) {
+        return toolErrorResult('params must be an object.');
+      }
+      let result;
+      if (typeof pushEventToOpenClaw === 'function') {
+        result = await pushEventToOpenClaw({
+          type: resolvedType,
+          test: args.test === true,
+          params: args.params || {},
+          ...(args.includeAi !== undefined ? { includeAi: Boolean(args.includeAi) } : {}),
+          ...(args.customMessage !== undefined ? { customMessage: String(args.customMessage) } : {}),
+          ...(args.idempotencyKey !== undefined ? { idempotencyKey: String(args.idempotencyKey) } : {})
+        });
+      } else if (resolvedType === 'report' && typeof pushToOpenClaw === 'function') {
+        const p = args.params || {};
+        result = await pushToOpenClaw({
+          granularity: p.granularity !== undefined ? String(p.granularity) : 'daily',
+          periodKey: p.periodKey !== undefined ? String(p.periodKey) : 'latest',
+          ...(args.includeAi !== undefined ? { includeAi: Boolean(args.includeAi) } : {}),
+          ...(p.includeLimits !== undefined ? { includeLimits: Boolean(p.includeLimits) } : {}),
+          ...(p.question !== undefined ? { question: String(p.question) } : {})
+        });
+      } else {
+        return toolErrorResult('push_to_openclaw backend is not configured.');
+      }
+      const backendErr = extractBackendError(result);
+      if (backendErr) return toolErrorResult(backendErr);
+      return jsonToolResult(result);
     }
 
     return null;
@@ -758,6 +1603,104 @@ function createMcpReportServer({
         if (!uri) {
           return jsonRpcErr(id, JSON_RPC_ERRORS.INVALID_PARAMS, 'Invalid params: missing resource uri');
         }
+
+        if (uri === 'usage://today' || uri === 'sessions://active' || uri === 'limits://current'
+          || uri === 'devices://health' || uri === 'subscriptions://summary' || uri === 'service-status://current') {
+          let payload;
+          if (uri === 'usage://today') {
+            if (typeof queryUsageBreakdownFn === 'function') {
+              payload = await queryUsageBreakdownFn({ period: 'today', groupBy: 'summary' });
+            } else if (typeof getStats === 'function') {
+              const stats = await getStats();
+              const statsErr = extractBackendError(stats);
+              if (statsErr) return jsonRpcErr(id, JSON_RPC_ERRORS.INTERNAL_ERROR, statsErr);
+              const history = typeof getHistory === 'function' ? await getHistory() : stats?.history;
+              payload = queryUsageBreakdown({ stats, history, period: 'today', groupBy: 'summary' });
+            } else {
+              return jsonRpcErr(id, JSON_RPC_ERRORS.INTERNAL_ERROR, 'Resource backend queryUsageBreakdown is not configured');
+            }
+          } else if (uri === 'sessions://active') {
+            if (typeof listSessionsFn === 'function') {
+              payload = await listSessionsFn({ period: 'today', state: 'all', limit: 30 });
+            } else if (typeof getStats === 'function') {
+              const stats = await getStats();
+              const statsErr = extractBackendError(stats);
+              if (statsErr) return jsonRpcErr(id, JSON_RPC_ERRORS.INTERNAL_ERROR, statsErr);
+              payload = listSessionsQuery({
+                stats,
+                period: 'today',
+                state: 'all',
+                limit: 30,
+                sessionTitlesEnabled: sessionTitlesEnabled === true
+              });
+            } else {
+              return jsonRpcErr(id, JSON_RPC_ERRORS.INTERNAL_ERROR, 'Resource backend listSessions is not configured');
+            }
+          } else if (uri === 'limits://current') {
+            if (typeof getLimitsHistoryFn === 'function') {
+              payload = await getLimitsHistoryFn({ includeHistory: false });
+            } else if (typeof getStats === 'function') {
+              const stats = await getStats();
+              const statsErr = extractBackendError(stats);
+              if (statsErr) return jsonRpcErr(id, JSON_RPC_ERRORS.INTERNAL_ERROR, statsErr);
+              payload = getLimitsOverviewQuery({ stats });
+            } else {
+              return jsonRpcErr(id, JSON_RPC_ERRORS.INTERNAL_ERROR, 'Resource backend getLimitsHistory is not configured');
+            }
+          } else if (uri === 'devices://health') {
+            if (typeof getDevicesAndHealthFn === 'function') {
+              payload = await getDevicesAndHealthFn({ includeDiagnostics: true });
+            } else if (typeof getStats === 'function') {
+              const stats = await getStats();
+              const statsErr = extractBackendError(stats);
+              if (statsErr) return jsonRpcErr(id, JSON_RPC_ERRORS.INTERNAL_ERROR, statsErr);
+              payload = getDevicesAndHealthQuery({ stats, includeDiagnostics: true });
+            } else {
+              return jsonRpcErr(id, JSON_RPC_ERRORS.INTERNAL_ERROR, 'Resource backend getDevicesAndHealth is not configured');
+            }
+          } else if (uri === 'subscriptions://summary') {
+            if (typeof getSubscriptionsAndForecastsFn === 'function') {
+              payload = await getSubscriptionsAndForecastsFn({ includeForecasts: true });
+            } else if (typeof getStats === 'function') {
+              const stats = await getStats();
+              const statsErr = extractBackendError(stats);
+              if (statsErr) return jsonRpcErr(id, JSON_RPC_ERRORS.INTERNAL_ERROR, statsErr);
+              const subscriptionsDoc = typeof getSubscriptions === 'function' ? await getSubscriptions() : stats?.subscriptions;
+              payload = getSubscriptionsAndForecastsQuery({ subscriptionsDoc, stats, includeForecasts: true });
+            } else {
+              return jsonRpcErr(id, JSON_RPC_ERRORS.INTERNAL_ERROR, 'Resource backend getSubscriptionsAndForecasts is not configured');
+            }
+          } else {
+            if (typeof getServiceStatusAndApprovalsFn === 'function') {
+              payload = await getServiceStatusAndApprovalsFn({ includeResetForecast: true, includeApprovals: true });
+            } else {
+              const rawAlerts = typeof listApprovalAlerts === 'function' ? await listApprovalAlerts() : null;
+              payload = {
+                ok: true,
+                checkedAt: new Date().toISOString(),
+                serviceStatus: { available: false, reason: 'unavailable', providers: [] },
+                codexResetForecast: { available: false, reason: 'unavailable' },
+                approvalAlerts: rawAlerts && rawAlerts.ok
+                  ? { available: true, enabled: true, alerts: rawAlerts.alerts || [] }
+                  : { available: false, enabled: false, alerts: [] }
+              };
+            }
+          }
+          const backendErr = extractBackendError(payload);
+          if (backendErr) {
+            return jsonRpcErr(id, JSON_RPC_ERRORS.INTERNAL_ERROR, backendErr);
+          }
+          return jsonRpcOk(id, {
+            contents: [
+              {
+                uri,
+                mimeType: 'application/json',
+                text: JSON.stringify(payload, null, 2)
+              }
+            ]
+          });
+        }
+
         const target = parseReportUri(uri);
         if (!target) {
           return jsonRpcErr(id, JSON_RPC_ERRORS.INVALID_PARAMS, `Invalid report resource URI: ${uri}`);
@@ -862,6 +1805,58 @@ function createMcpReportServer({
           });
         }
 
+        if (promptName === 'session-summary') {
+          const sessionId = typeof args.sessionId === 'string' ? args.sessionId.trim() : '';
+          const client = typeof args.client === 'string' ? args.client.trim() : '';
+          const rawPeriod = typeof args.period === 'string' ? args.period.trim() : 'today';
+          const period = SESSION_PERIODS.includes(rawPeriod) ? rawPeriod : 'today';
+          const text = sessionId && client
+            ? `Summarize Token Monitor session "${sessionId}" (${client}, period "${period}"). Call list_sessions({ period: "${period}", client: "${client}" }) and (if queryPermissions.allowSessionDetail is enabled) get_session_detail({ client: "${client}", sessionId: "${sessionId}", period: "${period}" }). Highlight active state, model, total/turn tokens, known cost, cache hit rate, context remaining, and recent tools without leaking disabled titles or private transcript text.`
+            : `Summarize active and recent coding sessions for Token Monitor (${client ? `client "${client}", ` : ''}period "${period}"). Call list_sessions({ period: "${period}"${client ? `, client: "${client}"` : ''}, state: "all", limit: 20 }) or read sessions://active. Highlight running/waiting sessions, top token/cost sessions, context window pressure, and cache hit efficiency using concise bullets.`;
+          return jsonRpcOk(id, {
+            description: promptDef.description,
+            messages: [
+              {
+                role: 'user',
+                content: { type: 'text', text }
+              }
+            ]
+          });
+        }
+
+        if (promptName === 'quota-check') {
+          const provider = typeof args.provider === 'string' ? args.provider.trim() : '';
+          const includeHistory = args.includeHistory === true || String(args.includeHistory || '').toLowerCase() === 'true';
+          return jsonRpcOk(id, {
+            description: promptDef.description,
+            messages: [
+              {
+                role: 'user',
+                content: {
+                  type: 'text',
+                  text: `Check Token Monitor provider and third-party API quotas${provider ? ` for "${provider}"` : ''}. Call get_limits_history({${provider ? ` provider: "${provider}",` : ''} includeHistory: ${includeHistory} }), get_subscriptions_and_forecasts({ includeForecasts: true }), and get_service_status_and_approvals({}). Summarize remaining percentage, reset countdowns, top-up exhaustion dates, and any degraded AI provider services or pending approval alerts.`
+                }
+              }
+            ]
+          });
+        }
+
+        if (promptName === 'daily-standup-usage') {
+          const date = typeof args.date === 'string' ? args.date.trim() : '';
+          return jsonRpcOk(id, {
+            description: promptDef.description,
+            messages: [
+              {
+                role: 'user',
+                content: {
+                  type: 'text',
+                  text: `Prepare a concise daily engineering standup update from Token Monitor${date ? ` anchored on ${date}` : ''}. Call query_usage_breakdown({ period: "today", groupBy: "project" }), query_usage_breakdown({ period: "today", groupBy: "model" }), get_usage_history({ resolution: "daily", limit: 7 }), list_sessions({ period: "today", state: "all", limit: 15 }), get_live_token_rate({}), and get_limits_history({ includeHistory: false }). Present key metrics, top projects, active work, streaks, and quota headroom in short WeChat/Slack-friendly bullet points.`
+                }
+              }
+            ]
+          });
+        }
+
         const granularity = promptName === 'analyze-daily-report'
           ? 'daily'
           : promptName === 'analyze-weekly-report'
@@ -925,8 +1920,55 @@ function createMcpReportServer({
   };
 }
 
+/**
+ * Strip session title fields from a session-detail payload when title sharing is disabled.
+ * @param {any} detail
+ * @returns {any}
+ */
+function stripSessionDetailTitles(detail) {
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return detail;
+  const copy = { ...detail };
+  delete copy.title;
+  delete copy.sessionTitle;
+  delete copy.rawTitle;
+  if (typeof copy.label === 'string') {
+    copy.label = copy.projectLabel || copy.sessionId || '';
+  }
+  return copy;
+}
+
+/**
+ * Strip account email PII from a limits-history payload object and any nested history items.
+ * @param {any} rawHistory
+ * @returns {any}
+ */
+function sanitizeLimitsHistoryPayload(rawHistory) {
+  if (Array.isArray(rawHistory)) {
+    return rawHistory.map((item) => sanitizeLimitsHistoryPayload(item));
+  }
+  if (!rawHistory || typeof rawHistory !== 'object') return rawHistory;
+  const copy = { ...rawHistory };
+  delete copy.accountEmail;
+  delete copy.email;
+  if (typeof copy.account === 'string' && copy.account.includes('@')) {
+    delete copy.account;
+  }
+  for (const key of ['series', 'snapshots', 'entries', 'history']) {
+    if (Array.isArray(copy[key])) {
+      copy[key] = copy[key].map((item) => sanitizeLimitsHistoryPayload(item));
+    }
+  }
+  return copy;
+}
+
 module.exports = {
+  MCP_PROMPTS,
+  MCP_RESOURCE_TEMPLATES,
+  MCP_STATIC_RESOURCES,
   MCP_SUPPORTED_VERSIONS,
+  MCP_TOOLS,
   JSON_RPC_ERRORS,
-  createMcpReportServer
+  createMcpReportServer,
+  sanitizeLimitsHistoryPayload,
+  stripSessionDetailTitles
 };

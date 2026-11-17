@@ -1,6 +1,7 @@
 // @ts-check
 'use strict';
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { readJson, writeJsonAtomic } = require('../shared/config');
@@ -9,12 +10,27 @@ const { REPORT_GRANULARITIES, reportContentSignature, resolveReportPeriod } = re
 const {
   buildRealtimeOverviewSnapshot,
   extractLimitsSummary,
+  formatOpenClawApprovalAlertMessage,
+  formatOpenClawQueryDigestMessage,
+  formatOpenClawSessionCompletedMessage,
   formatOpenClawWeChatMessage,
   invokeThirdPartyAiAnalysis,
+  mergeOpenClawIntegrationConfig,
   normalizeAiIntegrationConfig,
   normalizeOpenClawIntegrationConfig,
   sendToOpenClawWebhook
 } = require('../shared/aiReportAnalyzer');
+const { createSessionCompletionTracker } = require('../shared/sessionCompletion');
+const {
+  queryUsageBreakdown,
+  listSessionsQuery,
+  queryUsageHistory,
+  getDevicesAndHealthQuery,
+  getLimitsOverviewQuery,
+  getSubscriptionsAndForecastsQuery,
+  getLiveTokenRateSummary
+} = require('../shared/openclawQueries');
+const { normalizeClientName } = require('../shared/usage');
 const { createWeixinQrLoginManager } = require('../shared/openclawWeixinQr');
 const {
   configureOpenClawHost,
@@ -27,6 +43,23 @@ const {
 const INTEGRATIONS_CONFIG_VERSION = 1;
 const SECRETS_VERSION = 1;
 const ANALYSIS_KEY_RE = /^[A-Za-z0-9._-]+$/;
+const MAX_PUSH_HISTORY = 50;
+const MAX_IDEMPOTENCY_KEYS = 512;
+const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
+const QUERY_PUSH_TYPES = new Set([
+  'report',
+  'usage',
+  'sessions',
+  'session_detail',
+  'history',
+  'devices',
+  'limits',
+  'subscriptions',
+  'live_rate',
+  'service_status',
+  'test',
+  'custom'
+]);
 /** @type {readonly ('aiApiKey' | 'openclawHookToken' | 'weixinBotToken')[]} */
 const SECRET_KEYS = Object.freeze(['aiApiKey', 'openclawHookToken', 'weixinBotToken']);
 
@@ -193,12 +226,122 @@ function readEnvIntegrationsDefaults(env = process.env) {
 }
 
 /**
+ * @param {any} value
+ * @param {string[]} [secretValues]
+ * @returns {string}
+ */
+function redactPushText(value, secretValues = []) {
+  if (typeof value !== 'string' || !value) return '';
+  let out = value;
+  for (const sec of secretValues) {
+    if (typeof sec === 'string' && sec.length >= 4) {
+      out = out.split(sec).join('[REDACTED]');
+    }
+  }
+  out = out.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]');
+  out = out.replace(/\b(?:Bearer\s+[A-Za-z0-9._-]{6,}|sk-[A-Za-z0-9_-]{8,}|gh[pou]_[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AIza[A-Za-z0-9_-]{16,}|ya29\.[A-Za-z0-9._-]{8,})\b/gi, '[REDACTED]');
+  return out.replace(/[\x00-\x1f\x7f]+/g, ' ').trim();
+}
+
+/**
+ * @param {string} eventType
+ * @param {string} text
+ * @param {any} payload
+ * @param {string} explicitSummary
+ * @param {string[]} secretValues
+ * @returns {string}
+ */
+function derivePushSummary(eventType, text, payload, explicitSummary, secretValues) {
+  if (typeof explicitSummary === 'string' && explicitSummary.trim()) {
+    return redactPushText(explicitSummary, secretValues).slice(0, 200);
+  }
+  if (typeof text === 'string' && text.trim()) {
+    const firstLine = text.trim().split(/\r?\n/)[0] || '';
+    return redactPushText(firstLine, secretValues).slice(0, 200);
+  }
+  if (isPlainObject(payload)) {
+    const candidate = payload.summary || payload.message || payload.title || payload.queryType || '';
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return redactPushText(candidate, secretValues).slice(0, 200);
+    }
+  }
+  return eventType;
+}
+
+/**
+ * @param {any} raw
+ * @param {string[]} secretValues
+ */
+function normalizePushHistoryEntry(raw, secretValues) {
+  if (!isPlainObject(raw) || typeof raw.at !== 'string' || !raw.at) return null;
+  return {
+    id: typeof raw.id === 'string' && raw.id ? raw.id : crypto.randomUUID(),
+    at: raw.at,
+    eventType: typeof raw.eventType === 'string' && raw.eventType ? raw.eventType : 'custom',
+    ok: raw.ok === true,
+    statusCode: Number.isInteger(raw.statusCode) ? raw.statusCode : null,
+    error: raw.ok === true ? null : (typeof raw.error === 'string' && raw.error ? raw.error : 'push_failed'),
+    message: raw.ok === true ? null : (typeof raw.message === 'string' && raw.message ? redactPushText(raw.message, secretValues).slice(0, 300) : null),
+    channel: typeof raw.channel === 'string' ? raw.channel : '',
+    mode: typeof raw.mode === 'string' ? raw.mode : '',
+    source: typeof raw.source === 'string' && raw.source ? raw.source : 'hub',
+    summary: typeof raw.summary === 'string' && raw.summary ? redactPushText(raw.summary, secretValues).slice(0, 200) : null,
+    idempotencyKey: typeof raw.idempotencyKey === 'string' && raw.idempotencyKey ? raw.idempotencyKey.slice(0, 160) : null
+  };
+}
+
+/**
+ * Strip title fields from a session detail response when sessionTitlesEnabled is false.
+ * @param {any} detail
+ * @param {boolean} sessionTitlesEnabled
+ */
+function sanitizeSessionDetailForTitles(detail, sessionTitlesEnabled) {
+  if (!isPlainObject(detail) || sessionTitlesEnabled !== false) return detail;
+  const copy = { ...detail };
+  delete copy.title;
+  delete copy.sessionTitle;
+  delete copy.rawTitle;
+  if (typeof copy.label === 'string') {
+    copy.label = copy.projectLabel || copy.sessionId || '';
+  }
+  return copy;
+}
+
+/**
+ * Extract a sanitized summary object from readSessionDetail output for completion notifications.
+ * @param {any} detail
+ * @param {string[]} secretValues
+ */
+function buildCompletionDetailSummary(detail, secretValues) {
+  if (!isPlainObject(detail) || detail.found === false) return null;
+  const exchanges = Array.isArray(detail.exchanges) ? detail.exchanges : [];
+  const lastEx = exchanges.at(-1) || null;
+  const tools = Array.isArray(lastEx?.tools)
+    ? lastEx.tools.map((/** @type {any} */ t) => String(t || '').trim()).filter(Boolean).slice(0, 8)
+    : [];
+  const lastPrompt = typeof lastEx?.promptPreview === 'string' && lastEx.promptPreview.trim()
+    ? redactPushText(lastEx.promptPreview, secretValues).slice(0, 240)
+    : '';
+  if (exchanges.length === 0 && tools.length === 0 && !lastPrompt) return null;
+  return {
+    exchangeCount: exchanges.length,
+    tools,
+    ...(lastPrompt ? { lastPrompt } : {})
+  };
+}
+
+/**
  * Create Hub integration manager for Third-Party AI API & OpenClaw WeChat delivery.
  * @param {{
  *   dataFile: string,
  *   reportsDir?: string,
  *   reportManager: any,
  *   getStats: () => any,
+ *   getHistory?: (() => any) | null,
+ *   getSubscriptions?: (() => any) | null,
+ *   getQueryContext?: (() => Promise<any> | any) | null,
+ *   executeQuery?: ((queryType: string, params: any, openclawConfig: any) => Promise<any> | any) | null,
+ *   sessionTitlesEnabled?: boolean | (() => boolean),
  *   initialConfig?: any,
  *   initialSecrets?: { aiApiKey?: string, openclawHookToken?: string, weixinBotToken?: string } | null,
  *   openclawOptions?: any,
@@ -212,6 +355,11 @@ function createIntegrationManager({
   reportsDir,
   reportManager,
   getStats,
+  getHistory = null,
+  getSubscriptions = null,
+  getQueryContext = null,
+  executeQuery = null,
+  sessionTitlesEnabled = true,
   initialConfig = null,
   initialSecrets = null,
   openclawOptions = null,
@@ -249,17 +397,59 @@ function createIntegrationManager({
       : fileSecrets.weixinBotToken
   };
 
+  const currentSecretValues = () => [secrets.aiApiKey, secrets.openclawHookToken, secrets.weixinBotToken].filter(Boolean);
+
   let config = {
     ai: normalizeAiIntegrationConfig(initialConfig?.ai ?? persistedConfig?.ai ?? envDefaults.config.ai),
     openclaw: normalizeOpenClawIntegrationConfig(initialConfig?.openclaw ?? persistedConfig?.openclaw ?? envDefaults.config.openclaw)
   };
 
+  const initialHistory = Array.isArray(persistedState?.pushHistory)
+    ? persistedState.pushHistory
+      .map((/** @type {any} */ entry) => normalizePushHistoryEntry(entry, currentSecretValues()))
+      .filter(Boolean)
+      .slice(0, MAX_PUSH_HISTORY)
+    : [];
+
   let state = {
-    lastPush: isPlainObject(persistedState?.lastPush) ? persistedState.lastPush : null
+    lastPush: isPlainObject(persistedState?.lastPush) ? persistedState.lastPush : (initialHistory[0] || null),
+    pushHistory: initialHistory
   };
+
+  /** @type {Map<string, number>} */
+  const succeededIdempotency = new Map();
+  const startupNowMs = now().getTime();
+  for (let i = state.pushHistory.length - 1; i >= 0; i -= 1) {
+    const entry = state.pushHistory[i];
+    if (entry.ok === true && entry.idempotencyKey) {
+      const parsedAt = Date.parse(entry.at);
+      const ts = Number.isFinite(parsedAt) ? parsedAt : startupNowMs;
+      if (startupNowMs - ts <= IDEMPOTENCY_TTL_MS) {
+        succeededIdempotency.set(entry.idempotencyKey, ts);
+      }
+    }
+  }
+
+  /**
+   * @param {number} currentMs
+   */
+  function pruneIdempotencyWindow(currentMs) {
+    for (const [key, ts] of succeededIdempotency.entries()) {
+      if (currentMs - ts > IDEMPOTENCY_TTL_MS) {
+        succeededIdempotency.delete(key);
+      }
+    }
+    while (succeededIdempotency.size > MAX_IDEMPOTENCY_KEYS) {
+      const oldestKey = succeededIdempotency.keys().next().value;
+      if (oldestKey === undefined) break;
+      succeededIdempotency.delete(oldestKey);
+    }
+  }
 
   /** @type {Set<Promise<any>>} */
   const pendingTasks = new Set();
+  /** @type {any} */
+  let completionTracker = null;
   let stopped = false;
 
   /**
@@ -306,7 +496,8 @@ function createIntegrationManager({
   function saveState() {
     writeJsonAtomic(statePath, {
       version: 1,
-      lastPush: state.lastPush
+      lastPush: state.lastPush,
+      pushHistory: state.pushHistory
     }, 2);
   }
 
@@ -421,19 +612,14 @@ function createIntegrationManager({
     }
 
     if (isPlainObject(patch.openclaw)) {
-      const mergedOc = {
-        ...config.openclaw,
-        ...patch.openclaw,
-        pushGranularities: {
-          ...config.openclaw.pushGranularities,
-          ...(isPlainObject(patch.openclaw.pushGranularities) ? patch.openclaw.pushGranularities : {})
-        }
-      };
-      delete mergedOc.hookToken;
-      delete mergedOc.hookTokenConfigured;
-      delete mergedOc.weixinBotConfigured;
-      delete mergedOc.clearHookToken;
-      config.openclaw = normalizeOpenClawIntegrationConfig(mergedOc);
+      const sanitizedPatch = { ...patch.openclaw };
+      delete sanitizedPatch.hookToken;
+      delete sanitizedPatch.hookTokenConfigured;
+      delete sanitizedPatch.weixinBotConfigured;
+      delete sanitizedPatch.clearHookToken;
+      delete sanitizedPatch.localBridgeToken;
+      delete sanitizedPatch.localBridgeTokenConfigured;
+      config.openclaw = mergeOpenClawIntegrationConfig(config.openclaw, sanitizedPatch);
       configChanged = true;
 
       if (patch.openclaw.clearHookToken === true) {
@@ -445,6 +631,7 @@ function createIntegrationManager({
         secrets.openclawHookToken = cleanSecret(patch.openclaw.hookToken);
         secretsChanged = true;
       }
+      syncCompletionTrackerOptions();
     }
 
     if (configChanged) saveConfig();
@@ -599,6 +786,736 @@ function createIntegrationManager({
     };
   }
 
+  function isBaseTitlesEnabled() {
+    return typeof sessionTitlesEnabled === 'function'
+      ? Boolean(sessionTitlesEnabled())
+      : sessionTitlesEnabled !== false;
+  }
+
+  /**
+   * Resolve optional enhanced query context and effective sessionTitlesEnabled flag.
+   */
+  async function resolveQueryContext() {
+    const ctx = typeof getQueryContext === 'function' ? await getQueryContext() : null;
+    const resolvedCtx = isPlainObject(ctx) ? ctx : {};
+    const effectiveTitles = typeof resolvedCtx.sessionTitlesEnabled === 'boolean'
+      ? resolvedCtx.sessionTitlesEnabled
+      : isBaseTitlesEnabled();
+    return { ctx: resolvedCtx, sessionTitlesEnabled: effectiveTitles };
+  }
+
+  /**
+   * @param {boolean} effectiveTitles
+   */
+  function buildCompletionTrackerOptions(effectiveTitles) {
+    const sc = config.openclaw.sessionCompletion || {};
+    const extraOpts = isPlainObject(resolvedOpenClawOpts.sessionCompletionOptions)
+      ? resolvedOpenClawOpts.sessionCompletionOptions
+      : {};
+    return {
+      clients: Array.isArray(sc.clients) ? sc.clients : [],
+      excludeSubagents: sc.excludeSubagents !== false,
+      excludeBackgroundReview: sc.excludeBackgroundReview !== false,
+      minTurnTokens: Number.isFinite(Number(sc.minTurnTokens)) ? Number(sc.minTurnTokens) : 0,
+      minTotalTokens: Number.isFinite(Number(sc.minTotalTokens)) ? Number(sc.minTotalTokens) : 0,
+      debounceMs: Number.isFinite(Number(sc.debounceMs)) ? Number(sc.debounceMs) : 2500,
+      cooldownMs: Number.isFinite(Number(sc.cooldownMs)) ? Number(sc.cooldownMs) : 0,
+      sessionTitlesEnabled: effectiveTitles,
+      now,
+      ...(typeof extraOpts.setTimer === 'function' ? { setTimer: extraOpts.setTimer } : {}),
+      ...(typeof extraOpts.clearTimer === 'function' ? { clearTimer: extraOpts.clearTimer } : {})
+    };
+  }
+
+  function syncCompletionTrackerOptions() {
+    if (!config.openclaw.enabled || !config.openclaw.events?.sessionCompleted) {
+      if (completionTracker) {
+        completionTracker.stop();
+        completionTracker = null;
+      }
+      return;
+    }
+    if (completionTracker) {
+      completionTracker.updateOptions(buildCompletionTrackerOptions(isBaseTitlesEnabled()));
+    }
+  }
+
+  /**
+   * Dispatch a generic OpenClaw event with sliding-window idempotency dedup (only on ok: true)
+   * and bounded 50-entry pushHistory persistence.
+   * @param {{
+   *   eventType?: string,
+   *   text?: string,
+   *   payload?: any,
+   *   promptPrefix?: string,
+   *   idempotencyKey?: string,
+   *   source?: string,
+   *   summary?: string,
+   *   report?: any,
+   *   analysis?: any,
+   *   stats?: any,
+   *   limitsSummary?: any
+   * }} [options]
+   */
+  async function dispatchEvent({
+    eventType = 'custom',
+    text = '',
+    payload = null,
+    promptPrefix = '',
+    idempotencyKey = '',
+    source = 'hub',
+    summary = '',
+    report = null,
+    analysis = null,
+    stats = null,
+    limitsSummary = null
+  } = {}) {
+    if (stopped) {
+      return { ok: false, error: 'hub_stopped', message: 'Hub is stopping.' };
+    }
+
+    const cleanEventType = typeof eventType === 'string' && eventType.trim()
+      ? eventType.trim().toLowerCase()
+      : 'custom';
+    const cleanKey = typeof idempotencyKey === 'string' ? idempotencyKey.trim().slice(0, 160) : '';
+    const cleanSource = typeof source === 'string' && source.trim() ? source.trim().slice(0, 48) : 'hub';
+    const secretVals = currentSecretValues();
+
+    const clockMs = now().getTime();
+    pruneIdempotencyWindow(clockMs);
+    if (cleanKey && succeededIdempotency.has(cleanKey)) {
+      return {
+        ok: true,
+        deduplicated: true,
+        skipped: true,
+        eventType: cleanEventType,
+        idempotencyKey: cleanKey,
+        channel: config.openclaw.channel,
+        mode: config.openclaw.mode,
+        lastPush: state.lastPush
+      };
+    }
+
+    /** @type {any} */
+    const pushResult = await trackTask(sendToOpenClawWebhook({
+      config: config.openclaw,
+      hookToken: secrets.openclawHookToken,
+      report,
+      analysis,
+      stats,
+      limitsSummary,
+      eventType: cleanEventType,
+      eventPayload: payload,
+      promptPrefix: typeof promptPrefix === 'string' ? promptPrefix : '',
+      customMessage: typeof text === 'string' ? text : '',
+      idempotencyKey: cleanKey,
+      fetchImpl: httpFetch,
+      now
+    }));
+
+    const atIso = now().toISOString();
+    const ok = pushResult.ok === true;
+    const cleanError = ok ? null : (pushResult.error || 'push_failed');
+    const cleanMessage = ok ? null : (redactPushText(pushResult.message || '', secretVals).slice(0, 300) || null);
+    const cleanSummary = derivePushSummary(cleanEventType, text, payload, summary, secretVals);
+
+    const entry = {
+      id: crypto.randomUUID(),
+      at: atIso,
+      eventType: cleanEventType,
+      ok,
+      statusCode: Number.isInteger(pushResult.statusCode) ? pushResult.statusCode : null,
+      error: cleanError,
+      message: cleanMessage,
+      channel: config.openclaw.channel,
+      mode: config.openclaw.mode,
+      source: cleanSource,
+      summary: cleanSummary || null,
+      idempotencyKey: cleanKey || null
+    };
+
+    state.lastPush = {
+      at: atIso,
+      ok,
+      error: cleanError,
+      message: cleanMessage,
+      statusCode: entry.statusCode,
+      reportId: report?.reportId || null,
+      eventType: cleanEventType,
+      channel: config.openclaw.channel,
+      mode: config.openclaw.mode,
+      source: cleanSource,
+      summary: entry.summary
+    };
+    state.pushHistory = [entry, ...state.pushHistory].slice(0, MAX_PUSH_HISTORY);
+
+    if (ok && cleanKey) {
+      succeededIdempotency.delete(cleanKey);
+      succeededIdempotency.set(cleanKey, now().getTime());
+      pruneIdempotencyWindow(now().getTime());
+    }
+
+    try {
+      saveState();
+    } catch (error) {
+      logError(error, 'failed to persist OpenClaw push state');
+    }
+
+    return {
+      ...pushResult,
+      eventType: cleanEventType,
+      lastPush: state.lastPush,
+      entry
+    };
+  }
+
+  function getPushHistory() {
+    return {
+      count: state.pushHistory.length,
+      lastPush: state.lastPush,
+      history: state.pushHistory.map((/** @type {any} */ item) => ({ ...item }))
+    };
+  }
+
+  /**
+   * Send a connectivity test notification to OpenClaw without requiring a report.
+   * @param {{ message?: string, source?: string }} [options]
+   */
+  async function sendTestNotification({ message = '', source = 'test' } = {}) {
+    const cleanMessage = typeof message === 'string' ? message.trim() : '';
+    return dispatchEvent({
+      eventType: 'test',
+      payload: cleanMessage ? { message: cleanMessage } : null,
+      source: source || 'test',
+      summary: cleanMessage ? `Test: ${cleanMessage}` : 'Connectivity test notification'
+    });
+  }
+
+  /**
+   * Fallback built-in query execution when Hub server does not inject `executeQuery`.
+   * @param {string} queryType
+   * @param {any} params
+   */
+  async function runFallbackQuery(queryType, params = {}) {
+    const { ctx, sessionTitlesEnabled: titlesAllowed } = await resolveQueryContext();
+    const stats = ctx.stats ?? getStats();
+    const history = ctx.history ?? (typeof getHistory === 'function' ? getHistory() : null);
+    const subscriptionsDoc = ctx.subscriptions ?? (typeof getSubscriptions === 'function' ? getSubscriptions() : null);
+    const perms = config.openclaw.queryPermissions || { allowSessionDetail: false, allowConversationText: false };
+    const p = isPlainObject(params) ? params : {};
+
+    if (queryType === 'usage') {
+      return {
+        ok: true,
+        ...queryUsageBreakdown({
+          stats,
+          history,
+          devices: ctx.devices,
+          dailySnapshots: ctx.dailySnapshots,
+          period: p.period,
+          range: p.range,
+          groupBy: p.groupBy,
+          deviceId: p.deviceId,
+          limit: p.limit,
+          modelAliases: ctx.modelAliases,
+          modelAliasGrouping: ctx.modelAliasGrouping ?? p.modelAliasGrouping,
+          timeZone: p.timeZone
+        })
+      };
+    }
+
+    if (queryType === 'sessions') {
+      return {
+        ok: true,
+        ...listSessionsQuery({
+          stats,
+          allTimeSessions: ctx.allTimeSessions,
+          period: p.period,
+          state: p.state,
+          client: p.client,
+          project: p.project,
+          deviceId: p.deviceId,
+          search: p.search,
+          sort: p.sort,
+          sortDirection: p.sortDirection,
+          limit: p.limit,
+          cursor: p.cursor,
+          sessionTitlesEnabled: titlesAllowed
+        })
+      };
+    }
+
+    if (queryType === 'session_detail') {
+      if (perms.allowSessionDetail !== true) {
+        return {
+          ok: false,
+          statusCode: 403,
+          error: 'session_detail_disabled',
+          message: 'Session detail queries are disabled by privacy settings (queryPermissions.allowSessionDetail).'
+        };
+      }
+      const includeConversation = Boolean(p.includeConversation);
+      if (includeConversation && perms.allowConversationText !== true) {
+        return {
+          ok: false,
+          statusCode: 403,
+          error: 'conversation_text_disabled',
+          message: 'Conversation text queries are disabled by privacy settings (queryPermissions.allowConversationText).'
+        };
+      }
+      const rawClient = typeof p.client === 'string' ? p.client.trim() : '';
+      const client = rawClient ? (normalizeClientName(rawClient) || rawClient.toLowerCase()) : '';
+      const sessionId = typeof p.sessionId === 'string' ? p.sessionId.trim() : '';
+      if (!client || !sessionId) {
+        return { ok: false, statusCode: 400, error: 'invalid_request', message: 'client and sessionId are required.' };
+      }
+      const reader = ctx.readSessionDetail || resolvedOpenClawOpts.readSessionDetail;
+      if (typeof reader !== 'function') {
+        return {
+          ok: false,
+          statusCode: 501,
+          error: 'session_detail_unavailable',
+          message: 'Session detail reader is not available in this runtime.'
+        };
+      }
+      const detail = await reader({
+        client,
+        sessionId,
+        deviceId: typeof p.deviceId === 'string' ? p.deviceId.trim() : '',
+        period: p.period || 'total',
+        includeConversation,
+        limit: p.limit,
+        offset: p.offset,
+        cursor: p.cursor
+      });
+      if (!detail || detail.found === false) {
+        return { ok: false, statusCode: 404, error: 'not_found', message: 'Session detail not found.' };
+      }
+      const sanitized = sanitizeSessionDetailForTitles(detail, titlesAllowed);
+      if (!includeConversation || perms.allowConversationText !== true) {
+        if (isPlainObject(sanitized)) {
+          delete sanitized.conversation;
+          delete sanitized.messages;
+          delete sanitized.conversationMessages;
+        }
+      }
+      return { ok: true, ...sanitized };
+    }
+
+    if (queryType === 'history') {
+      return {
+        ok: true,
+        ...queryUsageHistory({
+          history,
+          resolution: p.resolution,
+          from: p.from,
+          to: p.to,
+          groupBy: p.groupBy,
+          limit: p.limit
+        })
+      };
+    }
+
+    if (queryType === 'devices') {
+      return {
+        ok: true,
+        ...getDevicesAndHealthQuery({
+          stats,
+          deviceId: p.deviceId,
+          includeDiagnostics: p.includeDiagnostics !== false
+        })
+      };
+    }
+
+    if (queryType === 'limits') {
+      const overview = getLimitsOverviewQuery({
+        stats,
+        thirdPartyOnly: Boolean(p.thirdPartyOnly),
+        provider: p.provider,
+        status: p.status,
+        maxProviders: p.maxProviders
+      });
+      if (p.includeHistory && typeof ctx.getLimitsHistory === 'function') {
+        const limitsHistory = await ctx.getLimitsHistory({
+          accountKey: p.accountKey,
+          provider: p.provider,
+          windowName: p.windowName,
+          hours: p.hours
+        });
+        return { ok: true, ...overview, limitsHistory };
+      }
+      return { ok: true, ...overview };
+    }
+
+    if (queryType === 'subscriptions') {
+      return {
+        ok: true,
+        ...getSubscriptionsAndForecastsQuery({
+          subscriptionsDoc,
+          stats,
+          rates: ctx.rates,
+          date: p.date,
+          includeForecasts: p.includeForecasts !== false,
+          activeOnly: Boolean(p.activeOnly)
+        })
+      };
+    }
+
+    if (queryType === 'live_rate') {
+      return {
+        ok: true,
+        ...getLiveTokenRateSummary({
+          stats,
+          liveRateSnapshot: ctx.liveRateSnapshot,
+          deviceId: p.deviceId
+        })
+      };
+    }
+
+    if (queryType === 'service_status') {
+      const serviceStatus = typeof ctx.getServiceStatus === 'function'
+        ? { available: true, ...(await ctx.getServiceStatus({ force: Boolean(p.force), providerIds: p.providerIds })) }
+        : { available: false, reason: 'desktop_only', providers: [] };
+      const codexResetForecast = typeof ctx.getCodexResetForecast === 'function'
+        ? { available: true, ...(await ctx.getCodexResetForecast({ force: Boolean(p.force) })) }
+        : { available: false, reason: 'desktop_only' };
+      const rawAlerts = typeof ctx.listApprovalAlerts === 'function' ? await ctx.listApprovalAlerts() : null;
+      const approvalAlerts = rawAlerts && rawAlerts.ok
+        ? { available: true, enabled: true, alerts: rawAlerts.alerts || [] }
+        : { available: false, enabled: false, alerts: [] };
+      return {
+        ok: true,
+        checkedAt: now().toISOString(),
+        serviceStatus,
+        codexResetForecast,
+        approvalAlerts
+      };
+    }
+
+    return { ok: false, statusCode: 400, error: 'invalid_request', message: `Unsupported query type: ${queryType}` };
+  }
+
+  /**
+   * Generate an optional concise AI summary for a query or session completion payload.
+   * @param {string} question
+   * @param {any} stats
+   * @param {string} [syntheticId]
+   */
+  async function invokeQueryAiSummary(question, stats, syntheticId = 'openclaw-digest') {
+    if (!config.ai.enabled) return null;
+    try {
+      const syntheticReport = {
+        reportId: syntheticId,
+        granularity: 'daily',
+        period: { key: now().toISOString().slice(0, 10), label: syntheticId },
+        summary: { totalTokens: 0, knownCostUsd: 0 },
+        projects: [],
+        clients: [],
+        models: [],
+        signals: []
+      };
+      const aiRes = await trackTask(invokeThirdPartyAiAnalysis({
+        config: config.ai,
+        apiKey: secrets.aiApiKey,
+        report: syntheticReport,
+        stats,
+        question,
+        language: config.ai.language,
+        fetchImpl: httpFetch,
+        now
+      }));
+      return aiRes?.ok && aiRes.analysis ? aiRes.analysis : null;
+    } catch (error) {
+      logError(error, 'optional AI summary failed');
+      return null;
+    }
+  }
+
+  /**
+   * Push a report, query digest, test notification, or custom message to OpenClaw.
+   * @param {{
+   *   type?: string,
+   *   params?: any,
+   *   includeAi?: boolean,
+   *   customMessage?: string,
+   *   idempotencyKey?: string,
+   *   source?: string
+   * }} [options]
+   */
+  async function pushQueryToOpenClaw({
+    type = 'usage',
+    params = {},
+    includeAi = false,
+    customMessage = '',
+    idempotencyKey = '',
+    source = 'query_push'
+  } = {}) {
+    if (stopped) {
+      return { ok: false, error: 'hub_stopped', message: 'Hub is stopping.' };
+    }
+
+    const rawType = typeof type === 'string' && type.trim()
+      ? type.trim().toLowerCase().replace(/-/g, '_')
+      : 'usage';
+    if (!QUERY_PUSH_TYPES.has(rawType)) {
+      return {
+        ok: false,
+        statusCode: 400,
+        error: 'invalid_request',
+        message: `Unsupported OpenClaw push type: ${String(type)}`
+      };
+    }
+
+    const p = isPlainObject(params) ? params : {};
+    const cleanCustom = typeof customMessage === 'string' ? customMessage.trim() : '';
+
+    if (rawType === 'test') {
+      return sendTestNotification({ message: cleanCustom || p.message || '', source: source || 'query_push' });
+    }
+
+    if (rawType === 'report') {
+      return pushToOpenClaw({
+        granularity: p.granularity,
+        periodKey: p.periodKey,
+        includeAi: includeAi !== undefined ? Boolean(includeAi) : p.includeAi,
+        includeLimits: p.includeLimits,
+        refreshAi: Boolean(p.refreshAi),
+        question: p.question || '',
+        customMessage: cleanCustom,
+        idempotencyKey,
+        source: source || 'query_push'
+      });
+    }
+
+    if (rawType === 'custom') {
+      const customText = cleanCustom
+        || (typeof p.message === 'string' ? p.message.trim() : '')
+        || (typeof p.text === 'string' ? p.text.trim() : '');
+      const customPayload = p.result ?? (customText ? { message: customText } : null);
+      if (!customText && !customPayload) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'invalid_request',
+          message: 'customMessage or payload is required for custom push.'
+        };
+      }
+      return dispatchEvent({
+        eventType: 'custom',
+        text: customText,
+        payload: customPayload,
+        idempotencyKey,
+        source: source || 'query_push',
+        summary: customText || 'Custom OpenClaw notification'
+      });
+    }
+
+    /** @type {any} */
+    let queryRes;
+    try {
+      queryRes = typeof executeQuery === 'function'
+        ? await executeQuery(rawType, p, config.openclaw)
+        : await runFallbackQuery(rawType, p);
+    } catch (error) {
+      return {
+        ok: false,
+        statusCode: 400,
+        error: 'invalid_request',
+        message: error instanceof Error ? error.message : String(error)
+      };
+    }
+
+    if (!queryRes || queryRes.ok === false) {
+      return {
+        ok: false,
+        statusCode: queryRes?.statusCode || 400,
+        error: queryRes?.error || 'query_failed',
+        message: queryRes?.message || 'Query execution failed.'
+      };
+    }
+
+    const { ok: _omitOk, statusCode: _omitCode, ...digestPayload } = queryRes;
+    let aiSummary = null;
+    if (includeAi === true && config.ai.enabled) {
+      const secretVals = currentSecretValues();
+      const serialized = redactPushText(JSON.stringify(digestPayload), secretVals).slice(0, 6000);
+      aiSummary = await invokeQueryAiSummary(
+        `Summarize this Token Monitor "${rawType}" query snapshot concisely in bullet points for WeChat:\n${serialized}`,
+        getStats(),
+        `query-${rawType}`
+      );
+    }
+
+    const formattedDigest = formatOpenClawQueryDigestMessage({
+      queryType: rawType,
+      result: digestPayload,
+      title: typeof p.title === 'string' ? p.title : '',
+      aiSummary
+    });
+    const combinedText = cleanCustom
+      ? `${cleanCustom}\n\n${formattedDigest}`.slice(0, 3500)
+      : formattedDigest;
+
+    return dispatchEvent({
+      eventType: 'query_digest',
+      text: combinedText,
+      payload: {
+        queryType: rawType,
+        result: digestPayload,
+        ...(typeof p.title === 'string' && p.title ? { title: p.title } : {}),
+        ...(aiSummary ? { aiSummary } : {})
+      },
+      idempotencyKey,
+      source: source || 'query_push',
+      summary: `Query digest (${rawType})`
+    });
+  }
+
+  /**
+   * Dispatch a newly created approval alert when OpenClaw approvalAlerts is enabled.
+   * @param {any} alert
+   */
+  async function onApprovalAlertCreated(alert) {
+    if (stopped || !isPlainObject(alert)) {
+      return { ok: false, skipped: true, reason: 'invalid_alert' };
+    }
+    if (!config.openclaw.enabled || !config.openclaw.events?.approvalAlerts) {
+      return { ok: false, skipped: true, reason: 'disabled' };
+    }
+    const alertId = typeof alert.id === 'string' ? alert.id.trim() : '';
+    const idempotencyKey = alertId ? `approval:${alertId}` : '';
+    const text = formatOpenClawApprovalAlertMessage(alert);
+    return dispatchEvent({
+      eventType: 'approval_alert',
+      text,
+      payload: alert,
+      idempotencyKey,
+      source: 'approval_alert',
+      summary: `Approval alert (${alert.tool || alert.client || 'tool'})`
+    });
+  }
+
+  /**
+   * @param {any} completion
+   * @param {any} latestStats
+   */
+  async function handleSessionCompletionEvent(completion, latestStats) {
+    if (stopped || !config.openclaw.enabled || !config.openclaw.events?.sessionCompleted) return;
+    const { ctx, sessionTitlesEnabled: titlesAllowed } = await resolveQueryContext();
+    const safeCompletion = titlesAllowed
+      ? completion
+      : {
+          ...completion,
+          title: null,
+          label: completion.projectLabel || completion.sessionId || completion.key
+        };
+
+    const secretVals = currentSecretValues();
+    let detailSummary = null;
+    if (
+      config.openclaw.sessionCompletion?.includeDetailSummary === true
+      && config.openclaw.queryPermissions?.allowSessionDetail === true
+    ) {
+      const reader = ctx.readSessionDetail || resolvedOpenClawOpts.readSessionDetail;
+      if (typeof reader === 'function') {
+        try {
+          const detail = await reader({
+            client: safeCompletion.client,
+            sessionId: safeCompletion.sessionId,
+            deviceId: safeCompletion.deviceId,
+            period: 'today',
+            sessionCost: safeCompletion.costUsd
+          });
+          detailSummary = buildCompletionDetailSummary(
+            sanitizeSessionDetailForTitles(detail, titlesAllowed),
+            secretVals
+          );
+        } catch (error) {
+          logError(error, `failed to read session detail for completion ${safeCompletion.key}`);
+        }
+      }
+    }
+
+    let aiSummary = null;
+    if (config.openclaw.sessionCompletion?.includeAiSummary === true && config.ai.enabled) {
+      const promptStats = ctx.stats ?? latestStats ?? getStats();
+      const completionSnapshot = {
+        client: safeCompletion.client,
+        model: safeCompletion.model,
+        projectLabel: safeCompletion.projectLabel,
+        ...(safeCompletion.title ? { title: safeCompletion.title } : {}),
+        turnDelta: safeCompletion.turnDelta,
+        totalTokens: safeCompletion.totalTokens,
+        costUsd: safeCompletion.costUsd,
+        cacheHitRatePct: safeCompletion.cacheHitRatePct,
+        ...(detailSummary ? { detailSummary } : {})
+      };
+      aiSummary = await invokeQueryAiSummary(
+        `Summarize this completed AI coding turn in 1-2 concise sentences for WeChat:\n${JSON.stringify(completionSnapshot)}`,
+        promptStats,
+        `completion-${safeCompletion.sessionId}`
+      );
+    }
+
+    const limitsSummary = config.openclaw.includeLimits
+      ? extractLimitsSummary(ctx.stats ?? latestStats ?? getStats())
+      : null;
+
+    const text = formatOpenClawSessionCompletedMessage({
+      completion: safeCompletion,
+      detailSummary,
+      aiSummary,
+      limitsSummary
+    });
+
+    await dispatchEvent({
+      eventType: 'session_completed',
+      text,
+      payload: {
+        completion: safeCompletion,
+        ...(detailSummary ? { detailSummary } : {}),
+        ...(aiSummary ? { aiSummary } : {}),
+        ...(limitsSummary ? { limitsSummary } : {})
+      },
+      idempotencyKey: `completion:${safeCompletion.eventId}`,
+      source: 'session_completion',
+      summary: `Session completed (${safeCompletion.client || 'session'}${safeCompletion.projectLabel ? `: ${safeCompletion.projectLabel}` : ''})`
+    });
+  }
+
+  /**
+   * Observe a stats snapshot to detect session turn completions via sessionCompletionTracker.
+   * @param {any} stats
+   */
+  function onStatsSnapshot(stats) {
+    if (stopped || !isPlainObject(stats)) return [];
+    if (!config.openclaw.enabled || !config.openclaw.events?.sessionCompleted) {
+      if (completionTracker) {
+        completionTracker.stop();
+        completionTracker = null;
+      }
+      return [];
+    }
+
+    const effectiveTitles = isBaseTitlesEnabled();
+    const trackerOpts = buildCompletionTrackerOptions(effectiveTitles);
+    if (!completionTracker) {
+      completionTracker = createSessionCompletionTracker({
+        ...trackerOpts,
+        onCompletion: (completion) => {
+          trackTask(handleSessionCompletionEvent(completion, stats));
+        },
+        onError: (error) => {
+          logError(error, 'session completion tracker error');
+        }
+      });
+    } else {
+      completionTracker.updateOptions(trackerOpts);
+    }
+
+    return completionTracker.accept(stats, now());
+  }
+
   /**
    * Push report + AI insights + limits snapshot to OpenClaw Gateway for WeChat delivery.
    * @param {{
@@ -610,7 +1527,8 @@ function createIntegrationManager({
    *   refreshAi?: boolean,
    *   question?: string,
    *   customMessage?: string,
-   *   idempotencyKey?: string
+   *   idempotencyKey?: string,
+   *   source?: string
    * }} [options]
    */
   async function pushToOpenClaw({
@@ -622,7 +1540,8 @@ function createIntegrationManager({
     refreshAi = false,
     question = '',
     customMessage = '',
-    idempotencyKey = ''
+    idempotencyKey = '',
+    source = 'report'
   } = {}) {
     if (stopped) {
       return { ok: false, error: 'hub_stopped', message: 'Hub is stopping.' };
@@ -661,39 +1580,20 @@ function createIntegrationManager({
     }
 
     const limitsSummary = wantLimits ? extractLimitsSummary(stats) : null;
-    /** @type {any} */
-    const pushResult = await trackTask(sendToOpenClawWebhook({
-      config: config.openclaw,
-      hookToken: secrets.openclawHookToken,
+    const pushResult = await dispatchEvent({
+      eventType: 'report',
       report,
       analysis,
       stats,
       limitsSummary,
-      customMessage,
+      text: customMessage,
       idempotencyKey,
-      fetchImpl: httpFetch,
-      now
-    }));
-
-    state.lastPush = {
-      at: now().toISOString(),
-      ok: pushResult.ok === true,
-      error: pushResult.ok ? null : (pushResult.error || 'push_failed'),
-      message: pushResult.ok ? null : (pushResult.message || null),
-      statusCode: pushResult.statusCode || null,
-      reportId: report.reportId,
-      channel: config.openclaw.channel,
-      mode: config.openclaw.mode
-    };
-    try {
-      saveState();
-    } catch (error) {
-      logError(error, 'failed to persist OpenClaw push state');
-    }
+      source: source || 'report',
+      summary: `Report ${report.reportId}`
+    });
 
     return {
       ...pushResult,
-      lastPush: state.lastPush,
       ...(analysis ? { aiAnalysis: analysis } : {})
     };
   }
@@ -780,8 +1680,7 @@ function createIntegrationManager({
       || openclawEnv.suggestedWebhookUrl
       || 'http://127.0.0.1:18789/hooks/agent';
 
-    config.openclaw = normalizeOpenClawIntegrationConfig({
-      ...config.openclaw,
+    config.openclaw = mergeOpenClawIntegrationConfig(config.openclaw, {
       enabled: true,
       mode: 'openclaw-agent',
       channel: 'openclaw-weixin',
@@ -881,8 +1780,7 @@ function createIntegrationManager({
       || nextEnabled !== config.openclaw.enabled
       || nextTo !== config.openclaw.to
     ) {
-      config.openclaw = normalizeOpenClawIntegrationConfig({
-        ...config.openclaw,
+      config.openclaw = mergeOpenClawIntegrationConfig(config.openclaw, {
         enabled: nextEnabled,
         webhookUrl: nextWebhookUrl,
         channel: nextChannel,
@@ -907,9 +1805,10 @@ function createIntegrationManager({
     if (stopped) return;
     if (!REPORT_GRANULARITIES.includes(granularity) || !periodKey) return;
 
+    const rolloverEnabled = config.openclaw.events?.rollover ?? config.openclaw.pushOnRollover;
     const shouldAnalyze = config.ai.enabled && config.ai.autoAnalyzeOnRollover;
     const shouldPush = config.openclaw.enabled
-      && config.openclaw.pushOnRollover
+      && Boolean(rolloverEnabled)
       && config.openclaw.pushGranularities[granularity] !== false;
 
     if (!shouldAnalyze && !shouldPush) return;
@@ -924,7 +1823,8 @@ function createIntegrationManager({
           await pushToOpenClaw({
             granularity,
             periodKey: resolved.key,
-            idempotencyKey: `token-monitor-${granularity}-${resolved.key}`
+            idempotencyKey: `token-monitor-${granularity}-${resolved.key}`,
+            source: 'rollover'
           });
         }
       } catch (error) {
@@ -935,8 +1835,20 @@ function createIntegrationManager({
     trackTask(job);
   }
 
+  async function flush() {
+    if (stopped) return;
+    if (completionTracker && typeof completionTracker.flush === 'function') {
+      completionTracker.flush(now());
+    }
+    while (pendingTasks.size > 0) {
+      await Promise.allSettled([...pendingTasks]);
+    }
+  }
+
   async function stop() {
     stopped = true;
+    completionTracker?.stop();
+    completionTracker = null;
     qrManager.cancelAll();
     if (pendingTasks.size > 0) {
       await Promise.allSettled([...pendingTasks]);
@@ -951,6 +1863,10 @@ function createIntegrationManager({
     readCachedAnalysis,
     analyzeReport,
     buildWeChatBrief,
+    dispatchEvent,
+    getPushHistory,
+    sendTestNotification,
+    pushQueryToOpenClaw,
     pushToOpenClaw,
     getOpenClawEnv,
     startOpenClawWeixinQr,
@@ -958,7 +1874,10 @@ function createIntegrationManager({
     submitOpenClawWeixinVerifyCode,
     cancelOpenClawWeixinQr,
     provisionOpenClaw,
+    onApprovalAlertCreated,
+    onStatsSnapshot,
     onReportArchived,
+    flush,
     stop
   };
 }

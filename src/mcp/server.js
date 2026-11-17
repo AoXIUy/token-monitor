@@ -7,9 +7,25 @@ const path = require('node:path');
 const { URLSearchParams } = require('node:url');
 
 const { parseArgs, projectRoot, readJson } = require('../shared/config');
-const { createMcpReportServer, JSON_RPC_ERRORS } = require('../shared/mcpReportProtocol');
+const {
+  createMcpReportServer,
+  JSON_RPC_ERRORS,
+  sanitizeLimitsHistoryPayload,
+  stripSessionDetailTitles
+} = require('../shared/mcpReportProtocol');
 const { DEFAULT_STALE_AFTER_MS } = require('../shared/syncUploadInterval');
-const { aggregateDevices, aggregateHistory } = require('../shared/usage');
+const { aggregateDevices, aggregateHistory, normalizeClientName } = require('../shared/usage');
+const {
+  queryUsageBreakdown,
+  listSessionsQuery,
+  queryUsageHistory,
+  getDevicesAndHealthQuery,
+  getLimitsOverviewQuery,
+  getSubscriptionsAndForecastsQuery,
+  getLiveTokenRateSummary
+} = require('../shared/openclawQueries');
+const { resolveSessionDetailForPlatform } = require('../shared/sessionDetailResolver');
+const { readSessionConversation } = require('../shared/sessionConversation');
 const {
   REPORT_GRANULARITIES,
   REPORT_SCHEMA,
@@ -210,11 +226,21 @@ function createHubBackendAdapter(options = {}) {
    * @returns {string}
    */
   function formatHttpError(res, fallback) {
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401) {
+      return `Hub authentication failed (HTTP ${res.status}): check TOKEN_MONITOR_SECRET / --secret`;
+    }
+    if (res.status === 403) {
+      if (res.data && typeof res.data === 'object' && typeof res.data.error === 'string' && res.data.error) {
+        const msg = typeof res.data.message === 'string' && res.data.message ? res.data.message : '';
+        return msg && msg !== res.data.error ? `${res.data.error}: ${msg}` : res.data.error;
+      }
       return `Hub authentication failed (HTTP ${res.status}): check TOKEN_MONITOR_SECRET / --secret`;
     }
     if (res.data && typeof res.data === 'object') {
-      if (typeof res.data.error === 'string' && res.data.error) return res.data.error;
+      if (typeof res.data.error === 'string' && res.data.error) {
+        const msg = typeof res.data.message === 'string' && res.data.message ? res.data.message : '';
+        return msg && msg !== res.data.error ? `${res.data.error}: ${msg}` : res.data.error;
+      }
       if (typeof res.data.message === 'string' && res.data.message) return res.data.message;
     }
     return fallback || `Hub HTTP ${res.status}`;
@@ -374,6 +400,184 @@ function createHubBackendAdapter(options = {}) {
         return { ok: false, error: formatHttpError(res, `OpenClaw push failed (HTTP ${res.status})`) };
       }
       return res.data || { ok: false, error: 'Empty push response' };
+    },
+
+    /**
+     * @param {{ type?: string, test?: boolean, params?: any, includeAi?: boolean, customMessage?: string, idempotencyKey?: string }} [args]
+     */
+    async pushEventToOpenClaw(args = {}) {
+      const res = await requestJson('POST', '/api/integrations/openclaw/push', {
+        ...(args.type !== undefined ? { type: String(args.type) } : {}),
+        ...(args.test !== undefined ? { test: Boolean(args.test) } : {}),
+        ...(args.params !== undefined ? { params: args.params } : {}),
+        ...(args.includeAi !== undefined ? { includeAi: Boolean(args.includeAi) } : {}),
+        ...(args.customMessage !== undefined ? { customMessage: String(args.customMessage) } : {}),
+        ...(args.idempotencyKey !== undefined ? { idempotencyKey: String(args.idempotencyKey) } : {})
+      });
+      if (!res.ok) {
+        return { ok: false, error: formatHttpError(res, `OpenClaw push failed (HTTP ${res.status})`) };
+      }
+      return res.data || { ok: false, error: 'Empty push response' };
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async queryUsageBreakdown(args = {}) {
+      const params = new URLSearchParams();
+      for (const key of ['period', 'range', 'groupBy', 'deviceId', 'limit', 'modelAliasGrouping', 'timeZone']) {
+        if (args[key] !== undefined && args[key] !== null && args[key] !== '') {
+          params.set(key, String(args[key]));
+        }
+      }
+      const qs = params.toString();
+      const res = await requestJson('GET', qs ? `/api/query/usage?${qs}` : '/api/query/usage');
+      if (!res.ok) return { ok: false, error: formatHttpError(res, `Usage query failed (HTTP ${res.status})`) };
+      return res.data || {};
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async listSessions(args = {}) {
+      const params = new URLSearchParams();
+      for (const key of ['period', 'state', 'client', 'project', 'deviceId', 'search', 'sort', 'sortDirection', 'limit', 'cursor']) {
+        if (args[key] !== undefined && args[key] !== null && args[key] !== '') {
+          params.set(key, String(args[key]));
+        }
+      }
+      const qs = params.toString();
+      const res = await requestJson('GET', qs ? `/api/query/sessions?${qs}` : '/api/query/sessions');
+      if (!res.ok) return { ok: false, error: formatHttpError(res, `Sessions query failed (HTTP ${res.status})`) };
+      return res.data || {};
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async getSessionDetail(args = {}) {
+      const params = new URLSearchParams();
+      for (const key of ['client', 'sessionId', 'deviceId', 'period', 'includeConversation', 'limit', 'offset', 'cursor']) {
+        if (args[key] !== undefined && args[key] !== null && args[key] !== '') {
+          params.set(key, String(args[key]));
+        }
+      }
+      const qs = params.toString();
+      const res = await requestJson('GET', qs ? `/api/query/session-detail?${qs}` : '/api/query/session-detail');
+      if (!res.ok) return { ok: false, error: formatHttpError(res, `Session detail query failed (HTTP ${res.status})`) };
+      return res.data || {};
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async getUsageHistory(args = {}) {
+      const params = new URLSearchParams();
+      for (const key of ['resolution', 'from', 'to', 'groupBy', 'limit']) {
+        if (args[key] !== undefined && args[key] !== null && args[key] !== '') {
+          params.set(key, String(args[key]));
+        }
+      }
+      const qs = params.toString();
+      const res = await requestJson('GET', qs ? `/api/query/history?${qs}` : '/api/query/history');
+      if (!res.ok) return { ok: false, error: formatHttpError(res, `History query failed (HTTP ${res.status})`) };
+      return res.data || {};
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async getDevicesAndHealth(args = {}) {
+      const params = new URLSearchParams();
+      for (const key of ['deviceId', 'includeDiagnostics']) {
+        if (args[key] !== undefined && args[key] !== null && args[key] !== '') {
+          params.set(key, String(args[key]));
+        }
+      }
+      const qs = params.toString();
+      const res = await requestJson('GET', qs ? `/api/query/devices?${qs}` : '/api/query/devices');
+      if (!res.ok) return { ok: false, error: formatHttpError(res, `Devices query failed (HTTP ${res.status})`) };
+      return res.data || {};
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async getLimitsHistory(args = {}) {
+      const params = new URLSearchParams();
+      for (const key of ['thirdPartyOnly', 'provider', 'status', 'accountKey', 'windowName', 'hours', 'maxProviders', 'includeHistory']) {
+        if (args[key] !== undefined && args[key] !== null && args[key] !== '') {
+          params.set(key, String(args[key]));
+        }
+      }
+      const qs = params.toString();
+      const res = await requestJson('GET', qs ? `/api/query/limits?${qs}` : '/api/query/limits');
+      if (!res.ok) return { ok: false, error: formatHttpError(res, `Limits query failed (HTTP ${res.status})`) };
+      return res.data || {};
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async getSubscriptionsAndForecasts(args = {}) {
+      const params = new URLSearchParams();
+      for (const key of ['date', 'includeForecasts', 'activeOnly']) {
+        if (args[key] !== undefined && args[key] !== null && args[key] !== '') {
+          params.set(key, String(args[key]));
+        }
+      }
+      const qs = params.toString();
+      const res = await requestJson('GET', qs ? `/api/query/subscriptions?${qs}` : '/api/query/subscriptions');
+      if (!res.ok) return { ok: false, error: formatHttpError(res, `Subscriptions query failed (HTTP ${res.status})`) };
+      return res.data || {};
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async getLiveTokenRate(args = {}) {
+      const params = new URLSearchParams();
+      if (args.deviceId) params.set('deviceId', String(args.deviceId));
+      const qs = params.toString();
+      const res = await requestJson('GET', qs ? `/api/query/live-rate?${qs}` : '/api/query/live-rate');
+      if (!res.ok) return { ok: false, error: formatHttpError(res, `Live rate query failed (HTTP ${res.status})`) };
+      return res.data || {};
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async getServiceStatusAndApprovals(args = {}) {
+      const params = new URLSearchParams();
+      if (args.force !== undefined) params.set('force', String(Boolean(args.force)));
+      if (Array.isArray(args.providerIds) && args.providerIds.length > 0) {
+        params.set('providerIds', args.providerIds.map((/** @type {any} */ p) => String(p)).join(','));
+      }
+      if (args.includeResetForecast !== undefined) {
+        params.set('includeResetForecast', String(Boolean(args.includeResetForecast)));
+      }
+      if (args.includeApprovals !== undefined) {
+        params.set('includeApprovals', String(Boolean(args.includeApprovals)));
+      }
+      const qs = params.toString();
+      const res = await requestJson('GET', qs ? `/api/query/service-status?${qs}` : '/api/query/service-status');
+      if (!res.ok) return { ok: false, error: formatHttpError(res, `Service status query failed (HTTP ${res.status})`) };
+      const data = res.data || {};
+      if (args.includeApprovals !== false && !data.approvalAlerts) {
+        const alertsRes = await requestJson('GET', '/api/approval-alerts').catch(() => null);
+        if (alertsRes?.ok && alertsRes.data) {
+          data.approvalAlerts = alertsRes.data.ok
+            ? { available: true, enabled: true, alerts: alertsRes.data.alerts || [] }
+            : { available: true, enabled: false, alerts: [] };
+        }
+      }
+      return data;
+    },
+
+    async listApprovalAlerts() {
+      const res = await requestJson('GET', '/api/approval-alerts');
+      if (!res.ok) return { ok: false, error: formatHttpError(res, `Approval alerts query failed (HTTP ${res.status})`) };
+      return res.data || { error: 'disabled' };
     }
   };
 }
@@ -386,6 +590,18 @@ function createHubBackendAdapter(options = {}) {
  * @param {string} [options.reportsDir]
  * @param {string} [options.timeZone]
  * @param {number} [options.staleAfterMs]
+ * @param {boolean} [options.sessionTitlesEnabled]
+ * @param {boolean} [options.allowSessionDetail]
+ * @param {boolean} [options.allowConversationText]
+ * @param {Record<string, any> | null} [options.allTimeSessions]
+ * @param {any} [options.liveRateSnapshot]
+ * @param {any} [options.subscriptionsDoc]
+ * @param {Record<string, number> | null} [options.rates]
+ * @param {(args: any) => Promise<any> | any} [options.readSessionDetail]
+ * @param {(args: any) => Promise<any> | any} [options.getLimitsHistory]
+ * @param {(args: any) => Promise<any> | any} [options.getServiceStatus]
+ * @param {(args: any) => Promise<any> | any} [options.getCodexResetForecast]
+ * @param {() => Promise<any> | any} [options.listApprovalAlerts]
  */
 function createLocalBackendAdapter(options = {}) {
   const dataFile = path.resolve(
@@ -418,7 +634,36 @@ function createLocalBackendAdapter(options = {}) {
         : rawSnapshots;
     }
 
-    return { rawDevices, stats, history, dailySnapshots };
+    const integrationsCfg = /** @type {any} */ (readJson(path.join(reportsDir, 'integrations.json'), null));
+    const standaloneSubscriptions = readJson(path.join(path.dirname(dataFile), 'subscriptions.json'), null);
+    const subscriptionsDoc = options.subscriptionsDoc ?? store.subscriptions ?? standaloneSubscriptions ?? null;
+    const aliasSettings = store.syncSettings?.modelAliases?.value || null;
+
+    return {
+      store,
+      rawDevices,
+      stats,
+      history,
+      dailySnapshots,
+      integrationsCfg,
+      subscriptionsDoc,
+      modelAliases: aliasSettings?.modelAliases || null,
+      modelAliasGrouping: aliasSettings?.modelAliasGrouping || 'off'
+    };
+  }
+
+  /**
+   * @param {any} integrationsCfg
+   * @returns {boolean}
+   */
+  function resolveSessionTitlesEnabled(integrationsCfg) {
+    if (typeof options.sessionTitlesEnabled === 'boolean') {
+      return options.sessionTitlesEnabled;
+    }
+    if (typeof integrationsCfg?.openclaw?.sessionTitlesEnabled === 'boolean') {
+      return integrationsCfg.openclaw.sessionTitlesEnabled;
+    }
+    return true;
   }
 
   /**
@@ -792,6 +1037,282 @@ function createLocalBackendAdapter(options = {}) {
 
     async pushToOpenClaw() {
       return { ok: false, error: 'push_report_to_openclaw requires Hub HTTP mode or configured Main Hub.' };
+    },
+
+    async pushEventToOpenClaw() {
+      return { ok: false, error: 'push_to_openclaw requires Hub HTTP mode or configured Main Hub.' };
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async queryUsageBreakdown(args = {}) {
+      const { rawDevices, stats, history, dailySnapshots, modelAliases, modelAliasGrouping } = loadSnapshot();
+      return {
+        ok: true,
+        ...queryUsageBreakdown({
+          stats,
+          history,
+          devices: rawDevices,
+          dailySnapshots,
+          period: args.period,
+          range: args.range,
+          groupBy: args.groupBy,
+          deviceId: args.deviceId,
+          limit: args.limit,
+          modelAliases,
+          modelAliasGrouping: args.modelAliasGrouping ?? modelAliasGrouping,
+          timeZone: defaultTimeZone || undefined
+        })
+      };
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async listSessions(args = {}) {
+      const { store, stats, integrationsCfg } = loadSnapshot();
+      const titlesEnabled = resolveSessionTitlesEnabled(integrationsCfg);
+      return {
+        ok: true,
+        ...listSessionsQuery({
+          stats,
+          allTimeSessions: options.allTimeSessions ?? store.allTimeSessions ?? null,
+          period: args.period,
+          state: args.state,
+          client: args.client,
+          project: args.project,
+          deviceId: args.deviceId,
+          search: args.search,
+          sort: args.sort,
+          sortDirection: args.sortDirection,
+          limit: args.limit,
+          cursor: args.cursor,
+          sessionTitlesEnabled: titlesEnabled
+        })
+      };
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async getSessionDetail(args = {}) {
+      const { integrationsCfg } = loadSnapshot();
+      const perms = integrationsCfg?.openclaw?.queryPermissions || {};
+      const allowDetail = typeof options.allowSessionDetail === 'boolean'
+        ? options.allowSessionDetail
+        : perms.allowSessionDetail === true;
+      const allowConversation = typeof options.allowConversationText === 'boolean'
+        ? options.allowConversationText
+        : perms.allowConversationText === true;
+
+      if (!allowDetail) {
+        return {
+          ok: false,
+          error: 'session_detail_disabled',
+          message: 'Session detail queries are disabled by privacy settings (queryPermissions.allowSessionDetail).'
+        };
+      }
+      const includeConversation = Boolean(args.includeConversation);
+      if (includeConversation && !allowConversation) {
+        return {
+          ok: false,
+          error: 'conversation_text_disabled',
+          message: 'Conversation text queries are disabled by privacy settings (queryPermissions.allowConversationText).'
+        };
+      }
+
+      const rawClient = typeof args.client === 'string' ? args.client.trim() : '';
+      const client = rawClient ? (normalizeClientName(rawClient) || rawClient.toLowerCase()) : '';
+      const sessionId = typeof args.sessionId === 'string' ? args.sessionId.trim() : '';
+      if (!client || !sessionId) {
+        return { ok: false, error: 'invalid_request', message: 'client and sessionId are required.' };
+      }
+
+      const periodRaw = typeof args.period === 'string' ? args.period.trim() : 'total';
+      const period = periodRaw === 'allTime' ? 'total' : (periodRaw || 'total');
+      let detail;
+      if (typeof options.readSessionDetail === 'function') {
+        detail = await options.readSessionDetail({
+          client,
+          sessionId,
+          deviceId: args.deviceId,
+          period,
+          includeConversation,
+          limit: args.limit,
+          offset: args.offset,
+          cursor: args.cursor
+        });
+      } else {
+        detail = await resolveSessionDetailForPlatform({ client, sessionId, period });
+        if (detail?.found && includeConversation && allowConversation) {
+          const conv = readSessionConversation({ key: `${client}:${sessionId}`, cursor: args.cursor || '' });
+          if (conv && !conv.error) detail = { ...detail, conversation: conv };
+        }
+      }
+      if (!detail || detail.found === false) {
+        return { ok: false, error: 'not_found', message: `Session detail not found for ${client}:${sessionId}.` };
+      }
+
+      const titlesEnabled = resolveSessionTitlesEnabled(integrationsCfg);
+      const out = titlesEnabled
+        ? { ...detail }
+        : stripSessionDetailTitles(detail);
+      if (!includeConversation || !allowConversation) {
+        delete out.conversation;
+        delete out.messages;
+        delete out.conversationMessages;
+      }
+      if (Array.isArray(out.exchanges) && out.totalExchanges === undefined) {
+        const totalExchanges = out.exchanges.length;
+        const offset = Number.isInteger(args.offset) && args.offset >= 0 ? args.offset : 0;
+        const limit = Number.isInteger(args.limit) && args.limit > 0 ? args.limit : 50;
+        out.exchanges = out.exchanges.slice(offset, offset + limit);
+        out.totalExchanges = totalExchanges;
+        out.offset = offset;
+        out.limit = limit;
+        out.truncated = offset + out.exchanges.length < totalExchanges;
+      }
+      return { ok: true, ...out };
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async getUsageHistory(args = {}) {
+      const { history } = loadSnapshot();
+      return {
+        ok: true,
+        ...queryUsageHistory({
+          history,
+          resolution: args.resolution,
+          from: args.from,
+          to: args.to,
+          groupBy: args.groupBy,
+          limit: args.limit
+        })
+      };
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async getDevicesAndHealth(args = {}) {
+      const { stats } = loadSnapshot();
+      return {
+        ok: true,
+        ...getDevicesAndHealthQuery({
+          stats,
+          deviceId: args.deviceId,
+          includeDiagnostics: args.includeDiagnostics !== false
+        })
+      };
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async getLimitsHistory(args = {}) {
+      const { stats } = loadSnapshot();
+      const overview = getLimitsOverviewQuery({
+        stats,
+        thirdPartyOnly: Boolean(args.thirdPartyOnly),
+        provider: args.provider,
+        status: args.status,
+        maxProviders: args.maxProviders
+      });
+      if (args.includeHistory === false) {
+        return { ok: true, ...overview };
+      }
+      if (typeof options.getLimitsHistory === 'function') {
+        const rawHistory = await options.getLimitsHistory({
+          accountKey: args.accountKey,
+          provider: args.provider,
+          windowName: args.windowName,
+          hours: args.hours
+        });
+        return {
+          ok: true,
+          ...overview,
+          limitsHistory: sanitizeLimitsHistoryPayload({
+            available: true,
+            ...(rawHistory && typeof rawHistory === 'object' ? rawHistory : { series: rawHistory || [] })
+          })
+        };
+      }
+      return {
+        ok: true,
+        ...overview,
+        limitsHistory: {
+          available: false,
+          reason: 'local_mode_unavailable',
+          series: []
+        }
+      };
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async getSubscriptionsAndForecasts(args = {}) {
+      const { stats, subscriptionsDoc } = loadSnapshot();
+      return {
+        ok: true,
+        ...getSubscriptionsAndForecastsQuery({
+          subscriptionsDoc,
+          stats,
+          rates: options.rates,
+          date: args.date,
+          includeForecasts: args.includeForecasts !== false,
+          activeOnly: Boolean(args.activeOnly)
+        })
+      };
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async getLiveTokenRate(args = {}) {
+      const { store, stats } = loadSnapshot();
+      return {
+        ok: true,
+        ...getLiveTokenRateSummary({
+          stats,
+          liveRateSnapshot: options.liveRateSnapshot ?? store.liveRateSnapshot ?? null,
+          deviceId: args.deviceId
+        })
+      };
+    },
+
+    /**
+     * @param {Record<string, any>} [args]
+     */
+    async getServiceStatusAndApprovals(args = {}) {
+      const includeResetForecast = args.includeResetForecast !== false;
+      const includeApprovals = args.includeApprovals !== false;
+      const serviceStatus = typeof options.getServiceStatus === 'function'
+        ? { available: true, ...(await options.getServiceStatus({ force: Boolean(args.force), providerIds: args.providerIds })) }
+        : { available: false, reason: 'local_mode_unavailable', providers: [] };
+      const codexResetForecast = includeResetForecast
+        ? (typeof options.getCodexResetForecast === 'function'
+          ? { available: true, ...(await options.getCodexResetForecast({ force: Boolean(args.force) })) }
+          : { available: false, reason: 'local_mode_unavailable' })
+        : undefined;
+      const rawAlerts = includeApprovals && typeof options.listApprovalAlerts === 'function'
+        ? await options.listApprovalAlerts()
+        : null;
+      const approvalAlerts = includeApprovals
+        ? (rawAlerts && rawAlerts.ok
+          ? { available: true, enabled: true, alerts: rawAlerts.alerts || [] }
+          : { available: false, enabled: false, alerts: [] })
+        : undefined;
+      return {
+        ok: true,
+        checkedAt: new Date().toISOString(),
+        serviceStatus,
+        ...(includeResetForecast ? { codexResetForecast } : {}),
+        ...(includeApprovals ? { approvalAlerts } : {})
+      };
     }
   };
 }
@@ -808,6 +1329,18 @@ function createLocalBackendAdapter(options = {}) {
  * @param {string} [options.reportsDir]
  * @param {string} [options.timeZone]
  * @param {number} [options.staleAfterMs]
+ * @param {boolean} [options.sessionTitlesEnabled]
+ * @param {boolean} [options.allowSessionDetail]
+ * @param {boolean} [options.allowConversationText]
+ * @param {Record<string, any> | null} [options.allTimeSessions]
+ * @param {any} [options.liveRateSnapshot]
+ * @param {any} [options.subscriptionsDoc]
+ * @param {Record<string, number> | null} [options.rates]
+ * @param {(args: any) => Promise<any> | any} [options.readSessionDetail]
+ * @param {(args: any) => Promise<any> | any} [options.getLimitsHistory]
+ * @param {(args: any) => Promise<any> | any} [options.getServiceStatus]
+ * @param {(args: any) => Promise<any> | any} [options.getCodexResetForecast]
+ * @param {() => Promise<any> | any} [options.listApprovalAlerts]
  */
 function createBackendAdapter(options = {}) {
   const mode = options.mode === 'local'
@@ -820,7 +1353,19 @@ function createBackendAdapter(options = {}) {
       dataFile: options.dataFile,
       reportsDir: options.reportsDir,
       timeZone: options.timeZone,
-      staleAfterMs: options.staleAfterMs
+      staleAfterMs: options.staleAfterMs,
+      sessionTitlesEnabled: options.sessionTitlesEnabled,
+      allowSessionDetail: options.allowSessionDetail,
+      allowConversationText: options.allowConversationText,
+      allTimeSessions: options.allTimeSessions,
+      liveRateSnapshot: options.liveRateSnapshot,
+      subscriptionsDoc: options.subscriptionsDoc,
+      rates: options.rates,
+      readSessionDetail: options.readSessionDetail,
+      getLimitsHistory: options.getLimitsHistory,
+      getServiceStatus: options.getServiceStatus,
+      getCodexResetForecast: options.getCodexResetForecast,
+      listApprovalAlerts: options.listApprovalAlerts
     });
   }
 
@@ -1163,7 +1708,19 @@ function startMcpServer(options = {}) {
     dataFile: options.dataFile ?? resolved.dataFile,
     reportsDir: options.reportsDir ?? resolved.reportsDir,
     timeZone: options.timeZone ?? resolved.timeZone,
-    staleAfterMs: options.staleAfterMs ?? resolved.staleAfterMs
+    staleAfterMs: options.staleAfterMs ?? resolved.staleAfterMs,
+    sessionTitlesEnabled: /** @type {any} */ (options).sessionTitlesEnabled,
+    allowSessionDetail: /** @type {any} */ (options).allowSessionDetail,
+    allowConversationText: /** @type {any} */ (options).allowConversationText,
+    allTimeSessions: /** @type {any} */ (options).allTimeSessions,
+    liveRateSnapshot: /** @type {any} */ (options).liveRateSnapshot,
+    subscriptionsDoc: /** @type {any} */ (options).subscriptionsDoc,
+    rates: /** @type {any} */ (options).rates,
+    readSessionDetail: /** @type {any} */ (options).readSessionDetail,
+    getLimitsHistory: /** @type {any} */ (options).getLimitsHistory,
+    getServiceStatus: /** @type {any} */ (options).getServiceStatus,
+    getCodexResetForecast: /** @type {any} */ (options).getCodexResetForecast,
+    listApprovalAlerts: /** @type {any} */ (options).listApprovalAlerts
   });
 
   const mcpServer = createMcpReportServer({
@@ -1174,6 +1731,16 @@ function startMcpServer(options = {}) {
     getStats: () => backend.getStats(),
     analyzeWithAi: (args) => backend.analyzeWithAi(args),
     pushToOpenClaw: (args) => backend.pushToOpenClaw(args),
+    pushEventToOpenClaw: (args) => backend.pushEventToOpenClaw(args),
+    queryUsageBreakdown: (args) => backend.queryUsageBreakdown(args),
+    listSessions: (args) => backend.listSessions(args),
+    getSessionDetail: (args) => backend.getSessionDetail(args),
+    getUsageHistory: (args) => backend.getUsageHistory(args),
+    getDevicesAndHealth: (args) => backend.getDevicesAndHealth(args),
+    getLimitsHistory: (args) => backend.getLimitsHistory(args),
+    getSubscriptionsAndForecasts: (args) => backend.getSubscriptionsAndForecasts(args),
+    getLiveTokenRate: (args) => backend.getLiveTokenRate(args),
+    getServiceStatusAndApprovals: (args) => backend.getServiceStatusAndApprovals(args),
     serverInfo: {
       name: 'token-monitor-reports',
       version: readPackageVersion(),
