@@ -53,6 +53,8 @@
       "scripts/vendor/tokscale.json",
       "src/hub/**/*",
       "src/mcp/**/*",
+      "plugins/quota-alerts/evaluator.cjs",
+      "skills/openclaw-token-monitor/**/*",
       "assets/icon.png",
       "assets/icons/**/*",
       "package.json"

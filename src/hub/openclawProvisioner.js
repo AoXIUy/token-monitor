@@ -545,11 +545,12 @@ function installOpenClawSkill(options = {}) {
   const destSkillMd = path.join(destRoot, 'SKILL.md');
   const destHelper = path.join(destScripts, 'query-token-monitor.mjs');
   fsApi.mkdirSync(destScripts, { recursive: true });
-  fsApi.copyFileSync(sourceSkillMd, destSkillMd);
+  // Read+write instead of copyFileSync so copying out of Electron app.asar stays portable across platforms.
+  fsApi.writeFileSync(destSkillMd, fsApi.readFileSync(sourceSkillMd));
   const files = [destSkillMd];
   let helperInstalled = false;
   if (fsApi.existsSync(sourceHelper)) {
-    fsApi.copyFileSync(sourceHelper, destHelper);
+    fsApi.writeFileSync(destHelper, fsApi.readFileSync(sourceHelper));
     if (process.platform !== 'win32' && typeof fsApi.chmodSync === 'function') {
       try { fsApi.chmodSync(destHelper, 0o755); } catch {}
     }

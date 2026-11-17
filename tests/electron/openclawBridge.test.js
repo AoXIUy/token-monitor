@@ -493,8 +493,10 @@ test('session completion tracker emits with turnDelta, detail summary gating, an
     hub.onStatsSnapshot(endedSnap);
     bridge.onStats(endedSnap);
 
-    await new Promise((resolve) => setTimeout(resolve, 60));
     await bridge.flush();
+    for (let i = 0; i < 60 && webhookCalls.length < 1; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
 
     // Hub's stats tracker AND bridge both observed the exact same completion eventId -> deduped to 1 webhook!
     assert.equal(webhookCalls.length, 1);
@@ -642,5 +644,63 @@ test('createApprovalAlertRuntime supports localOnly bridge and error-isolated on
     assert.equal(errors.some((e) => /bridge unavailable/i.test(e.message)), false);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('package.json build.files covers all relative runtime requires and bundled OpenClaw assets', () => {
+  const repoRoot = path.resolve(__dirname, '..', '..');
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
+  const patterns = Array.isArray(pkg?.build?.files) ? pkg.build.files : [];
+
+  function matchesBuildFiles(relPath) {
+    return patterns.some((pattern) => {
+      if (pattern === relPath) return true;
+      if (pattern.endsWith('/**/*')) {
+        const prefix = pattern.slice(0, -'/**/*'.length);
+        return relPath.startsWith(`${prefix}/`);
+      }
+      if (pattern.endsWith('/*')) {
+        const prefix = pattern.slice(0, -'/*'.length);
+        return relPath.startsWith(`${prefix}/`) && !relPath.slice(prefix.length + 1).includes('/');
+      }
+      return false;
+    });
+  }
+
+  function walkCode(dir) {
+    const out = [];
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...walkCode(full));
+      else if (/\.(js|cjs|mjs)$/.test(entry.name)) out.push(full);
+    }
+    return out;
+  }
+
+  const reqRe = /\brequire\(\s*['"](\.[^'"]+)['"]\s*\)/g;
+  for (const rootDir of ['src/electron', 'src/shared', 'src/hub', 'src/mcp']) {
+    for (const file of walkCode(path.join(repoRoot, rootDir))) {
+      const source = fs.readFileSync(file, 'utf8');
+      let match;
+      while ((match = reqRe.exec(source)) !== null) {
+        const base = path.resolve(path.dirname(file), match[1]);
+        const candidates = path.extname(base)
+          ? [base]
+          : [`${base}.js`, `${base}.cjs`, `${base}.json`, path.join(base, 'index.js')];
+        const resolved = candidates.find((candidate) => fs.existsSync(candidate) && fs.statSync(candidate).isFile());
+        assert.ok(resolved, `Unresolved relative require ${match[1]} in ${path.relative(repoRoot, file)}`);
+        const rel = path.relative(repoRoot, resolved).split(path.sep).join('/');
+        assert.ok(matchesBuildFiles(rel), `Packaged app.asar missing required dependency: ${rel}`);
+      }
+    }
+  }
+
+  for (const requiredAsset of [
+    'plugins/quota-alerts/evaluator.cjs',
+    'skills/openclaw-token-monitor/SKILL.md',
+    'skills/openclaw-token-monitor/scripts/query-token-monitor.mjs'
+  ]) {
+    assert.ok(fs.existsSync(path.join(repoRoot, requiredAsset)), `Missing asset on disk: ${requiredAsset}`);
+    assert.ok(matchesBuildFiles(requiredAsset), `package.json build.files missing ${requiredAsset}`);
   }
 });

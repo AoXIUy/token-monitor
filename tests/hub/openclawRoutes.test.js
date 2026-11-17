@@ -277,7 +277,15 @@ test('Hub /api/query/*, privacy gates, OpenClaw push/history, approval alerts, a
     })
   });
   assert.equal(alertRes.status, 200);
-  await new Promise((r) => setTimeout(r, 80));
+  for (
+    let i = 0;
+    i < 80
+    && (!webhookCalls.some((c) => c.body.event === 'token_monitor.session_completed')
+      || !webhookCalls.some((c) => c.body.event === 'token_monitor.approval_alert'));
+    i += 1
+  ) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
 
   assert.ok(webhookCalls.some((c) => c.body.event === 'token_monitor.session_completed'));
   assert.ok(webhookCalls.some((c) => c.body.event === 'token_monitor.approval_alert'));
