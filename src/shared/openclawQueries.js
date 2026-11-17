@@ -653,7 +653,7 @@ function projectPeriodAliases(period, resolve) {
   if (period.projects && typeof period.projects === 'object') {
     let projects = period.projects;
     for (const [k, proj] of Object.entries(period.projects)) {
-      if (!proj?.models) continue;
+      if (PROTOTYPE_KEYS.has(k) || !proj?.models) continue;
       const nextModels = foldModelNumericMap(proj.models, resolve);
       if (nextModels !== proj.models) {
         if (projects === period.projects) projects = { ...period.projects };
@@ -665,7 +665,7 @@ function projectPeriodAliases(period, resolve) {
   if (period.sessions && typeof period.sessions === 'object') {
     let sessions = period.sessions;
     for (const [k, sess] of Object.entries(period.sessions)) {
-      if (!sess || typeof sess !== 'object') continue;
+      if (PROTOTYPE_KEYS.has(k) || !sess || typeof sess !== 'object') continue;
       let nextSess = sess;
       if (sess.models) {
         const nextModels = foldModelNumericMap(sess.models, resolve);
@@ -697,6 +697,12 @@ function projectHistoryRowAliases(row, resolve) {
   if (!row || typeof row !== 'object' || !row.perModel) return row;
   const keys = Object.keys(row.perModel);
   if (!keys.some((model) => resolve(model) !== model)) return row;
+  const rowHasComponents = row.tokenComponentsAvailable === true;
+  const bucketHasComponents = (/** @type {any} */ entry) => (
+    hasOwn(entry, 'tokenComponentsAvailable')
+      ? entry.tokenComponentsAvailable === true
+      : rowHasComponents
+  );
   /** @type {Map<string, any>} */
   const grouped = new Map();
   for (const [model, bucket] of Object.entries(row.perModel)) {
@@ -715,10 +721,10 @@ function projectHistoryRowAliases(row, resolve) {
     }
     const prevUnc = hasOwn(prev, 'unclassifiedTokens')
       ? num(prev.unclassifiedTokens)
-      : (prev.tokenComponentsAvailable === true ? 0 : num(prev.tokens));
+      : (bucketHasComponents(prev) ? 0 : num(prev.tokens));
     const curUnc = hasOwn(bucket, 'unclassifiedTokens')
       ? num(bucket?.unclassifiedTokens)
-      : (bucket?.tokenComponentsAvailable === true ? 0 : num(bucket?.tokens));
+      : (bucketHasComponents(bucket) ? 0 : num(bucket?.tokens));
     merged.unclassifiedTokens = prevUnc + curUnc;
     grouped.set(key, merged);
   }
@@ -2623,10 +2629,10 @@ function listSessionsQuery({
     if (normPeriod === 'allTime') {
       const deviceSessions = periodObj?.sessions || {};
       /** @type {Record<string, any>} */
-      const extraFiltered = {};
+      const extraFiltered = Object.create(null);
       if (rawAllTimeMap) {
         for (const [k, s] of Object.entries(rawAllTimeMap)) {
-          if (!s || typeof s !== 'object') continue;
+          if (PROTOTYPE_KEYS.has(k) || !s || typeof s !== 'object') continue;
           const srcDev = cleanText(s.sourceDevice || s.deviceId, 128);
           if (srcDev ? srcDev === cleanDeviceId : devices.length === 1) {
             extraFiltered[k] = s;
@@ -3207,9 +3213,12 @@ function queryUsageHistory({
     favoriteModel = topFavoriteModel(rows);
   }
 
-  const breakdown = normGroupBy === 'none'
+  const fullBreakdown = normGroupBy === 'none'
     ? null
-    : aggregateHistoryBreakdown(breakdownSource, normGroupBy, totalTokens, knownCostUsd, (/** @type {any} */ m) => m).slice(0, boundedLimit);
+    : aggregateHistoryBreakdown(breakdownSource, normGroupBy, totalTokens, knownCostUsd, (/** @type {any} */ m) => m);
+  const totalRows = fullBreakdown ? fullBreakdown.length : 0;
+  const rows = fullBreakdown ? fullBreakdown.slice(0, boundedLimit) : [];
+  const truncated = totalRows > boundedLimit;
 
   return {
     resolution: 'summary',
@@ -3226,10 +3235,10 @@ function queryUsageHistory({
       activeTimeMs,
       favoriteModel
     },
-    totalRows: breakdown ? breakdown.length : 0,
-    truncated: false,
-    rows: breakdown || [],
-    breakdown
+    totalRows,
+    truncated,
+    rows,
+    breakdown: fullBreakdown ? rows : null
   };
 }
 
@@ -3281,7 +3290,7 @@ function sanitizeClientHealthForQuery(health, includeDiagnostics) {
   /** @type {Record<string, any>} */
   const compactClients = {};
   for (const [clientId, entry] of Object.entries(normalized.clients || {})) {
-    if (!entry || typeof entry !== 'object') continue;
+    if (PROTOTYPE_KEYS.has(clientId) || !entry || typeof entry !== 'object') continue;
     compactClients[clientId] = {
       source: {
         state: entry.source.state,
@@ -3680,8 +3689,9 @@ function getSubscriptionsAndForecastsQuery({
     today = subscriptionDisplay.todayString();
   }
 
-  /** @type {Record<string, number>} */
-  const effectiveRates = resolveEffectiveRates({}, isPlainObject(rates) ? /** @type {any} */ (rates) : {});
+  const effectiveRates = /** @type {Record<string, number>} */ (
+    /** @type {any} */ (resolveEffectiveRates({}, isPlainObject(rates) ? /** @type {any} */ (rates) : {}))
+  );
   const currencyApi = {
     /** @param {any} code @param {string} [fallback] */
     normalizeCurrency: (code, fallback = 'USD') => normalizeCurrency(code, fallback),
@@ -3822,8 +3832,9 @@ function getLiveTokenRateSummary({
   now
 } = {}) {
   const cleanDeviceId = cleanText(deviceId, 128) || null;
-  const hasExplicitNow = now !== undefined && now !== null && now !== '';
-  const nowMs = hasExplicitNow ? resolveNowDate(now).getTime() : Date.now();
+  const nowMs = now !== undefined && now !== null && now !== ''
+    ? resolveNowDate(now).getTime()
+    : Date.now();
   const devices = Array.isArray(stats?.devices) ? stats.devices : [];
   const selectedDevice = cleanDeviceId
     ? devices.find((/** @type {any} */ d) => (d?.deviceId || d?.id) === cleanDeviceId) || null
@@ -3870,7 +3881,7 @@ function getLiveTokenRateSummary({
     if (deviceMatches) {
       const expiresAt = optionalNum(liveRateSnapshot.expiresAt);
       const sampledAt = optionalNum(liveRateSnapshot.sampledAt);
-      const expiredAtNow = hasExplicitNow && expiresAt !== null && expiresAt <= nowMs;
+      const expiredAtNow = expiresAt !== null && expiresAt <= nowMs;
 
       if (typeof liveRateSnapshot.state === 'string') {
         const rawState = liveRateSnapshot.state.trim().toLowerCase();

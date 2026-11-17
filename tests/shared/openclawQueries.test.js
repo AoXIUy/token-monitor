@@ -230,6 +230,63 @@ test('queryUsageBreakdown supports modelAliases and modelAliasGrouping with dura
   });
   assert.ok(prefixGrouped.rows.some((r) => r.model === 'gpt-5-canonical'));
   assert.ok(prefixGrouped.rows.some((r) => r.model === 'claude-opus-4'));
+
+  // Folding aliased models in a history.daily row inherits row.tokenComponentsAvailable === true
+  const historyDayAlias = queryUsageBreakdown({
+    stats: {},
+    history: {
+      daily: [
+        {
+          date: '2026-11-16',
+          tokens: 1_500,
+          cost: 0.15,
+          tokenComponentsAvailable: true,
+          inputTokens: 900,
+          outputTokens: 600,
+          perModel: {
+            'claude-sonnet-4-5-20250929': { tokens: 1_000, cost: 0.1, inputTokens: 600, outputTokens: 400 },
+            'claude-sonnet-4-5': { tokens: 500, cost: 0.05, inputTokens: 300, outputTokens: 200 }
+          }
+        }
+      ]
+    },
+    period: 'week',
+    groupBy: 'model',
+    modelAliases: {
+      'claude-sonnet-4-5-20250929': 'sonnet-4.5-folded',
+      'claude-sonnet-4-5': 'sonnet-4.5-folded'
+    },
+    now: '2026-11-17T12:00:00Z'
+  });
+  assert.equal(historyDayAlias.rows.length, 1);
+  assert.equal(historyDayAlias.rows[0].model, 'sonnet-4.5-folded');
+  assert.equal(historyDayAlias.rows[0].totalTokens, 1_500);
+  assert.equal(historyDayAlias.rows[0].unclassifiedTokens, 0);
+
+  // Prototype-key safety inside projectPeriodAliases (projects + sessions)
+  const protoAliasStats = {
+    periods: {
+      today: {
+        models: { 'alias-a': 100 },
+        projects: Object.assign(JSON.parse('{"__proto__":{"models":{"alias-a":10}}}'), {
+          constructor: { models: { 'alias-a': 20 } },
+          projA: { models: { 'alias-a': 100 } }
+        }),
+        sessions: Object.assign(JSON.parse('{"__proto__":{"latestModel":"alias-a"}}'), {
+          prototype: { latestModel: 'alias-a', models: { 'alias-a': 50 } },
+          'claude:s1': { latestModel: 'alias-a', models: { 'alias-a': 100 } }
+        })
+      }
+    }
+  };
+  const safeAliasResult = queryUsageBreakdown({
+    stats: protoAliasStats,
+    period: 'today',
+    groupBy: 'model',
+    modelAliases: { 'alias-a': 'canonical-a' }
+  });
+  assert.equal(safeAliasResult.rows[0].model, 'canonical-a');
+  assert.equal(/** @type {any} */ ({}).models, undefined);
 });
 
 test('queryUsageBreakdown combines history + live today for week, last7, and last30', () => {
@@ -547,6 +604,19 @@ test('listSessionsQuery supports state, filters, sorting, pagination, live proje
   assert.equal(allTimeRes.total, 2);
   assert.ok(allTimeRes.sessions.some((s) => s.sessionId === 'old-1'));
 
+  // Device-scoped allTimeSessions ignores prototype-polluting keys
+  const protoDeviceRes = listSessionsQuery({
+    stats: { devices: [{ deviceId: 'dev-1', periods: { allTime: { sessions: {} } } }] },
+    deviceId: 'dev-1',
+    period: 'allTime',
+    allTimeSessions: Object.assign(JSON.parse('{"__proto__":{"client":"codex","sessionId":"evil","sourceDevice":"dev-1","totalTokens":99}}'), {
+      constructor: { client: 'codex', sessionId: 'ctor', sourceDevice: 'dev-1', totalTokens: 88 },
+      'codex:safe': { client: 'codex', sessionId: 'safe', sourceDevice: 'dev-1', lastUsedAt: '2026-11-17T11:00:00Z', totalTokens: 10 }
+    }),
+    now
+  });
+  assert.deepEqual(protoDeviceRes.sessions.map((s) => s.sessionId), ['safe']);
+
   assert.throws(() => listSessionsQuery({ stats, cursor: 'not-valid-base64!!!' }), /Invalid pagination cursor/);
 });
 
@@ -667,6 +737,15 @@ test('queryUsageHistory handles daily, monthly, summary, date bounds, streaks, p
   assert.deepEqual(summary.streaks, { currentStreak: 3, longestStreak: 3 });
   assert.equal(summary.peakDay.date, '2026-11-16');
   assert.equal(summary.breakdown[0].client, 'claude');
+  assert.equal(summary.totalRows, 2);
+  assert.equal(summary.truncated, false);
+
+  const limitedSummary = queryUsageHistory({ history, resolution: 'summary', groupBy: 'model', limit: 1 });
+  assert.equal(limitedSummary.totalRows, 2);
+  assert.equal(limitedSummary.truncated, true);
+  assert.equal(limitedSummary.rows.length, 1);
+  assert.equal(limitedSummary.breakdown.length, 1);
+  assert.equal(limitedSummary.rows[0].model, 'claude-sonnet-4-5');
 
   assert.throws(() => queryUsageHistory({ history, from: '2026-11-20', to: '2026-11-10' }), /from.*after to/);
 });
@@ -745,6 +824,27 @@ test('getDevicesAndHealthQuery returns sanitized device health with no paths or 
   const missing = getDevicesAndHealthQuery({ stats, deviceId: 'missing' });
   assert.equal(missing.deviceFound, false);
   assert.equal(missing.deviceCount, 0);
+
+  // Prototype-key safety in clientHealth.clients (including trim-surviving '__proto__' / 'constructor')
+  const protoHealthRes = getDevicesAndHealthQuery({
+    stats: {
+      devices: [
+        {
+          deviceId: 'dev-proto',
+          clientHealth: {
+            version: 1,
+            clients: Object.assign(JSON.parse('{"__proto__":{"overall":"healthy","data":{"liveTokens":5}}}'), {
+              constructor: { overall: 'healthy', data: { liveTokens: 5 } },
+              claude: { source: { state: 'detected', detectedCount: 1, checkedCount: 1 }, collection: { state: 'ok' }, data: { liveTokens: 10 }, overall: 'healthy' }
+            })
+          }
+        }
+      ]
+    },
+    includeDiagnostics: false
+  });
+  assert.deepEqual(Object.keys(protoHealthRes.devices[0].clientHealth.clients), ['claude']);
+  assert.equal(/** @type {any} */ ({}).overall, undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -1080,6 +1180,37 @@ test('getLiveTokenRateSummary uses liveRateSnapshot and falls back safely to per
   assert.equal(unsupported.state, 'unavailable');
   assert.equal(unsupported.reason, 'unsupportedTiming');
   assert.equal(unsupported.fallbackAvgOutputTokensPerSec, null);
+
+  // Expired snapshot falls back gracefully when now is omitted (checked against Date.now())
+  const expiredNoNow = getLiveTokenRateSummary({
+    stats,
+    liveRateSnapshot: {
+      state: 'live',
+      speed: 88,
+      burn: 4_000,
+      sampledAt: 1_700_000_000_000,
+      expiresAt: 1_700_000_008_000,
+      deviceCount: 1
+    }
+  });
+  assert.equal(expiredNoNow.state, 'unavailable');
+  assert.equal(expiredNoNow.reason, 'expired');
+  assert.equal(expiredNoNow.fallbackAvgOutputTokensPerSec, 2000);
+
+  // Active future snapshot stays live even when now is omitted
+  const futureNoNow = getLiveTokenRateSummary({
+    stats,
+    liveRateSnapshot: {
+      state: 'live',
+      speed: 95,
+      burn: 5_000,
+      sampledAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+      deviceCount: 1
+    }
+  });
+  assert.equal(futureNoNow.state, 'live');
+  assert.equal(futureNoNow.speed, 95);
 
   // Missing device -> missingData
   const missing = getLiveTokenRateSummary({ stats, deviceId: 'nope' });
