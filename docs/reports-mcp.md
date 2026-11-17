@@ -2,7 +2,7 @@
 
 Token Monitor's Main Hub can generate, persist, and serve standardized **daily, weekly, and monthly** usage & project analysis reports (`token-monitor-report/v1`) in both JSON and Markdown, and expose them to coding agents over the **Model Context Protocol (MCP)**.
 
-This feature is a **Node Hub / Desktop Host extension**. The Cloudflare Worker does not implement the `/api/reports*` or `/api/mcp` routes.
+This feature is a **Node Hub / Desktop Host / Desktop Local Loopback Bridge** extension (with offline report & query support in `--local` stdio mode). The Cloudflare Worker does not implement the `/api/reports*`, `/api/query/*`, or `/api/mcp` routes.
 
 ---
 
@@ -28,7 +28,7 @@ Synchronized `DeviceRecord` uploads intentionally omit unbounded `allTime.sessio
 - **Daily snapshots (`daily-snapshots.json`)**: When devices upload to the Hub, the report manager captures the current day's project rollups, client/model totals, token components, and throughput into `daily-snapshots.json`.
 - **Automatic rollover archiving**: When a new day, ISO week, or calendar month begins, the Hub finalizes and archives the previous period's report automatically when report generation is enabled.
 - **Deduplicated atomic writes**: Each report is written atomically using temporary files and rename. Before writing, the Hub compares `reportContentSignature(report)` (a deterministic 128-bit hash of the report excluding `period.generatedAt`) against the existing `.json` file so unchanged reports are not rewritten unless `force: true` is passed.
-- **Dual MCP access**: AI clients can connect directly to the Main Hub's HTTP endpoint (`POST /api/mcp`), or run the zero-dependency stdio MCP server (`src/mcp/server.js`) against either a remote Hub or local on-disk files.
+- **Dual MCP access**: AI clients can connect directly to the Main Hub's (or Desktop Local Loopback Bridge's) HTTP endpoint (`POST /api/mcp`), or run the zero-dependency stdio MCP server (`src/mcp/server.js`) against either a remote Hub or local on-disk files.
 
 ---
 
@@ -172,12 +172,12 @@ Report ID: `weekly:2026-W47` · Timezone: `Asia/Shanghai` · Devices: 2/2 active
 
 ## MCP Server integration
 
-The MCP report server is implemented by [`src/shared/mcpReportProtocol.js`](../src/shared/mcpReportProtocol.js) (supporting MCP protocol versions `2025-06-18`, `2025-03-26`, and `2024-11-05`) and exposed through two transports:
+The MCP server is implemented by [`src/shared/mcpReportProtocol.js`](../src/shared/mcpReportProtocol.js) (supporting MCP protocol versions `2025-06-18`, `2025-03-26`, and `2024-11-05`) and exposed through two transports:
 
-1. **Streamable HTTP MCP** built into the Node Hub at `POST /api/mcp` (requires `Authorization: Bearer <secret>` or `X-Token-Monitor-Secret: <secret>` when a Hub secret is configured).
+1. **Streamable HTTP MCP** built into the Node Hub (and Desktop Host Mode / Desktop `local` mode loopback bridge on `127.0.0.1:<port>`, default `17322`) at `POST /api/mcp` (requires `Authorization: Bearer <secret>` or `X-Token-Monitor-Secret: <secret>` when a secret is configured).
 2. **Stdio MCP Server** via `node src/mcp/server.js` (or `npm run mcp`), supporting both **Hub HTTP API mode** (`--hub-url` / `TOKEN_MONITOR_HUB_URL`, `--secret` / `TOKEN_MONITOR_SECRET`) and **Local Store direct mode** (`--data-file` / `TOKEN_MONITOR_DATA_FILE`, `--reports-dir` / `TOKEN_MONITOR_REPORTS_DIR`, or `--local`) for reading Hub JSON files directly from disk without a running HTTP server.
 
-### Exposed Tools
+### Exposed Tools (17 total)
 
 | Tool | Arguments | Description |
 | --- | --- | --- |
@@ -187,18 +187,35 @@ The MCP report server is implemented by [`src/shared/mcpReportProtocol.js`](../s
 | `analyze_project_usage` | `granularity?` (default `weekly`), `periodKey?`, `project?` (name or canonical key filter), `limit?` (integer `>= 1`) | Returns ranked project shares, dominant client/model per project, top-1/top-3 concentration metrics, period comparison, and signals. |
 | `get_realtime_usage_and_limits` | `thirdPartyOnly?` (boolean), `maxProviders?` (1..100) | Fetches live today/month/all-time tokens, active devices, and sanitized provider & third-party API quota balances (New API, Sub2API, Custom). |
 | `analyze_report_with_ai` | `granularity?`, `periodKey?`, `question?`, `language?`, `refresh?` | Invokes the configured third-party AI API (`openai-compatible` / `anthropic-messages`) on the report + live quotas, or answers a custom question. |
-| `push_report_to_openclaw` | `granularity?`, `periodKey?`, `includeAi?`, `includeLimits?`, `question?` | Formats a WeChat-ready digest and sends it via OpenClaw Gateway Webhook (`/hooks/agent`, `/hooks/wake`, or generic webhook). |
+| `push_report_to_openclaw` | `granularity?`, `periodKey?`, `includeAi?`, `includeLimits?`, `question?` | Formats a WeChat-ready report digest and sends it via OpenClaw Gateway Webhook (`/hooks/agent`, `/hooks/wake`, or generic webhook). |
+| `query_usage_breakdown` | `period?` (`today` \| `month` \| `week` \| `last7` \| `last30` \| `allTime`), `groupBy?` (`summary` \| `model` \| `client` \| `project` \| `device`), `deviceId?`, `limit?` | Queries live and history-backed token/cost breakdowns, cache hit rate, and duration-weighted output speed across any period and grouping. |
+| `list_sessions` | `period?` (`today` \| `month` \| `allTime`), `state?` (`running` \| `waiting` \| `ended` \| `idle` \| `all`), `client?`, `project?`, `deviceId?`, `search?`, `sort?` (`lastUsedAt` \| `totalTokens` \| `costUsd`), `sortDirection?`, `limit?`, `cursor?` | Lists and filters sessions with live activity state, context window remaining, prompt cache TTL, model, and parent/kind metadata. Strips titles when `sessionTitlesEnabled` is false. |
+| `get_session_detail` | `client` (**required**), `sessionId` (**required**), `deviceId?`, `period?`, `includeConversation?`, `limit?`, `offset?` | Fetches per-turn prompt/tool detail and optional conversation text for one session. Enforces `openclaw.queryPermissions.allowSessionDetail` and `allowConversationText` (and `sessionTitlesEnabled`). |
+| `get_usage_history` | `resolution?` (`daily` \| `monthly` \| `summary`), `from?`, `to?`, `groupBy?` (`none` \| `client` \| `model`), `limit?` | Queries historical daily/monthly series, active days, current/longest streaks, peak day, and client/model breakdowns. |
+| `get_devices_and_health` | `deviceId?`, `includeDiagnostics?` (boolean) | Returns connected devices, OS/runtime info, freshness, `trackedClients`, sanitized `clientHealth` diagnostics (no filesystem paths or stderr), and `wslStatus`. |
+| `get_limits_history` | `thirdPartyOnly?`, `provider?`, `status?`, `includeHistory?`, `accountKey?`, `windowName?`, `hours?`, `maxProviders?` | Returns current provider/third-party quota balances with reset countdowns, plus optional quota history samples when available (emails/credentials redacted). |
+| `get_subscriptions_and_forecasts` | `date?` (`YYYY-MM-DD`), `includeForecasts?`, `activeOnly?` | Returns active subscriptions, monthly normalized USD spend, renewal countdowns, and top-up burn/exhaustion forecasts. |
+| `get_live_token_rate` | `deviceId?` | Returns real-time output speed (`tok/s`), burn rate (`$/h`), and period throughput fallback. |
+| `get_service_status_and_approvals` | `includeResetForecast?`, `includeApprovals?`, `provider?`, `force?` | Returns upstream AI service status, Codex reset forecast, and current pending Desktop approval alerts (marking Desktop-only sources unavailable on headless Hub). |
+| `push_to_openclaw` | `type?` (`report` \| `usage` \| `sessions` \| `session_detail` \| `limits` \| `subscriptions` \| `service_status` \| `test` \| `custom`), `params?`, `includeAi?`, `includeLimits?`, `customMessage?`, `title?`, `idempotencyKey?` | Formats and pushes any report, query digest, connectivity test, or custom message to OpenClaw for WeChat delivery. |
 
-### Exposed Resources
+### Exposed Resources (9 static + 1 template)
 
-- Static resources (`application/json`):
+- Static report resources (`application/json`):
   - `report://latest/daily`
   - `report://latest/weekly`
   - `report://latest/monthly`
+- Static live query resources (`application/json`):
+  - `usage://today` — Today's usage summary & model/client/project breakdown
+  - `sessions://active` — Currently `running` / `waiting` sessions (titles stripped when disabled)
+  - `limits://current` — Sanitized provider & third-party API quota overview
+  - `devices://health` — Device freshness, `clientHealth` diagnostics, and `wslStatus`
+  - `subscriptions://summary` — Active subscriptions, monthly spend, and top-up exhaustion forecasts
+  - `service-status://current` — Upstream AI service status, Codex reset forecast, and pending approvals
 - Resource template:
   - `report://{granularity}/{periodKey}` — reads any `daily`, `weekly`, or `monthly` period as JSON, or append `?format=markdown` (e.g. `report://weekly/2026-W47?format=markdown`) for `text/markdown`.
 
-### Exposed Prompts
+### Exposed Prompts (8 total)
 
 | Prompt | Arguments | Purpose |
 | --- | --- | --- |
@@ -207,6 +224,9 @@ The MCP report server is implemented by [`src/shared/mcpReportProtocol.js`](../s
 | `analyze-monthly-report` | `periodKey?` (`YYYY-MM` or `latest`) | Review monthly cost trends, model mix, and project share. |
 | `project-deep-dive` | `project` (**required**), `granularity?`, `periodKey?` | Deep-dive analysis of one project's token share, cost, client/model mix, and signals. |
 | `wechat-digest` | `granularity?`, `periodKey?` | Generate a compact WeChat-ready digest combining usage, projects, and third-party API quotas. |
+| `session-summary` | `client?`, `sessionId?`, `period?` | Summarize active/recent sessions or inspect one session's turns and efficiency (respecting privacy gates). |
+| `quota-check` | `thirdPartyOnly?` (`true` \| `false`), `provider?` | Review tight quotas, reset countdowns, third-party balances, and top-up burn forecasts. |
+| `daily-standup-usage` | `date?` (`YYYY-MM-DD`) | Prepare a concise daily standup summary covering yesterday/today usage, active sessions, and anomalies. |
 
 For third-party AI report analysis and OpenClaw WeChat integration setup, see [the OpenClaw & WeChat guide](openclaw-wechat.md) and the bundled skill under [`skills/openclaw-token-monitor/`](../skills/openclaw-token-monitor/SKILL.md).
 
@@ -326,9 +346,9 @@ Stdio alternative:
 }
 ```
 
-### Local direct mode (`--data-file` / `--reports-dir`)
+### Local direct mode (`--local` / `--data-file` / `--reports-dir`)
 
-When the Hub HTTP server is not running (or when reading a desktop app's `hub-devices.json` and `reports` directory directly from disk), pass `--data-file` and `--reports-dir` to `src/mcp/server.js`:
+When the Hub HTTP server is not running (or when reading a desktop app's `hub-devices.json` and `reports` directory directly from disk), pass `--local` (or `--data-file` and `--reports-dir`) to `src/mcp/server.js`:
 
 ```json
 {
@@ -337,6 +357,7 @@ When the Hub HTTP server is not running (or when reading a desktop app's `hub-de
       "command": "node",
       "args": [
         "/path/to/token-monitor/src/mcp/server.js",
+        "--local",
         "--data-file",
         "/path/to/token-monitor/data/devices.json",
         "--reports-dir",
@@ -347,7 +368,7 @@ When the Hub HTTP server is not running (or when reading a desktop app's `hub-de
 }
 ```
 
-You can also use environment variables `TOKEN_MONITOR_DATA_FILE` and `TOKEN_MONITOR_REPORTS_DIR` (or `--local`).
+You can also use environment variables `TOKEN_MONITOR_DATA_FILE` and `TOKEN_MONITOR_REPORTS_DIR`. In `--local` mode, the stdio server uses [`src/shared/openclawQueries.js`](../src/shared/openclawQueries.js) directly against `devices.json` and `daily-snapshots.json` so `query_usage_breakdown`, `list_sessions`, `get_usage_history`, `get_devices_and_health`, `get_limits_history` (current snapshot), `get_subscriptions_and_forecasts`, `get_live_token_rate` (period throughput fallback), and the 6 live `usage://` / `sessions://` / `limits://` / `devices://` / `subscriptions://` resources work offline without a running Hub. Desktop-only capabilities (`get_session_detail`, SQLite quota history, upstream service status, third-party AI analysis, and OpenClaw webhook pushes) require Desktop Host Mode, the Desktop Local Loopback Bridge, or a configured Main Hub.
 
 ### Direct HTTP MCP (`POST /api/mcp`)
 
