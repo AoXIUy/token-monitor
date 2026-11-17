@@ -12,15 +12,18 @@
 ### Improved
 - **Desktop Context Enrichment & Safeguards:** Enriched `local` and `host` queries with local SQLite quota history, live session output rates, and approval status, backed by idempotency deduplication, in-flight coalescing, email/secret redaction, and prototype-safe query aggregation.
 
+### Fixed
+- **MCP Stdio Startup Compatibility:** Lazy-loaded SQLite-backed session detail and conversation readers in `src/mcp/server.js` so Node 22 MCP stdio startup stays warning-free without emitting experimental SQLite stderr noise.
+
 ### Notes
 - **Core Capabilities:** Continues to provide Android online conversations, session output rates, read-only approval alerts, third-party AI report analysis, OpenClaw WeChat QR login, and multi-device usage/project reports.
 <!-- app-update-notes:en:end -->
 ## Download
 
-- **Windows Installer** — [Token-Monitor-Setup-0.98.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-Setup-0.98.0.exe) (recommended)
-- **Windows Portable** — [Token-Monitor-0.98.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-0.98.0.exe) (no install required)
-- **Linux amd64** — [Token-Monitor-0.98.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-0.98.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.98.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-0.98.0-x86_64.AppImage)
+- **Windows Installer** — [Token-Monitor-Setup-0.98.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-Setup-0.98.1.exe) (recommended)
+- **Windows Portable** — [Token-Monitor-0.98.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-0.98.1.exe) (no install required)
+- **Linux amd64** — [Token-Monitor-0.98.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-0.98.1-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.98.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-0.98.1-x86_64.AppImage)
 
 <details>
 <summary><strong>First launch and other notes</strong></summary>
@@ -29,7 +32,7 @@
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.98.0-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.98.0-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.98.1-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.98.1-x86_64.AppImage` then run it.
 
 ### Other notes
 
@@ -50,12 +53,15 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 <!-- app-update-notes:zh:start -->
 ### 新增
 - **OpenClaw 实时事件主动推送：** 支持会话轮次结束自动推送（含消抖稳定等待、子智能体/后台审查过滤与会话标题脱敏开关）、Codex / Antigravity 待处理审批提醒、额度低水位/恢复告警、AI 服务异常通告以及周期归档/手动简报。
-- **扩展数据查询层、Hub 接口与 MCP 工具集：** 新增受权限约束的统一查询与 `/api/query/*`、`POST /api/integrations/openclaw/push`、`GET /api/integrations/openclaw/history` 路由，将 MCP 扩展至 17 个工具、9 个静态资源、1 个资源模板与 8 个提示词，并实现 `--local` 本地模式全量对齐。
+- **扩展数据查询层、Hub 接口与 MCP 工具集：** 新增受权限约束的统一查询与 `/api/query/*`、`POST /api/integrations/openclaw/push`、`GET /api/integrations/openclaw/history` 路由，将 MCP 扩展至 17 个工具、9 个静态资源、1 个资源模板与 8 个提示词，并支持 `--local` 本地模式全量对齐。
 - **桌面端 `local` 模式与本机回环桥接：** 在单机 `local` 模式下直接开放 OpenClaw 配置保存、测试推送与实时事件监听，并提供可选的 `127.0.0.1` 回环 HTTP/MCP 桥接（Bearer 密钥隔离存储在 `CredentialStore`，支持一键复制接入配置与重置密钥）。
 - **OpenClaw Skill CLI 与桌面端控制台：** 扩展 `skills/openclaw-token-monitor/` 查询与推送子命令（`usage`、`sessions`、`session-detail`、`history`、`devices`、`limits`、`subscriptions`、`live-rate`、`service-status`、`approvals`、`push`、`push-history`），并在设置页与主界面/会话详情增加事件矩阵、最近推送记录和快捷推送按钮。
 
 ### 改进
 - **桌面实时上下文增强与安全加固：** 在 `local` 和 `host` 模式下自动注入本地 SQLite 额度历史、实时会话吞吐与审批状态，配合幂等去重、并发合并、敏感词/邮箱脱敏及防原型污染聚合提升可靠性。
+
+### 修复
+- **MCP Stdio 启动兼容性：** 在 `src/mcp/server.js` 中改为按需延迟加载基于 SQLite 的会话详情/对话读取器，避免 Node 22 下 MCP stdio 启动阶段向 `stderr` 输出实验性 SQLite 警告。
 
 ### 说明
 - **既有功能保持：** 持续支持安卓在线对话、实时会话输出速率、只读审批提醒、第三方 AI 报告分析、OpenClaw 微信扫码登录以及多设备用量与项目报告。
@@ -63,10 +69,10 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 ## 下载
 
-- **Windows 安装版** — [Token-Monitor-Setup-0.98.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-Setup-0.98.0.exe)（推荐）
-- **Windows 便携版** — [Token-Monitor-0.98.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-0.98.0.exe)（免安装）
-- **Linux amd64** — [Token-Monitor-0.98.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-0.98.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.98.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-0.98.0-x86_64.AppImage)
+- **Windows 安装版** — [Token-Monitor-Setup-0.98.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-Setup-0.98.1.exe)（推荐）
+- **Windows 便携版** — [Token-Monitor-0.98.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-0.98.1.exe)（免安装）
+- **Linux amd64** — [Token-Monitor-0.98.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-0.98.1-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.98.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-0.98.1-x86_64.AppImage)
 
 <details>
 <summary><strong>首次启动与其他说明</strong></summary>
@@ -75,7 +81,7 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.98.0-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.98.0-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.98.1-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.98.1-x86_64.AppImage` then run it.
 
 ### 其他说明
 
@@ -90,7 +96,7 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ---
 
 <details>
-<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.97.2...v0.98.0">v0.97.2...v0.98.0</a></summary>
+<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.97.2...v0.98.1">v0.97.2...v0.98.1</a></summary>
 
 <!-- github-generated-release-notes -->
 
@@ -116,16 +122,19 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ### 改進
 - **桌面即時上下文增強與安全防護：** 在 `local` 與 `host` 模式自動注入本機 SQLite 額度歷史、即時工作階段輸出速率與審批狀態，搭配冪等去重、併發合併、敏感資訊/電子郵件遮罩與防原型污染聚合提升穩定性。
 
+### 修復
+- **MCP Stdio 啟動相容性：** 在 `src/mcp/server.js` 中改為按需延遲載入基於 SQLite 的工作階段詳情/對話讀取器，避免 Node 22 下 MCP stdio 啟動階段向 `stderr` 輸出實驗性 SQLite 警告。
+
 ### 說明
 - **既有功能維持：** 持續提供 Android 線上對話、即時工作階段輸出速率、唯讀審批提醒、第三方 AI 報告分析、OpenClaw 微信掃碼登入以及多裝置用量與專案報告。
 <!-- app-update-notes:zh-TW:end -->
 
 ## 下載
 
-- **Windows 安裝版** — [Token-Monitor-Setup-0.98.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-Setup-0.98.0.exe)（推薦）
-- **Windows 便攜版** — [Token-Monitor-0.98.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-0.98.0.exe)（免安裝）
-- **Linux amd64** — [Token-Monitor-0.98.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-0.98.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.98.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-0.98.0-x86_64.AppImage)
+- **Windows 安裝版** — [Token-Monitor-Setup-0.98.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-Setup-0.98.1.exe)（推薦）
+- **Windows 便攜版** — [Token-Monitor-0.98.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-0.98.1.exe)（免安裝）
+- **Linux amd64** — [Token-Monitor-0.98.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-0.98.1-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.98.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-0.98.1-x86_64.AppImage)
 
 </details>
 
@@ -146,16 +155,19 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ### 개선
 - **데스크톱 컨텍스트 보강 및 안정화:** `local` 및 `host` 모드 조회에 로컬 SQLite 할당량 이력, 실시간 세션 출력 속도, 승인 상태를 통합하고 멱등성 중복 제거, 동시 요청 병합, 민감 정보/이메일 마스킹 및 프로토타입 안전 집계를 적용했습니다.
 
+### 수정
+- **MCP Stdio 시작 호환성:** `src/mcp/server.js`에서 SQLite 기반 세션 상세/대화 로더를 조회 시점에 지연 로드하여 Node 22 환경에서 MCP stdio 시작 시 `stderr`로 실험적 SQLite 경고가 출력되지 않도록 수정했습니다.
+
 ### 참고
 - **기존 기능 유지:** Android 온라인 대화, 세션 출력 속도, 읽기 전용 승인 알림, 서드파티 AI 보고서 분석, OpenClaw 위챗 QR 로그인 및 다중 기기 사용량/프로젝트 보고서를 계속 제공합니다.
 <!-- app-update-notes:ko:end -->
 
 ## 다운로드
 
-- **Windows 설치 버전** — [Token-Monitor-Setup-0.98.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-Setup-0.98.0.exe) (권장)
-- **Windows 포터블 버전** — [Token-Monitor-0.98.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-0.98.0.exe) (설치 필요 없음)
-- **Linux amd64** — [Token-Monitor-0.98.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-0.98.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.98.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-0.98.0-x86_64.AppImage)
+- **Windows 설치 버전** — [Token-Monitor-Setup-0.98.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-Setup-0.98.1.exe) (권장)
+- **Windows 포터블 버전** — [Token-Monitor-0.98.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-0.98.1.exe) (설치 필요 없음)
+- **Linux amd64** — [Token-Monitor-0.98.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-0.98.1-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.98.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-0.98.1-x86_64.AppImage)
 
 </details>
 
@@ -176,16 +188,19 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ### 改善
 - **デスクトップ文脈統合と信頼性向上:** `local` および `host` モードのクエリにローカル SQLite クォータ履歴・リアルタイムセッション速度・承認状況を統合し、冪等性重複排除、並列送信統合、秘匿情報/メールマスク、プロトタイプ汚染対策を実施しました。
 
+### 修正
+- **MCP Stdio 起動時の互換性:** `src/mcp/server.js` で SQLite ベースのセッション詳細/会話リーダーを必要時に遅延読み込みするよう変更し、Node 22 環境での MCP stdio 起動時に `stderr` へ実験的 SQLite 警告が出力されないようにしました。
+
 ### 注意
 - **既存機能の継続提供:** Android 向けオンライン会話、セッション出力速度、承認通知、サードパーティ AI レポート分析、OpenClaw WeChat QR ログイン、マルチデバイス使用量/プロジェクトレポートを引き続き提供します。
 <!-- app-update-notes:ja:end -->
 
 ## ダウンロード
 
-- **Windows インストーラー** — [Token-Monitor-Setup-0.98.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-Setup-0.98.0.exe)（推奨）
-- **Windows ポータブル版** — [Token-Monitor-0.98.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-0.98.0.exe)（インストール不要）
-- **Linux amd64** — [Token-Monitor-0.98.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-0.98.0-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.98.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.0/Token-Monitor-0.98.0-x86_64.AppImage)
+- **Windows インストーラー** — [Token-Monitor-Setup-0.98.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-Setup-0.98.1.exe)（推奨）
+- **Windows ポータブル版** — [Token-Monitor-0.98.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-0.98.1.exe)（インストール不要）
+- **Linux amd64** — [Token-Monitor-0.98.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-0.98.1-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.98.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.1/Token-Monitor-0.98.1-x86_64.AppImage)
 
 </details>
 
