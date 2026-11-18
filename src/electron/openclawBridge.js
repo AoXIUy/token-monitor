@@ -16,9 +16,11 @@ const {
   formatOpenClawServiceIncidentMessage,
   formatOpenClawSessionCompletedMessage,
   invokeThirdPartyAiAnalysis,
+  looksSensitiveDisplayText,
   mergeOpenClawIntegrationConfig,
   normalizeAiIntegrationConfig,
-  normalizeOpenClawIntegrationConfig
+  normalizeOpenClawIntegrationConfig,
+  safeAccountDisplayLabel
 } = require('../shared/aiReportAnalyzer');
 const { readRegularFileNoFollow, writePrivateJsonAtomic } = require('../shared/credentialStore');
 const { LIMIT_PROVIDER_LABELS } = require('../shared/limits/providers');
@@ -171,6 +173,16 @@ function stripEmailFromIdentifier(value) {
 }
 
 /**
+ * @param {any} value
+ * @returns {string}
+ */
+function sanitizeQuotaDisplayField(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text || looksSensitiveDisplayText(text)) return '';
+  return text;
+}
+
+/**
  * @param {any} stats
  * @returns {any[]}
  */
@@ -185,9 +197,19 @@ function extractQuotaRowsFromStats(stats) {
       : (typeof p.accountId === 'string' ? p.accountId.trim() : '');
     const provider = typeof p.provider === 'string' ? p.provider.trim() : '';
     const rawWindows = Array.isArray(p.windows) ? p.windows : [];
+    const accountLabel = sanitizeQuotaDisplayField(p.accountLabel);
+    const profileName = sanitizeQuotaDisplayField(p.profileName);
+    const accountName = sanitizeQuotaDisplayField(p.accountName);
+    const planLabel = sanitizeQuotaDisplayField(p.planLabel);
+    const label = sanitizeQuotaDisplayField(p.label);
     rows.push({
       identityAvailable: Boolean(accountId),
       accountId,
+      ...(accountLabel ? { accountLabel } : {}),
+      ...(profileName ? { profileName } : {}),
+      ...(accountName ? { accountName } : {}),
+      ...(planLabel ? { planLabel } : {}),
+      ...(label ? { label } : {}),
       provider,
       providerLabel: resolveProviderLabel(provider),
       status: p.status || 'unknown',
@@ -829,16 +851,41 @@ function createOpenClawBridge({
     quotaObservations = nextObservations;
     saveQuotaState(nextPolicy);
 
+    const rowMetadataByKey = new Map();
+    for (const row of rows) {
+      if (!row.provider || !row.accountId) continue;
+      const metaKey = `${row.provider}\0${row.accountId}`;
+      const existing = rowMetadataByKey.get(metaKey) || {};
+      rowMetadataByKey.set(metaKey, {
+        accountLabel: existing.accountLabel || row.accountLabel || '',
+        profileName: existing.profileName || row.profileName || '',
+        accountName: existing.accountName || row.accountName || '',
+        planLabel: existing.planLabel || row.planLabel || '',
+        label: existing.label || row.label || ''
+      });
+    }
+
     const triggered = Array.isArray(evalResult?.triggered) ? evalResult.triggered : [];
     const notifications = triggered.filter((item) => (item.event === 'low' ? true : notifyRecovery));
     for (const alert of notifications) {
       const sanitizedAccountId = stripEmailFromIdentifier(alert.accountId);
+      const rowMeta = rowMetadataByKey.get(`${String(alert.provider || '')}\0${String(alert.accountId || '')}`) || {};
+      /** @type {Record<string, any>} */
       const safeAlert = {
+        ...(rowMeta.accountLabel ? { accountLabel: rowMeta.accountLabel } : {}),
+        ...(rowMeta.profileName ? { profileName: rowMeta.profileName } : {}),
+        ...(rowMeta.accountName ? { accountName: rowMeta.accountName } : {}),
+        ...(rowMeta.planLabel ? { planLabel: rowMeta.planLabel } : {}),
+        ...(rowMeta.label ? { label: rowMeta.label } : {}),
         ...alert,
         key: `${String(alert.provider || '')}:${sanitizedAccountId || 'account'}`,
         accountId: sanitizedAccountId,
         thresholdPercent: threshold
       };
+      const accountDisplay = safeAccountDisplayLabel(safeAlert);
+      if (accountDisplay) {
+        safeAlert.accountDisplay = accountDisplay;
+      }
       const text = formatOpenClawQuotaAlertMessage(safeAlert);
       const obsTime = quotaObservations.get(alert.key)?.latestAt || now();
       const idempotencyKey = `quota:${crypto

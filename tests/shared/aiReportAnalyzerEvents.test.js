@@ -427,6 +427,29 @@ test('formatOpenClawQuotaAlertMessage handles low/restored/full alerts and never
 
   const bounded = formatOpenClawQuotaAlertMessage({ providerLabel: 'P', message: 'm'.repeat(500) }, { maxChars: 100 });
   assert.ok(bounded.length <= 100);
+
+  const shaOnlyMsg = formatOpenClawQuotaAlertMessage({
+    event: 'full',
+    provider: 'antigravity',
+    providerLabel: 'Antigravity',
+    accountId: 'sha256:976a21636ecb3502994f835b68eab4cbb467cfb2a30233d3c1bce8424f280e62',
+    remainingPercent: 100,
+    thresholdPercent: 20
+  });
+  assert.match(shaOnlyMsg, /账号 #976a21/);
+  assert.equal(shaOnlyMsg.includes('sha256:'), false);
+
+  const labeledShaMsg = formatOpenClawQuotaAlertMessage({
+    event: 'low',
+    provider: 'codex',
+    providerLabel: 'Codex',
+    accountId: 'sha256:210ad479f29cebbb91f50f5ca522c3552798b7288c9d9bb97799aa5a81fd508b',
+    accountLabel: 'Plus',
+    remainingPercent: 16,
+    thresholdPercent: 20
+  });
+  assert.match(labeledShaMsg, /账号 Plus/);
+  assert.equal(labeledShaMsg.includes('sha256:'), false);
 });
 
 test('formatOpenClawServiceIncidentMessage formats outages and recoveries safely', () => {

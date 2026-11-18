@@ -618,6 +618,66 @@ test('quota alerts and service incidents detect transitions silently from baseli
     assert.equal(posted[3].payload.incident.status, 'operational');
 
     assert.ok(fs.existsSync(path.join(dir, 'openclaw-quota-state.json')));
+
+    // 4. Preserves human-readable accountLabel and shortens opaque sha256 accountKey in quota alerts
+    nowMs += 60_000;
+    const labeledStats = makeStatsSnapshot({
+      nowMs,
+      limitsProviders: [
+        {
+          provider: 'codex',
+          accountKey: 'sha256:210ad479f29cebbb91f50f5ca522c3552798b7288c9d9bb97799aa5a81fd508b',
+          accountLabel: 'Plus',
+          accountEmail: 'sensitive.user@example.com',
+          status: 'ok',
+          updatedAt: new Date(nowMs).toISOString(),
+          windows: [{ kind: 'session', label: 'Session', remainingPercent: 50, resetsAt: new Date(nowMs + 3_600_000).toISOString() }]
+        },
+        {
+          provider: 'antigravity',
+          accountKey: 'sha256:976a21636ecb3502994f835b68eab4cbb467cfb2a30233d3c1bce8424f280e62',
+          status: 'ok',
+          updatedAt: new Date(nowMs).toISOString(),
+          windows: [{ kind: 'session', label: 'Session', remainingPercent: 50, resetsAt: new Date(nowMs + 3_600_000).toISOString() }]
+        }
+      ]
+    });
+    const extracted = extractQuotaRowsFromStats(labeledStats);
+    assert.equal(extracted[0].accountLabel, 'Plus');
+    bridge.onStats(labeledStats);
+    await bridge.flush();
+
+    nowMs += 60_000;
+    bridge.onStats(makeStatsSnapshot({
+      nowMs,
+      limitsProviders: [
+        {
+          provider: 'codex',
+          accountKey: 'sha256:210ad479f29cebbb91f50f5ca522c3552798b7288c9d9bb97799aa5a81fd508b',
+          accountLabel: 'Plus',
+          accountEmail: 'sensitive.user@example.com',
+          status: 'ok',
+          updatedAt: new Date(nowMs).toISOString(),
+          windows: [{ kind: 'session', label: 'Session', remainingPercent: 16, resetsAt: new Date(nowMs + 3_600_000).toISOString() }]
+        },
+        {
+          provider: 'antigravity',
+          accountKey: 'sha256:976a21636ecb3502994f835b68eab4cbb467cfb2a30233d3c1bce8424f280e62',
+          status: 'ok',
+          updatedAt: new Date(nowMs).toISOString(),
+          windows: [{ kind: 'session', label: 'Session', remainingPercent: 10, resetsAt: new Date(nowMs + 3_600_000).toISOString() }]
+        }
+      ]
+    }));
+    await bridge.flush();
+    assert.equal(posted.length, 6);
+    assert.match(posted[4].text, /Codex · 账号 Plus/);
+    assert.equal(posted[4].text.includes('sha256:'), false);
+    assert.equal(posted[4].payload.alert.accountDisplay, 'Plus');
+    assert.equal(JSON.stringify(posted[4]).includes('sensitive.user@example.com'), false);
+    assert.match(posted[5].text, /Antigravity · 账号 #976a21/);
+    assert.equal(posted[5].text.includes('sha256:'), false);
+    assert.equal(posted[5].payload.alert.accountDisplay, '#976a21');
   } finally {
     await bridge?.stop();
     fs.rmSync(dir, { recursive: true, force: true });

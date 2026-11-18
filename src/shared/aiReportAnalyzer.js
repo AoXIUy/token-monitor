@@ -1119,6 +1119,19 @@ function scrubSensitiveDigestText(value) {
 }
 
 /**
+ * Shorten opaque sha256 account identifiers to a compact 6-char fingerprint.
+ * @param {any} value
+ * @returns {string}
+ */
+function formatOpaqueAccountId(value) {
+  const clean = cleanSingleLine(value, 80);
+  if (!clean) return '';
+  const shaMatch = /^sha256:([a-f0-9]{6,64})$/iu.exec(clean);
+  if (shaMatch) return `#${shaMatch[1].slice(0, 6).toLowerCase()}`;
+  return clean;
+}
+
+/**
  * Resolve sanitized display label for a provider/account without exposing email addresses.
  * @param {any} obj
  * @param {string} [fallback]
@@ -1126,14 +1139,15 @@ function scrubSensitiveDigestText(value) {
  */
 function safeAccountDisplayLabel(obj, fallback = '') {
   if (!isPlainObject(obj)) return fallback;
-  return safeDigestLabel([
+  const label = safeDigestLabel([
     obj.accountLabel,
     obj.profileName,
     obj.accountName,
     obj.label,
     obj.planLabel,
     obj.accountId
-  ], fallback);
+  ], '');
+  return label ? formatOpaqueAccountId(label) : fallback;
 }
 
 /**
@@ -2293,11 +2307,13 @@ module.exports = {
   formatOpenClawSessionCompletedMessage,
   formatOpenClawWeChatMessage,
   invokeThirdPartyAiAnalysis,
+  looksSensitiveDisplayText,
   mergeOpenClawIntegrationConfig,
   normalizeAiIntegrationConfig,
   normalizeHttpUrl,
   normalizeOpenClawIntegrationConfig,
   resolveAiCompletionEndpoint,
   resolveOpenClawWebhookEndpoint,
+  safeAccountDisplayLabel,
   sendToOpenClawWebhook
 };
