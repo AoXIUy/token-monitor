@@ -4,19 +4,18 @@
 
 <!-- app-update-notes:en:start -->
 ### Fixed
-- **Packaged App Launch (`app.asar`):** Bundled `plugins/quota-alerts/evaluator.cjs` into `package.json -> build.files`, fixing the `Cannot find module '../../plugins/quota-alerts/evaluator.cjs'` main-process startup crash in packaged Windows and Linux builds (`0.98.1`).
-- **Packaged OpenClaw Skill Provisioning:** Bundled `skills/openclaw-token-monitor/**/*` in `package.json -> build.files` and switched `installOpenClawSkill` to read/write copies so bundled `SKILL.md` and `scripts/query-token-monitor.mjs` extract cleanly out of Electron `app.asar`.
-- **Packaging & Timer Regression Coverage:** Added automated checks confirming all relative runtime `require()` targets stay covered by `build.files` and stabilized debounce settlement polling in OpenClaw bridge and route tests.
+- **OpenClaw Quota Alert Account Labels:** Preserved non-sensitive `accountLabel`, `profileName`, `accountName`, `planLabel`, and `label` fields in `extractQuotaRowsFromStats` and `evaluateQuotaAlerts` (`src/electron/openclawBridge.js`) so quota low/recovery notifications display human-readable account labels (such as `Plus`, `Pro`, or workspace names) instead of raw `sha256:...` keys.
+- **Compact Fingerprint Fallback (`safeAccountDisplayLabel`):** Updated `safeAccountDisplayLabel` in `src/shared/aiReportAnalyzer.js` to shorten opaque `sha256:<hex>` identifiers to a 6-character `#xxxxxx` fingerprint when no descriptive label is available, while continuing to scrub emails, URLs, and credentials.
 
 ### Notes
 - **OpenClaw 0.98 Capabilities:** Includes real-time session completion, approval, quota, and service-status pushes, expanded `/api/query/*` & 17-tool MCP endpoints, and Desktop `local`-mode integration with optional `127.0.0.1` loopback HTTP/MCP bridge.
 <!-- app-update-notes:en:end -->
 ## Download
 
-- **Windows Installer** — [Token-Monitor-Setup-0.98.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-Setup-0.98.2.exe) (recommended)
-- **Windows Portable** — [Token-Monitor-0.98.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-0.98.2.exe) (no install required)
-- **Linux amd64** — [Token-Monitor-0.98.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-0.98.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.98.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-0.98.2-x86_64.AppImage)
+- **Windows Installer** — [Token-Monitor-Setup-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-Setup-0.98.3.exe) (recommended)
+- **Windows Portable** — [Token-Monitor-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3.exe) (no install required)
+- **Linux amd64** — [Token-Monitor-0.98.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.98.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-x86_64.AppImage)
 
 <details>
 <summary><strong>First launch and other notes</strong></summary>
@@ -25,7 +24,7 @@
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.98.2-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.98.2-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.98.3-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.98.3-x86_64.AppImage` then run it.
 
 ### Other notes
 
@@ -45,9 +44,8 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 <!-- app-update-notes:zh:start -->
 ### 修复
-- **打包后应用启动崩溃（`app.asar`）：** 将 `plugins/quota-alerts/evaluator.cjs` 纳入 `package.json -> build.files`，修复 `0.98.1` 打包版（Windows / Linux AppImage / `.deb`）主进程启动时报错 `Cannot find module '../../plugins/quota-alerts/evaluator.cjs'` 的问题。
-- **打包环境 OpenClaw 技能自动安装：** 将 `skills/openclaw-token-monitor/**/*` 纳入 `package.json -> build.files`，并在 `installOpenClawSkill` 中改用读写流式写入以兼容从 Electron `app.asar` 提取下发 `SKILL.md` 与 `scripts/query-token-monitor.mjs`。
-- **打包完整性与定时器稳定性防线：** 新增自动校验测试确保所有 `src/` 运行时相对 `require()` 路径均被 `build.files` 覆盖，并加固 OpenClaw 桥接与路由测试的防抖等待轮询。
+- **OpenClaw 额度通知账号显示：** 在 `extractQuotaRowsFromStats` 与 `evaluateQuotaAlerts`（`src/electron/openclawBridge.js`）中保留非敏感的 `accountLabel`、`profileName`、`accountName`、`planLabel`、`label` 字段并附带 `accountDisplay`，使额度预警与恢复通知显示人类可读的账号标签（如 `Plus`、`Pro` 或工作区名称），不再直接输出原始 `sha256:...` 哈希。
+- **匿名指纹简写回退（`safeAccountDisplayLabel`）：** 在 `src/shared/aiReportAnalyzer.js` 中将缺少可读标签时的 `sha256:<hex>` 账号标识自动缩短为 6 位 `#xxxxxx` 指纹格式，同时保持邮箱、URL 与凭据脱敏逻辑不变。
 
 ### 说明
 - **包含 0.98 全部 OpenClaw 深度联动能力：** 涵盖会话结束/审批/额度/服务异常主动推送、`/api/query/*` 统一查询与 17 工具 MCP 扩展，以及桌面端 `local` 模式解锁和可选本机 `127.0.0.1` 回环桥接。
@@ -55,10 +53,10 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 ## 下载
 
-- **Windows 安装版** — [Token-Monitor-Setup-0.98.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-Setup-0.98.2.exe)（推荐）
-- **Windows 便携版** — [Token-Monitor-0.98.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-0.98.2.exe)（免安装）
-- **Linux amd64** — [Token-Monitor-0.98.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-0.98.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.98.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-0.98.2-x86_64.AppImage)
+- **Windows 安装版** — [Token-Monitor-Setup-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-Setup-0.98.3.exe)（推荐）
+- **Windows 便携版** — [Token-Monitor-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3.exe)（免安装）
+- **Linux amd64** — [Token-Monitor-0.98.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.98.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-x86_64.AppImage)
 
 <details>
 <summary><strong>首次启动与其他说明</strong></summary>
@@ -67,7 +65,7 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.98.2-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.98.2-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.98.3-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.98.3-x86_64.AppImage` then run it.
 
 ### 其他说明
 
@@ -82,7 +80,7 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ---
 
 <details>
-<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.98.1...v0.98.2">v0.98.1...v0.98.2</a></summary>
+<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.98.2...v0.98.3">v0.98.2...v0.98.3</a></summary>
 
 <!-- github-generated-release-notes -->
 
@@ -100,9 +98,8 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 <!-- app-update-notes:zh-TW:start -->
 ### 修復
-- **打包後應用程式啟動失敗（`app.asar`）：** 將 `plugins/quota-alerts/evaluator.cjs` 納入 `package.json -> build.files`，修復 `0.98.1` 打包版主行程啟動時拋出 `Cannot find module '../../plugins/quota-alerts/evaluator.cjs'` 的錯誤。
-- **打包環境 OpenClaw 技能安裝：** 將 `skills/openclaw-token-monitor/**/*` 納入 `package.json -> build.files`，並在 `installOpenClawSkill` 改用讀寫寫入以穩定自 Electron `app.asar` 提取 `SKILL.md` 與 `scripts/query-token-monitor.mjs`。
-- **打包覆蓋與計時器穩定性測試：** 新增檢查確保所有 `src/` 相對 `require()` 皆被 `build.files` 覆蓋，並強化 OpenClaw 橋接與路由測試的消抖輪詢等待。
+- **OpenClaw 額度通知帳號顯示：** 在 `extractQuotaRowsFromStats` 與 `evaluateQuotaAlerts`（`src/electron/openclawBridge.js`）保留非敏感的 `accountLabel`、`profileName`、`accountName`、`planLabel`、`label` 欄位並附加 `accountDisplay`，讓額度預警與恢復通知顯示人類可讀的帳號標籤（如 `Plus`、`Pro` 或工作區名稱），不再直接輸出原始 `sha256:...` 雜湊。
+- **匿名指紋簡寫回退（`safeAccountDisplayLabel`）：** 在 `src/shared/aiReportAnalyzer.js` 中將缺少可讀標籤時的 `sha256:<hex>` 帳號識別碼縮短為 6 位 `#xxxxxx` 指紋格式，同時維持信箱、URL 與憑證遮罩不變。
 
 ### 說明
 - **包含 0.98 完整 OpenClaw 深度整合：** 提供即時工作階段結束/審批/額度/服務異常主動推送、`/api/query/*` 統一查詢與 17 工具 MCP 擴展，以及桌面端 `local` 模式與可選 `127.0.0.1` 迴環橋接。
@@ -110,10 +107,10 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 ## 下載
 
-- **Windows 安裝版** — [Token-Monitor-Setup-0.98.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-Setup-0.98.2.exe)（推薦）
-- **Windows 便攜版** — [Token-Monitor-0.98.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-0.98.2.exe)（免安裝）
-- **Linux amd64** — [Token-Monitor-0.98.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-0.98.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.98.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-0.98.2-x86_64.AppImage)
+- **Windows 安裝版** — [Token-Monitor-Setup-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-Setup-0.98.3.exe)（推薦）
+- **Windows 便攜版** — [Token-Monitor-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3.exe)（免安裝）
+- **Linux amd64** — [Token-Monitor-0.98.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.98.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-x86_64.AppImage)
 
 </details>
 
@@ -126,9 +123,8 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 <!-- app-update-notes:ko:start -->
 ### 수정
-- **패키지 앱 시작 오류 수정 (`app.asar`):** `package.json -> build.files`에 `plugins/quota-alerts/evaluator.cjs`를 포함하여 `0.98.1` 패키지 빌드 실행 시 메인 프로세스에서 발생하던 `Cannot find module '../../plugins/quota-alerts/evaluator.cjs'` 오류를 수정했습니다.
-- **패키지 환경 OpenClaw 스킬 설치 수정:** `skills/openclaw-token-monitor/**/*`를 `build.files`에 추가하고 `installOpenClawSkill`이 Electron `app.asar`에서 `SKILL.md`와 `scripts/query-token-monitor.mjs`를 안전하게 복사하도록 개선했습니다.
-- **패키징 검증 및 타이머 안정성 강화:** 모든 상대 `require()` 경로가 `build.files`에 포함되는지 확인하는 자동 회귀 테스트를 추가하고 OpenClaw 브리지/라우트 테스트의 디바운스 대기를 안정화했습니다.
+- **OpenClaw 할당량 알림 계정 표시 수정:** `extractQuotaRowsFromStats` 및 `evaluateQuotaAlerts`(`src/electron/openclawBridge.js`)에서 민감하지 않은 `accountLabel`, `profileName`, `accountName`, `planLabel`, `label` 필드와 `accountDisplay`를 보존해 할당량 부족·복구 알림에 원시 `sha256:...` 해시 대신 읽기 쉬운 계정 라벨(`Plus`, `Pro`, 워크스페이스 이름 등)이 표시되도록 했습니다.
+- **짧은 지문 폴백(`safeAccountDisplayLabel`):** `src/shared/aiReportAnalyzer.js`에서 설명 라벨이 없을 때 `sha256:<hex>` 식별자를 6자리 `#xxxxxx` 지문으로 축약하며, 이메일·URL·자격 증명 마스킹을 그대로 유지합니다.
 
 ### 참고
 - **0.98 OpenClaw 통합 기능 포함:** 실시간 세션 완료·승인·할당량·서비스 장애 알림 푸시, `/api/query/*` 통합 조회 및 17개 MCP 도구 확장, 데스크톱 `local` 모드와 선택형 `127.0.0.1` 루프백 브리지를 포함합니다.
@@ -136,10 +132,10 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 ## 다운로드
 
-- **Windows 설치 버전** — [Token-Monitor-Setup-0.98.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-Setup-0.98.2.exe) (권장)
-- **Windows 포터블 버전** — [Token-Monitor-0.98.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-0.98.2.exe) (설치 필요 없음)
-- **Linux amd64** — [Token-Monitor-0.98.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-0.98.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.98.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-0.98.2-x86_64.AppImage)
+- **Windows 설치 버전** — [Token-Monitor-Setup-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-Setup-0.98.3.exe) (권장)
+- **Windows 포터블 버전** — [Token-Monitor-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3.exe) (설치 필요 없음)
+- **Linux amd64** — [Token-Monitor-0.98.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.98.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-x86_64.AppImage)
 
 </details>
 
@@ -152,9 +148,8 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 <!-- app-update-notes:ja:start -->
 ### 修正
-- **パッケージ版の起動エラー修正（`app.asar`）：** `package.json -> build.files` に `plugins/quota-alerts/evaluator.cjs` を追加し、`0.98.1` パッケージ版のメインプロセス起動時に発生していた `Cannot find module '../../plugins/quota-alerts/evaluator.cjs'` エラーを修正しました。
-- **パッケージ版での OpenClaw スキル導入対応：** `skills/openclaw-token-monitor/**/*` を `build.files` に含め、`installOpenClawSkill` が Electron `app.asar` から `SKILL.md` と `scripts/query-token-monitor.mjs` を確実に展開できるよう読み書きコピーへ変更しました。
-- **パッケージ検証とタイマー安定性の強化：** `src/` 配下の全相対 `require()` が `build.files` に含まれることを検証する回帰テストを追加し、OpenClaw ブリッジ／ルートテストのデバウンス待機を安定化しました。
+- **OpenClaw クォータ通知のアカウント表示修正：** `extractQuotaRowsFromStats` および `evaluateQuotaAlerts`（`src/electron/openclawBridge.js`）で非機密の `accountLabel`・`profileName`・`accountName`・`planLabel`・`label` と `accountDisplay` を保持し、クォータ警告／復旧通知に生 `sha256:...` ハッシュではなく可読アカウントラベル（`Plus`、`Pro`、ワークスペース名など）を表示するようにしました。
+- **短縮フィンガープリントへのフォールバック（`safeAccountDisplayLabel`）：** `src/shared/aiReportAnalyzer.js` で可読ラベルがない場合に `sha256:<hex>` 識別子を 6 桁の `#xxxxxx` フィンガープリントへ短縮表示し、メール・URL・認証情報のマスク処理を維持します。
 
 ### 注意
 - **0.98 の OpenClaw 連携機能を収録：** セッション完了・承認・クォータ・サービス障害のリアルタイム通知、`/api/query/*` 統合クエリと 17 種の MCP ツール、デスクトップ `local` モードおよび任意の `127.0.0.1` ループバックブリッジを引き続き提供します。
@@ -162,10 +157,10 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 ## ダウンロード
 
-- **Windows インストーラー** — [Token-Monitor-Setup-0.98.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-Setup-0.98.2.exe)（推奨）
-- **Windows ポータブル版** — [Token-Monitor-0.98.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-0.98.2.exe)（インストール不要）
-- **Linux amd64** — [Token-Monitor-0.98.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-0.98.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.98.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.2/Token-Monitor-0.98.2-x86_64.AppImage)
+- **Windows インストーラー** — [Token-Monitor-Setup-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-Setup-0.98.3.exe)（推奨）
+- **Windows ポータブル版** — [Token-Monitor-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3.exe)（インストール不要）
+- **Linux amd64** — [Token-Monitor-0.98.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.98.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-x86_64.AppImage)
 
 </details>
 
