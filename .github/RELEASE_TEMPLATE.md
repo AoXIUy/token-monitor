@@ -3,19 +3,22 @@
 ## What's changed
 
 <!-- app-update-notes:en:start -->
-### Fixed
-- **OpenClaw Quota Alert Account Labels:** Preserved non-sensitive `accountLabel`, `profileName`, `accountName`, `planLabel`, and `label` fields in `extractQuotaRowsFromStats` and `evaluateQuotaAlerts` (`src/electron/openclawBridge.js`) so quota low/recovery notifications display human-readable account labels (such as `Plus`, `Pro`, or workspace names) instead of raw `sha256:...` keys.
-- **Compact Fingerprint Fallback (`safeAccountDisplayLabel`):** Updated `safeAccountDisplayLabel` in `src/shared/aiReportAnalyzer.js` to shorten opaque `sha256:<hex>` identifiers to a 6-character `#xxxxxx` fingerprint when no descriptive label is available, while continuing to scrub emails, URLs, and credentials.
+### Added
+- **Upstream v0.94.0 Sync & Unified Limits Presentation:** Synced [Javis603/token-monitor v0.94.0](https://github.com/Javis603/token-monitor/releases/tag/v0.94.0) (`5888563c`), including unified limit account management, cross-device `limitAccountPresentation` syncing (custom names and per-provider ordering), Alibaba Bailian CLI quota collection with China/International region separation, grouped provider/tool Settings switches, daily trend inspection, and optional exact trend token display.
+- **OpenClaw & Reports Account Display:** Updated `src/shared/aiReportAnalyzer.js`, `src/shared/openclawQueries.js`, and `src/electron/openclawBridge.js` so OpenClaw alerts, `/api/query/*`, and reports honor synced `limitAccountPresentation` custom names and Alibaba `accountSelectionKey` (`region`).
+
+### Improved
+- **Session Titles, Trend & Settings Performance:** Resolves Codex session titles from custom scan paths, aligns session context meters across widget surfaces, shows `Checking` while accounts await quota readings, avoids double-counting when untracking synced clients, prevents Linux title bar pointer freeze, and reduces main-process work on Hub usage updates.
 
 ### Notes
-- **OpenClaw 0.98 Capabilities:** Includes real-time session completion, approval, quota, and service-status pushes, expanded `/api/query/*` & 17-tool MCP endpoints, and Desktop `local`-mode integration with optional `127.0.0.1` loopback HTTP/MCP bridge.
+- **OpenClaw & Fork Capabilities:** Includes online Antigravity / Codex conversations for Android, live session output rates, optional approval alerts, real-time session/approval/quota/service-incident pushes, unified `/api/query/*` & 17-tool MCP endpoints, and Desktop `local`-mode loopback bridge.
 <!-- app-update-notes:en:end -->
 ## Download
 
-- **Windows Installer** — [Token-Monitor-Setup-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-Setup-0.98.3.exe) (recommended)
-- **Windows Portable** — [Token-Monitor-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3.exe) (no install required)
-- **Linux amd64** — [Token-Monitor-0.98.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.98.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-x86_64.AppImage)
+- **Windows Installer** — [Token-Monitor-Setup-0.99.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-Setup-0.99.0.exe) (recommended)
+- **Windows Portable** — [Token-Monitor-0.99.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-0.99.0.exe) (no install required)
+- **Linux amd64** — [Token-Monitor-0.99.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-0.99.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.99.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-0.99.0-x86_64.AppImage)
 
 <details>
 <summary><strong>First launch and other notes</strong></summary>
@@ -24,7 +27,7 @@
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.98.3-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.98.3-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.99.0-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.99.0-x86_64.AppImage` then run it.
 
 ### Other notes
 
@@ -43,20 +46,23 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 ## 更新内容
 
 <!-- app-update-notes:zh:start -->
-### 修复
-- **OpenClaw 额度通知账号显示：** 在 `extractQuotaRowsFromStats` 与 `evaluateQuotaAlerts`（`src/electron/openclawBridge.js`）中保留非敏感的 `accountLabel`、`profileName`、`accountName`、`planLabel`、`label` 字段并附带 `accountDisplay`，使额度预警与恢复通知显示人类可读的账号标签（如 `Plus`、`Pro` 或工作区名称），不再直接输出原始 `sha256:...` 哈希。
-- **匿名指纹简写回退（`safeAccountDisplayLabel`）：** 在 `src/shared/aiReportAnalyzer.js` 中将缺少可读标签时的 `sha256:<hex>` 账号标识自动缩短为 6 位 `#xxxxxx` 指纹格式，同时保持邮箱、URL 与凭据脱敏逻辑不变。
+### 新增
+- **同步上游 v0.94.0 与统一额度账户管理：** 合并 [Javis603/token-monitor v0.94.0](https://github.com/Javis603/token-monitor/releases/tag/v0.94.0)（`5888563c`），带来统一额度账户管理、跨设备同步 `limitAccountPresentation`（自定义名称与分服务商排序）、阿里云百炼 CLI 额度采集（区分中国站 / 国际站）、分组工具与额度开关、趋势图按日详情查看以及可选精确 Token 数显示。
+- **OpenClaw 与报告账号展示适配：** 更新 `src/shared/aiReportAnalyzer.js`、`src/shared/openclawQueries.js` 与 `src/electron/openclawBridge.js`，使 OpenClaw 通知、`/api/query/*` 查询与分析报告支持同步的 `limitAccountPresentation` 自定义账号名称及阿里云 `accountSelectionKey`（`region`）。
+
+### 改进
+- **会话标题、统计一致性与性能：** 支持从自定义扫描路径解析 Codex 会话标题，统一微件各视图的上下文占用条对齐，额度等待采集中显示「Checking」，修复取消跟踪同步客户端时的重复统计、Linux 标题栏右键后指针卡住问题，并降低 Hub 增量推送的主进程开销。
 
 ### 说明
-- **包含 0.98 全部 OpenClaw 深度联动能力：** 涵盖会话结束/审批/额度/服务异常主动推送、`/api/query/*` 统一查询与 17 工具 MCP 扩展，以及桌面端 `local` 模式解锁和可选本机 `127.0.0.1` 回环桥接。
+- **包含本分支全部扩展能力：** 涵盖安卓端在线对话、实时会话输出速率、可选审批提醒、实时推送、`/api/query/*` 统一查询与 17 工具 MCP 扩展、桌面端 `local` 模式支持及本机 `127.0.0.1` 回环桥接。
 <!-- app-update-notes:zh:end -->
 
 ## 下载
 
-- **Windows 安装版** — [Token-Monitor-Setup-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-Setup-0.98.3.exe)（推荐）
-- **Windows 便携版** — [Token-Monitor-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3.exe)（免安装）
-- **Linux amd64** — [Token-Monitor-0.98.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.98.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-x86_64.AppImage)
+- **Windows 安装版** — [Token-Monitor-Setup-0.99.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-Setup-0.99.0.exe)（推荐）
+- **Windows 便携版** — [Token-Monitor-0.99.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-0.99.0.exe)（免安装）
+- **Linux amd64** — [Token-Monitor-0.99.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-0.99.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.99.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-0.99.0-x86_64.AppImage)
 
 <details>
 <summary><strong>首次启动与其他说明</strong></summary>
@@ -65,7 +71,7 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.98.3-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.98.3-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.99.0-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.99.0-x86_64.AppImage` then run it.
 
 ### 其他说明
 
@@ -80,7 +86,7 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ---
 
 <details>
-<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.98.2...v0.98.3">v0.98.2...v0.98.3</a></summary>
+<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.98.3...v0.99.0">v0.98.3...v0.99.0</a></summary>
 
 <!-- github-generated-release-notes -->
 
@@ -97,20 +103,23 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ## 更新內容
 
 <!-- app-update-notes:zh-TW:start -->
-### 修復
-- **OpenClaw 額度通知帳號顯示：** 在 `extractQuotaRowsFromStats` 與 `evaluateQuotaAlerts`（`src/electron/openclawBridge.js`）保留非敏感的 `accountLabel`、`profileName`、`accountName`、`planLabel`、`label` 欄位並附加 `accountDisplay`，讓額度預警與恢復通知顯示人類可讀的帳號標籤（如 `Plus`、`Pro` 或工作區名稱），不再直接輸出原始 `sha256:...` 雜湊。
-- **匿名指紋簡寫回退（`safeAccountDisplayLabel`）：** 在 `src/shared/aiReportAnalyzer.js` 中將缺少可讀標籤時的 `sha256:<hex>` 帳號識別碼縮短為 6 位 `#xxxxxx` 指紋格式，同時維持信箱、URL 與憑證遮罩不變。
+### 新增
+- **同步上游 v0.94.0 與統一額度帳戶管理：** 合併 [Javis603/token-monitor v0.94.0](https://github.com/Javis603/token-monitor/releases/tag/v0.94.0)（`5888563c`），帶來統一額度帳戶管理、跨裝置同步 `limitAccountPresentation`（自訂名稱與依服務商排序）、阿里雲百煉 CLI 額度採集（區分中國站 / 國際站）、分組工具與額度開關、趨勢圖每日詳情檢視及可選精確 Token 數顯示。
+- **OpenClaw 與報告帳號顯示適配：** 更新 `src/shared/aiReportAnalyzer.js`、`src/shared/openclawQueries.js` 與 `src/electron/openclawBridge.js`，使 OpenClaw 通知、`/api/query/*` 查詢與分析報告支援同步的 `limitAccountPresentation` 自訂帳戶名稱及阿里雲 `accountSelectionKey`（`region`）。
+
+### 改進
+- **工作階段標題、統計一致性與效能：** 支援從自訂掃描路徑解析 Codex 工作階段標題，統一微件各檢視的上下文佔用條對齊，額度等待採集中顯示「Checking」，修正取消追蹤同步用戶端時的重複統計、Linux 標題列右鍵後指標卡住問題，並降低 Hub 增量推送的主進程負荷。
 
 ### 說明
-- **包含 0.98 完整 OpenClaw 深度整合：** 提供即時工作階段結束/審批/額度/服務異常主動推送、`/api/query/*` 統一查詢與 17 工具 MCP 擴展，以及桌面端 `local` 模式與可選 `127.0.0.1` 迴環橋接。
+- **包含本分支全部擴充能力：** 涵蓋 Android 端線上對話、即時工作階段輸出速率、可選審批提醒、即時推送、`/api/query/*` 統一查詢與 17 工具 MCP 擴充，以及桌面端 `local` 模式與本機 `127.0.0.1` 迴環橋接。
 <!-- app-update-notes:zh-TW:end -->
 
 ## 下載
 
-- **Windows 安裝版** — [Token-Monitor-Setup-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-Setup-0.98.3.exe)（推薦）
-- **Windows 便攜版** — [Token-Monitor-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3.exe)（免安裝）
-- **Linux amd64** — [Token-Monitor-0.98.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.98.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-x86_64.AppImage)
+- **Windows 安裝版** — [Token-Monitor-Setup-0.99.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-Setup-0.99.0.exe)（推薦）
+- **Windows 便攜版** — [Token-Monitor-0.99.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-0.99.0.exe)（免安裝）
+- **Linux amd64** — [Token-Monitor-0.99.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-0.99.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.99.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-0.99.0-x86_64.AppImage)
 
 </details>
 
@@ -122,20 +131,23 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ## 업데이트 내용
 
 <!-- app-update-notes:ko:start -->
-### 수정
-- **OpenClaw 할당량 알림 계정 표시 수정:** `extractQuotaRowsFromStats` 및 `evaluateQuotaAlerts`(`src/electron/openclawBridge.js`)에서 민감하지 않은 `accountLabel`, `profileName`, `accountName`, `planLabel`, `label` 필드와 `accountDisplay`를 보존해 할당량 부족·복구 알림에 원시 `sha256:...` 해시 대신 읽기 쉬운 계정 라벨(`Plus`, `Pro`, 워크스페이스 이름 등)이 표시되도록 했습니다.
-- **짧은 지문 폴백(`safeAccountDisplayLabel`):** `src/shared/aiReportAnalyzer.js`에서 설명 라벨이 없을 때 `sha256:<hex>` 식별자를 6자리 `#xxxxxx` 지문으로 축약하며, 이메일·URL·자격 증명 마스킹을 그대로 유지합니다.
+### 추가
+- **업스트림 v0.94.0 동기화 및 통합 할당량 계정 관리:** [Javis603/token-monitor v0.94.0](https://github.com/Javis603/token-monitor/releases/tag/v0.94.0)(`5888563c`)을 병합해 통합 할당량 계정 관리, 교차 기기 `limitAccountPresentation` 동기화(사용자 지정 이름 및 제공자별 정렬), Alibaba Bailian CLI 할당량 수집(중국/국제 리전 구분), 그룹화된 도구·제공자 설정 스위치, 일별 추세 상세 보기 및 정확한 추세 토큰 수 표시 옵션을 제공합니다.
+- **OpenClaw 및 보고서 계정 표시 호환성:** `src/shared/aiReportAnalyzer.js`, `src/shared/openclawQueries.js`, `src/electron/openclawBridge.js`를 업데이트해 OpenClaw 알림, `/api/query/*`, 보고서가 동기화된 `limitAccountPresentation` 이름과 Alibaba `accountSelectionKey`(`region`)를 반영하도록 했습니다.
+
+### 개선
+- **세션 제목, 통계 정확도 및 성능:** 사용자 지정 스캔 경로에서 Codex 세션 제목을 해석하고 위젯 화면 간 세션 컨텍스트 미터를 정렬했으며, 할당량 수집 대기 중 `Checking` 상태 표시, 동기화 클라이언트 추적 해제 시 중복 집계 방지, Linux 제목 표시줄 우클릭 후 포인터 멈춤 수정, Hub 업데이트 시 메인 프로세스 부하 감소를 적용했습니다.
 
 ### 참고
-- **0.98 OpenClaw 통합 기능 포함:** 실시간 세션 완료·승인·할당량·서비스 장애 알림 푸시, `/api/query/*` 통합 조회 및 17개 MCP 도구 확장, 데스크톱 `local` 모드와 선택형 `127.0.0.1` 루프백 브리지를 포함합니다.
+- **포크 확장 기능 포함:** Android 온라인 대화, 실시간 세션 출력 속도, 선택형 승인 알림, 실시간 푸시, `/api/query/*` 통합 조회 및 17개 MCP 도구 확장, 데스크톱 `local` 모드와 `127.0.0.1` 루프백 브리지를 포함합니다.
 <!-- app-update-notes:ko:end -->
 
 ## 다운로드
 
-- **Windows 설치 버전** — [Token-Monitor-Setup-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-Setup-0.98.3.exe) (권장)
-- **Windows 포터블 버전** — [Token-Monitor-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3.exe) (설치 필요 없음)
-- **Linux amd64** — [Token-Monitor-0.98.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.98.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-x86_64.AppImage)
+- **Windows 설치 버전** — [Token-Monitor-Setup-0.99.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-Setup-0.99.0.exe) (권장)
+- **Windows 포터블 버전** — [Token-Monitor-0.99.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-0.99.0.exe) (설치 필요 없음)
+- **Linux amd64** — [Token-Monitor-0.99.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-0.99.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.99.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-0.99.0-x86_64.AppImage)
 
 </details>
 
@@ -147,20 +159,23 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ## 更新内容
 
 <!-- app-update-notes:ja:start -->
-### 修正
-- **OpenClaw クォータ通知のアカウント表示修正：** `extractQuotaRowsFromStats` および `evaluateQuotaAlerts`（`src/electron/openclawBridge.js`）で非機密の `accountLabel`・`profileName`・`accountName`・`planLabel`・`label` と `accountDisplay` を保持し、クォータ警告／復旧通知に生 `sha256:...` ハッシュではなく可読アカウントラベル（`Plus`、`Pro`、ワークスペース名など）を表示するようにしました。
-- **短縮フィンガープリントへのフォールバック（`safeAccountDisplayLabel`）：** `src/shared/aiReportAnalyzer.js` で可読ラベルがない場合に `sha256:<hex>` 識別子を 6 桁の `#xxxxxx` フィンガープリントへ短縮表示し、メール・URL・認証情報のマスク処理を維持します。
+### 追加
+- **上流 v0.94.0 同期と統一クォータアカウント管理：** [Javis603/token-monitor v0.94.0](https://github.com/Javis603/token-monitor/releases/tag/v0.94.0)（`5888563c`）を取り込み、統一クォータアカウント管理、デバイス間 `limitAccountPresentation` 同期（カスタム名・プロバイダー別並び順）、Alibaba Bailian CLI クォータ取得（中国／国際リージョン分離）、設定のツール・プロバイダーグループ表示、日別トレンド詳細表示、正確なトレンドトークン数表示オプションを追加しました。
+- **OpenClaw・レポートのアカウント表示対応：** `src/shared/aiReportAnalyzer.js`、`src/shared/openclawQueries.js`、`src/electron/openclawBridge.js` を更新し、OpenClaw 通知や `/api/query/*`、レポートでも同期済み `limitAccountPresentation` のカスタム名と Alibaba の `accountSelectionKey`（`region`）を反映します。
+
+### 改善
+- **セッションタイトル・集計精度・パフォーマンス：** カスタムスキャンパスから Codex セッションタイトルを解決し、ウィジェット各画面のコンテキストメーター位置を揃え、クォータ取得待ち時に「Checking」を表示します。また、同期クライアント追跡解除時の二重カウント防止、Linux タイトルバー右クリック後のポインター停止修正、Hub 更新時のメインプロセス負荷軽減を行いました。
 
 ### 注意
-- **0.98 の OpenClaw 連携機能を収録：** セッション完了・承認・クォータ・サービス障害のリアルタイム通知、`/api/query/*` 統合クエリと 17 種の MCP ツール、デスクトップ `local` モードおよび任意の `127.0.0.1` ループバックブリッジを引き続き提供します。
+- **フォーク拡張機能を収録：** Android 向けオンライン会話閲覧、リアルタイムセッション出力レート、任意の承認通知、リアルタイムプッシュ通知、`/api/query/*` 統合クエリと 17 種の MCP ツール、デスクトップ `local` モードおよび `127.0.0.1` ループバックブリッジを含みます。
 <!-- app-update-notes:ja:end -->
 
 ## ダウンロード
 
-- **Windows インストーラー** — [Token-Monitor-Setup-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-Setup-0.98.3.exe)（推奨）
-- **Windows ポータブル版** — [Token-Monitor-0.98.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3.exe)（インストール不要）
-- **Linux amd64** — [Token-Monitor-0.98.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.98.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.98.3/Token-Monitor-0.98.3-x86_64.AppImage)
+- **Windows インストーラー** — [Token-Monitor-Setup-0.99.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-Setup-0.99.0.exe)（推奨）
+- **Windows ポータブル版** — [Token-Monitor-0.99.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-0.99.0.exe)（インストール不要）
+- **Linux amd64** — [Token-Monitor-0.99.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-0.99.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.99.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.99.0/Token-Monitor-0.99.0-x86_64.AppImage)
 
 </details>
 
