@@ -1140,6 +1140,7 @@ function formatOpaqueAccountId(value) {
 function safeAccountDisplayLabel(obj, fallback = '') {
   if (!isPlainObject(obj)) return fallback;
   const label = safeDigestLabel([
+    obj.accountDisplayName,
     obj.accountLabel,
     obj.profileName,
     obj.accountName,

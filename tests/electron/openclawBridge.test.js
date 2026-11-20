@@ -644,6 +644,12 @@ test('quota alerts and service incidents detect transitions silently from baseli
     });
     const extracted = extractQuotaRowsFromStats(labeledStats);
     assert.equal(extracted[0].accountLabel, 'Plus');
+    const customPresentation = extractQuotaRowsFromStats(labeledStats, {
+      codex: { labels: { 'sha256:210ad479f29cebbb91f50f5ca522c3552798b7288c9d9bb97799aa5a81fd508b': 'Work Codex' } },
+      antigravity: { labels: { 'sha256:976a21636ecb3502994f835b68eab4cbb467cfb2a30233d3c1bce8424f280e62': 'secret@example.com' } }
+    });
+    assert.equal(customPresentation[0].accountDisplayName, 'Work Codex');
+    assert.equal(customPresentation[1].accountDisplayName, undefined);
     bridge.onStats(labeledStats);
     await bridge.flush();
 

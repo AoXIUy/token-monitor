@@ -3405,7 +3405,7 @@ function sanitizeLimitProviderInputForSummary(row) {
   delete copy.relatedAccountKey;
   delete copy.webAccountKey;
   delete copy.accountKeyAliases;
-  for (const field of ['accountLabel', 'profileName', 'accountName', 'accountLogin', 'login', 'planLabel']) {
+  for (const field of ['accountDisplayName', 'accountLabel', 'profileName', 'accountName', 'accountLogin', 'login', 'planLabel']) {
     if (looksSensitiveLabel(copy[field])) delete copy[field];
   }
   return copy;
@@ -3484,7 +3484,9 @@ function getLimitsOverviewQuery({
     const rawWindows = Array.isArray(rawRow.windows) ? rawRow.windows : [];
     const creditsWin = rawWindows.find(balanceDisplay.isCreditsWindow) || null;
     const providerLabel = LIMIT_PROVIDER_LABELS.get(entry.provider) || entry.provider;
-    const safeLabel = looksSensitiveLabel(entry.label) ? (entry.planLabel || providerLabel) : entry.label;
+    const rawDisplayName = cleanText(rawRow.accountDisplayName, 64);
+    const accountDisplayName = rawDisplayName && !looksSensitiveLabel(rawDisplayName) ? rawDisplayName : '';
+    const safeLabel = accountDisplayName || (looksSensitiveLabel(entry.label) ? (entry.planLabel || providerLabel) : entry.label);
 
     const windows = entry.windows.map((/** @type {any} */ w, /** @type {number} */ wIdx) => {
       const rawWin = rawWindows[wIdx] || {};
@@ -3543,6 +3545,7 @@ function getLimitsOverviewQuery({
       providerLabel,
       adapterId: entry.adapterId,
       label: safeLabel,
+      ...(accountDisplayName ? { accountDisplayName } : {}),
       planLabel: entry.planLabel,
       status: entry.status,
       stale: entry.stale,

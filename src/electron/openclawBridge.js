@@ -23,6 +23,7 @@ const {
   safeAccountDisplayLabel
 } = require('../shared/aiReportAnalyzer');
 const { readRegularFileNoFollow, writePrivateJsonAtomic } = require('../shared/credentialStore');
+const { accountSelectionKey } = require('../shared/limits/accountScope');
 const { LIMIT_PROVIDER_LABELS } = require('../shared/limits/providers');
 const { limitWindowLabel } = require('../shared/limits/windowLabels');
 const { sanitizeLimitsHistoryPayload } = require('../shared/mcpReportProtocol');
@@ -184,9 +185,10 @@ function sanitizeQuotaDisplayField(value) {
 
 /**
  * @param {any} stats
+ * @param {Record<string, { labels?: Record<string, string> }> | null} [limitAccountPresentation]
  * @returns {any[]}
  */
-function extractQuotaRowsFromStats(stats) {
+function extractQuotaRowsFromStats(stats, limitAccountPresentation = null) {
   const providers = Array.isArray(stats?.limits?.providers) ? stats.limits.providers : [];
   /** @type {any[]} */
   const rows = [];
@@ -197,6 +199,16 @@ function extractQuotaRowsFromStats(stats) {
       : (typeof p.accountId === 'string' ? p.accountId.trim() : '');
     const provider = typeof p.provider === 'string' ? p.provider.trim() : '';
     const rawWindows = Array.isArray(p.windows) ? p.windows : [];
+    const selectionKey = accountSelectionKey(provider, accountId, p.region);
+    const presentationLabels = isPlainObject(limitAccountPresentation?.[provider]?.labels)
+      ? limitAccountPresentation?.[provider]?.labels
+      : null;
+    const customLabel = presentationLabels && selectionKey && Object.hasOwn(presentationLabels, selectionKey)
+      ? presentationLabels[selectionKey]
+      : undefined;
+    const accountDisplayName = sanitizeQuotaDisplayField(
+      typeof customLabel === 'string' ? customLabel : p.accountDisplayName
+    );
     const accountLabel = sanitizeQuotaDisplayField(p.accountLabel);
     const profileName = sanitizeQuotaDisplayField(p.profileName);
     const accountName = sanitizeQuotaDisplayField(p.accountName);
@@ -205,6 +217,7 @@ function extractQuotaRowsFromStats(stats) {
     rows.push({
       identityAvailable: Boolean(accountId),
       accountId,
+      ...(accountDisplayName ? { accountDisplayName } : {}),
       ...(accountLabel ? { accountLabel } : {}),
       ...(profileName ? { profileName } : {}),
       ...(accountName ? { accountName } : {}),
@@ -831,7 +844,7 @@ function createOpenClawBridge({
     if (stopped || !isActiveMonitorMode()) return;
     const { openclaw } = resolveEffectiveConfigs();
     if (openclaw.enabled !== true || openclaw.events?.quotaAlerts !== true) return;
-    const rows = extractQuotaRowsFromStats(stats);
+    const rows = extractQuotaRowsFromStats(stats, getSettings()?.limitAccountPresentation);
     if (rows.length === 0) return;
 
     loadQuotaStateIfNeeded();
@@ -857,6 +870,7 @@ function createOpenClawBridge({
       const metaKey = `${row.provider}\0${row.accountId}`;
       const existing = rowMetadataByKey.get(metaKey) || {};
       rowMetadataByKey.set(metaKey, {
+        accountDisplayName: existing.accountDisplayName || row.accountDisplayName || '',
         accountLabel: existing.accountLabel || row.accountLabel || '',
         profileName: existing.profileName || row.profileName || '',
         accountName: existing.accountName || row.accountName || '',
@@ -872,6 +886,7 @@ function createOpenClawBridge({
       const rowMeta = rowMetadataByKey.get(`${String(alert.provider || '')}\0${String(alert.accountId || '')}`) || {};
       /** @type {Record<string, any>} */
       const safeAlert = {
+        ...(rowMeta.accountDisplayName ? { accountDisplayName: rowMeta.accountDisplayName } : {}),
         ...(rowMeta.accountLabel ? { accountLabel: rowMeta.accountLabel } : {}),
         ...(rowMeta.profileName ? { profileName: rowMeta.profileName } : {}),
         ...(rowMeta.accountName ? { accountName: rowMeta.accountName } : {}),
