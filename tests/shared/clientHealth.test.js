@@ -452,6 +452,39 @@ test('TOKSCALE_CONFIG_DIR moves both self-synced caches', () => {
   }]);
 });
 
+test('clientSourceRoots forwards windowsFolders to tokscaleConfigDir for amp and antigravity', () => {
+  const homeDir = 'C:\\Users\\alice';
+  const custom = clientSourceRoots('amp,antigravity', {
+    homeDir,
+    platform: 'win32',
+    env: {},
+    windowsFolders: { roaming: 'D:\\Roaming' }
+  });
+  assert.equal(
+    custom.antigravity.find((root) => root.id === 'tokscale-antigravity-cache').dir,
+    path.join('D:\\Roaming', 'tokscale', 'antigravity-cache')
+  );
+  assert.equal(
+    custom.amp.at(-1).dir,
+    path.join('D:\\Roaming', 'tokscale', 'amp-cache', 'threads')
+  );
+
+  const fallback = clientSourceRoots('amp,antigravity', {
+    homeDir,
+    platform: 'win32',
+    env: {},
+    windowsFolders: {}
+  });
+  assert.equal(
+    fallback.antigravity.find((root) => root.id === 'tokscale-antigravity-cache').dir,
+    path.join(homeDir, 'AppData', 'Roaming', 'tokscale', 'antigravity-cache')
+  );
+  assert.equal(
+    fallback.amp.at(-1).dir,
+    path.join(homeDir, 'AppData', 'Roaming', 'tokscale', 'amp-cache', 'threads')
+  );
+});
+
 // Tokscale resolves Proma and the fork's Qoder CN from tokscale-core home_dir()
 // too, so their watch roots must follow the same redirect rather than the Win32
 // profile.
@@ -570,7 +603,7 @@ test('source observations keep exact files, optional roots and WSL health in syn
   os.homedir = () => homeDir;
   delete process.env.GEMINI_CLI_HOME;
   try {
-    const options = { homeDir, platform: process.platform, env: {}, wslDetected: ['hermes'] };
+    const options = { homeDir, platform: process.platform, env: {}, windowsFolders: {}, wslDetected: ['hermes'] };
     const dbDir = path.join(homeDir, '.zcode', 'cli', 'db');
     const capture = path.join(homeDir, '.config', 'tokscale', 'headless', 'codex');
     fs.mkdirSync(dbDir, { recursive: true });

@@ -338,7 +338,11 @@ test('a failed read-back leaves the fixed credential intact', t => {
 for (const bad of ['corrupt', 'unsupported', 'symlink']) test(`migration refuses ${bad} store without replacement`, t => {
   const store = fixture(t, values);
   const file = store.filePath;
-  if (bad === 'symlink') { fs.renameSync(file, file + '.original'); fs.symlinkSync(file + '.original', file); }
+  if (bad === 'symlink') {
+    fs.renameSync(file, file + '.original');
+    try { fs.symlinkSync(file + '.original', file); }
+    catch (error) { if (process.platform === 'win32' && error.code === 'EPERM') return t.skip('Windows symlink privilege unavailable'); throw error; }
+  }
   else fs.writeFileSync(file, bad === 'corrupt' ? '{' : '{"version":999}');
   const before = fs.readFileSync(file, 'utf8');
   assert.throws(() => migrateAccountSlots(store, {}));

@@ -250,7 +250,7 @@ function clientSourceRoots(clientsCsv, options = {}) {
   // writes; it does not create this cache during collection.
   add('amp',
     ['amp-threads', path.join(xdgHome, 'amp', 'threads')],
-    ['amp-threads', path.join(tokscaleConfigDir({ env, platform, homeDir: home }), 'amp-cache', 'threads'), null, true]);
+    ['amp-threads', path.join(tokscaleConfigDir({ env, platform, homeDir: home, windowsFolders: options.windowsFolders }), 'amp-cache', 'threads'), null, true]);
   // Droid (Factory): tokscale reads the home-relative ~/.factory/sessions tree on
   // every platform (clients.rs PathRoot::Home). The Factory desktop app is an
   // Electron shell over the same bundled droid kernel and keeps no session data
@@ -258,7 +258,7 @@ function clientSourceRoots(clientsCsv, options = {}) {
   add('droid', ...simpleHostSourceRoots('droid', home));
   // Both caches honour TOKSCALE_CONFIG_DIR. Cursor defaults to ~/.config/tokscale
   // on every platform; Antigravity uses the platform-aware tokscaleConfigDir().
-  const tokscaleConfigRoot = tokscaleConfigDir({ env, platform, homeDir: home });
+  const tokscaleConfigRoot = tokscaleConfigDir({ env, platform, homeDir: home, windowsFolders: options.windowsFolders });
   add('cursor', ['tokscale-cursor-cache', cursorCacheDir({ env, platform, homeDir: home })]);
   add('antigravity',
     ['tokscale-antigravity-cache', path.join(tokscaleConfigRoot, 'antigravity-cache')],

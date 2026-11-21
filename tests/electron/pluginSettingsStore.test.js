@@ -66,9 +66,11 @@ test('corrupt, oversized, symlinked and non-file stores fail closed; unsafe ids 
     assert.throws(() => store.save('alpha', schema, { revision: 0, values: {} })); assert.equal(fs.readFileSync(file, 'utf8'), bytes);
   }
   fs.unlinkSync(file); fs.mkdirSync(file); assert.throws(() => store.get('alpha', schema)); fs.rmdirSync(file);
-  const target = path.join(directory, 'target'); fs.writeFileSync(target, '{}'); fs.symlinkSync(target, file);
-  assert.throws(() => store.get('alpha', schema)); assert.equal(fs.readFileSync(target, 'utf8'), '{}');
   for (const id of ['../alpha', 'a/b', 'A', '']) assert.throws(() => store.get(id, schema), /invalid-plugin-id/);
+  const target = path.join(directory, 'target'); fs.writeFileSync(target, '{}');
+  try { fs.symlinkSync(target, file); }
+  catch (error) { if (process.platform === 'win32' && error.code === 'EPERM') return t.skip('Windows symlink privilege unavailable'); throw error; }
+  assert.throws(() => store.get('alpha', schema)); assert.equal(fs.readFileSync(target, 'utf8'), '{}');
 });
 
 test('quota failure keeps compatibility data untouched and explicit remove only affects one plugin', t => {

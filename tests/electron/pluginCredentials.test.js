@@ -56,7 +56,9 @@ test('corrupt files and symlinks fail closed without returning secret-bearing ca
   s.update('fixture','one',schema,{expectedRevision:0,patch:{token:'synthetic'}});
   const file=path.join(f.directory,'fixture','one.json'); fs.writeFileSync(file,'bad synthetic content');
   assert.throws(()=>s.status('fixture','one',schema),/^Error: credentials-storage-unavailable$/);
-  fs.unlinkSync(file); fs.symlinkSync(path.join(f.dir,'missing'),file);
+  fs.unlinkSync(file);
+  try { fs.symlinkSync(path.join(f.dir,'missing'),file); }
+  catch (error) { if (process.platform === 'win32' && error.code === 'EPERM') return t.skip('Windows symlink privilege unavailable'); throw error; }
   assert.throws(()=>s.update('fixture','one',schema,{expectedRevision:0,patch:{token:'replacement'}}),/credentials-storage-unavailable/);
 });
 test('failed atomic replacement preserves prior values and revision, and missing storage still notifies clear',t=>{
@@ -118,7 +120,9 @@ test('explicit forget repairs oversized/unknown-format records and unlinks only 
  fs.writeFileSync(path.join(f.directory,'fixture',names[0]),'x'.repeat(65537));
  fs.writeFileSync(path.join(f.directory,'fixture',names[1]),JSON.stringify({formatVersion:999,revision:8,values:{token:'synthetic'}}));
  const outside=path.join(f.dir,'outside.json');fs.writeFileSync(outside,'synthetic unrelated bytes');
- fs.unlinkSync(path.join(f.directory,'fixture',names[2]));fs.symlinkSync(outside,path.join(f.directory,'fixture',names[2]));
+ fs.unlinkSync(path.join(f.directory,'fixture',names[2]));
+ try { fs.symlinkSync(outside,path.join(f.directory,'fixture',names[2])); }
+ catch (error) { if (process.platform === 'win32' && error.code === 'EPERM') return t.skip('Windows symlink privilege unavailable'); throw error; }
  s.forget('fixture');
  assert.equal(fs.readFileSync(outside,'utf8'),'synthetic unrelated bytes');
  for(const name of names){const record=JSON.parse(fs.readFileSync(path.join(f.directory,'fixture',name)));assert.deepEqual(record.values,{});assert.equal(fs.lstatSync(path.join(f.directory,'fixture',name)).isSymbolicLink(),false);}

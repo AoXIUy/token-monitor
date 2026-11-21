@@ -256,11 +256,12 @@ test('compressed Codex discovery respects configured roots and bounded non-symli
   assert.equal(resolveSessionFile('codex', ID, path.join(f.home, 'other'), { env }), f.compressed);
   assert.equal(resolveSessionFile('codex', ID, path.join(f.home, 'other'), { env, useEnvRoots: false }), '');
   const root = path.join(f.codexHome, 'sessions');
-  fs.symlinkSync(f.compressed, path.join(root, 'linked.jsonl.zst'));
-  assert.equal(resolveSessionFile('codex', 'linked', f.home, { env: {} }), '');
   let dir = root;
   for (let index = 0; index < 33; index++) dir = path.join(dir, 'nested');
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'too-deep.jsonl.zst'), zlib.zstdCompressSync(Buffer.from(text)));
   assert.equal(resolveSessionFile('codex', 'too-deep', f.home, { env: {} }), '');
+  try { fs.symlinkSync(f.compressed, path.join(root, 'linked.jsonl.zst')); }
+  catch (error) { if (process.platform === 'win32' && error.code === 'EPERM') return t.skip('Windows symlink privilege unavailable'); throw error; }
+  assert.equal(resolveSessionFile('codex', 'linked', f.home, { env: {} }), '');
 });
