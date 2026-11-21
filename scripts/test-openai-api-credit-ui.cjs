@@ -47,6 +47,8 @@ function defaults() {
     ...require('../src/electron/syncUploadScheduler'), ...require('../src/electron/syncContentRuntime'),
     ...require('../src/electron/renderer/viewDisplayPreferences'), ...require('../src/electron/renderer/homeModulePreferences'),
     ...require('../src/electron/limits/accountSettings'),
+    ...require('../src/shared/aiReportAnalyzer'),
+    normalizeAntigravityMatcher: require('../src/shared/approvalHooks').normalizeAntigravityMatcher,
     fontSettingsApi: require('../src/shared/fontSettings'), pluginPlacements: require('../src/shared/plugins/placements'),
     normalizeHistoryIntervalMs: () => 60000, defaultDeviceId: () => 'fixture', defaultLimitProviderOrder: () => ''
   });

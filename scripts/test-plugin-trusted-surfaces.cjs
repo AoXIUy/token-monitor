@@ -22,6 +22,10 @@ app.on('window-all-closed', () => {});
 const windows = new Map(), payloads = new Map(), errors = [];
 let runtime;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function captureWindow(win) {
+  await win.webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
+  return win.webContents.capturePage();
+}
 const deadline = setTimeout(() => { console.error('Surface fixture deadline'); app.exit(1); }, 90000);
 async function wait(win, source, label) {
   for (let i = 0; i < 150; i++) { if (await win.webContents.executeJavaScript(source)) return; await pause(40); }
@@ -98,7 +102,7 @@ app.whenReady().then(async () => {
     }
     await wait(win, 'state.payload !== null', `${kind} native renderer`);
     await pause(100);
-    fs.writeFileSync(path.join(evidence, `${kind}-native.png`), (await win.webContents.capturePage()).toPNG());
+    fs.writeFileSync(path.join(evidence, `${kind}-native.png`), (await captureWindow(win)).toPNG());
   }
   assert.equal(runtime.manager.backendCount(), 0);
   if (process.env.TM_DOM_REGRESSION === '1') {
@@ -121,7 +125,7 @@ app.whenReady().then(async () => {
       await wait(win, kind === 'bubble' ? "state.payload.cell.kind === 'provider' && Boolean(document.querySelector('.limit-detail-tooltip-trigger'))" : "state.payload.cells.some(cell=>cell.kind==='provider')", `${kind} quota payload`);
       await pause(150);
       console.log(await win.webContents.executeJavaScript(fs.readFileSync(path.join(root, 'tests/fixtures/quota-dom-regression.cjs'), 'utf8')));
-      fs.writeFileSync(path.join(evidence, `${kind}-dom-quotas.png`), (await win.webContents.capturePage()).toPNG());
+      fs.writeFileSync(path.join(evidence, `${kind}-dom-quotas.png`), (await captureWindow(win)).toPNG());
     }
     assert.deepEqual(errors.filter(text => !text.includes('Electron Security Warning') && !text.includes('Autofill.')), []);
     await runtime.dispose(); clearTimeout(deadline); for (const win of windows.values()) win.destroy(); main.destroy(); app.exit(0); return;
@@ -137,7 +141,7 @@ app.whenReady().then(async () => {
     assert.equal(await win.webContents.executeJavaScript("Boolean(document.querySelector('.notch-plugin-body input'))"),false);
     assert.equal(runtime.manager.backendCount(),0);
     await pause(200);
-    fs.writeFileSync(path.join(evidence,'notch-navigation.png'),(await win.webContents.capturePage()).toPNG());
+    fs.writeFileSync(path.join(evidence,'notch-navigation.png'),(await captureWindow(win)).toPNG());
     assert.deepEqual(errors,[]);
     for(const host of BrowserWindow.getAllWindows())host.destroy();
     await runtime.dispose();clearTimeout(deadline);app.exit(0);return;
@@ -148,7 +152,7 @@ app.whenReady().then(async () => {
     await wait(win, `document.querySelector('[data-plugin-target="${target}"] input')`, `${kind} author content`);
     await pause(100);
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-plugin-target="${target}"]').previousElementSibling.hidden`), true);
-    fs.writeFileSync(path.join(evidence, `${kind}-author.png`), (await win.webContents.capturePage()).toPNG());
+    fs.writeFileSync(path.join(evidence, `${kind}-author.png`), (await captureWindow(win)).toPNG());
   }
   for (const page of ['limits','sessions','breakdown']) {
     const target = `notch.${page}.content`, win = windows.get('notch');
