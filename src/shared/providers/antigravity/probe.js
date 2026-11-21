@@ -3,13 +3,19 @@
 const { abortError } = require('../../probeDeadline');
 
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
 const https = require('node:https');
 const http = require('node:http');
+const os = require('node:os');
+const path = require('node:path');
 const { appVersion } = require('../../appVersion');
 const { errorWithStatus } = require('../../limits/providerHelpers');
+const { antigravityDataRoots } = require('./selfSync');
 
 const DEFAULT_PROBE_TIMEOUT_MS = 8000;
 const DEFAULT_RPC_TIMEOUT_MS = 12000;
+const MAX_DAEMON_FILES_PER_DIR = 256;
+const MAX_DAEMON_FILE_BYTES = 16 * 1024;
 
 function probeTimeoutError() {
   return errorWithStatus('unavailable', 'Antigravity probe timed out');
@@ -150,11 +156,70 @@ function extractFlag(flag, command) {
   return match ? match[1] : null;
 }
 
+function validPort(value) {
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n > 0 && n < 65536 ? n : null;
+}
+
 function extractPortFlag(flag, command) {
   const raw = extractFlag(flag, command);
-  if (!raw) return null;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 && n < 65536 ? n : null;
+  return raw ? validPort(raw) : null;
+}
+
+function daemonDiscoveryDirs(deps = {}) {
+  if (Array.isArray(deps.daemonDirs)) return [...new Set(deps.daemonDirs.filter(Boolean))];
+  const home = deps.homeDir || os.homedir();
+  const env = deps.env || process.env;
+  const dirs = [];
+  for (const key of ['ANTIGRAVITY_HOME', 'ANTIGRAVITY_DATA_DIR']) {
+    const value = typeof env[key] === 'string' ? env[key].trim() : '';
+    if (value) dirs.push(path.join(value, 'daemon'));
+  }
+  for (const root of antigravityDataRoots(home)) {
+    dirs.push(path.join(root, 'daemon'));
+  }
+  return [...new Set(dirs)];
+}
+
+// Antigravity 2.31+ drops `--csrf_token` from the language_server command line
+// and writes `{ pid, httpsPort, httpPort, lsVersion, csrfToken }` files under
+// `<root>/daemon/*.json`. Only join against live PIDs returned by process
+// enumeration so stale dead-PID files are naturally ignored.
+function readDaemonInfos(deps = {}) {
+  if (typeof deps.readDaemonInfos === 'function') return deps.readDaemonInfos(deps);
+  const fsApi = deps.fs || fs;
+  const byPid = new Map();
+  for (const dir of daemonDiscoveryDirs(deps)) {
+    let entries;
+    try { entries = fsApi.readdirSync(dir); } catch (_) { continue; }
+    for (const name of entries.slice(0, MAX_DAEMON_FILES_PER_DIR)) {
+      if (!name.endsWith('.json')) continue;
+      const filePath = path.join(dir, name);
+      try {
+        const stat = fsApi.lstatSync(filePath);
+        if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_DAEMON_FILE_BYTES) continue;
+        const parsed = JSON.parse(fsApi.readFileSync(filePath, 'utf8'));
+        const pid = parsed?.pid;
+        if (!Number.isSafeInteger(pid) || pid <= 0) continue;
+        const csrfToken = typeof parsed?.csrfToken === 'string' ? parsed.csrfToken.trim() : '';
+        const httpsPort = validPort(parsed?.httpsPort);
+        const httpPort = validPort(parsed?.httpPort);
+        if (!csrfToken && !httpsPort && !httpPort) continue;
+        const lsVersion = typeof parsed?.lsVersion === 'string' ? parsed.lsVersion.trim() : '';
+        const isHubFile = /^hub_/i.test(name);
+        const record = { pid, csrfToken, httpsPort, httpPort, lsVersion, isHubFile };
+        const existing = byPid.get(pid);
+        if (!existing
+          || (!existing.csrfToken && record.csrfToken)
+          || (record.isHubFile && !existing.isHubFile && (record.csrfToken || !existing.csrfToken))) {
+          byPid.set(pid, record);
+        }
+      } catch (_) {
+        // Ignore unreadable, malformed, or transiently written daemon files.
+      }
+    }
+  }
+  return byPid;
 }
 
 // `Win32_Process.CommandLine` reports the command line a process was created
@@ -167,7 +232,7 @@ function commandForMatching(command) {
   return command.replace(/^"([^"]+)"(?=\s|$)/, '$1').toLowerCase();
 }
 
-function parseProcessLine(line) {
+function parseProcessLine(line, options = {}) {
   const trimmed = String(line || '').trim();
   if (!trimmed) return null;
   const split = trimmed.indexOf(' ');
@@ -179,22 +244,26 @@ function parseProcessLine(line) {
   const lower = commandForMatching(command);
   const kind = antigravityProcessKind(lower);
   if (!kind) return null;
-  const csrfToken = extractFlag('--csrf_token', command);
+  const daemon = options?.daemonByPid?.get(pid) || null;
+  const csrfToken = extractFlag('--csrf_token', command) || daemon?.csrfToken || '';
   const isHubMode = isHubModeCommand(command);
   const hubPort = extractPortFlag('--hub-port', command);
   // Desktop app/IDE language servers authenticate local requests with
-  // `--csrf_token`; tokenless matches are skipped so a later valid process can
-  // still be used. The CLI language server exposes no token flag and needs none,
-  // EXCEPT when running in hub mode (--hub flag), which acts as a network-facing
-  // RPC service and requires CSRF protection like app/IDE.
+  // `--csrf_token` (or its daemon JSON metadata on 2.31+); tokenless matches
+  // are skipped so a later valid process can still be used. The CLI language
+  // server exposes no token flag and needs none, EXCEPT when running in hub
+  // mode (--hub flag), which acts as a network-facing RPC service and requires
+  // CSRF protection like app/IDE.
   if ((kind !== 'cli' || isHubMode) && !csrfToken) return null;
   return {
     pid,
     kind,
-    csrfToken: csrfToken || '',
+    csrfToken,
     extensionPort: extractPortFlag('--extension_server_port', command),
     extensionCsrfToken: extractFlag('--extension_server_csrf_token', command),
     hubPort: hubPort,
+    daemonHttpsPort: validPort(daemon?.httpsPort),
+    daemonHttpPort: validPort(daemon?.httpPort),
     commandLine: command
   };
 }
@@ -236,21 +305,23 @@ function runProcessText(cmd, args, { timeoutMs = 10000, deps = {} } = {}) {
   });
 }
 
-function processInfosFromText(stdout) {
+function processInfosFromText(stdout, options = {}) {
   const infos = [];
   let sawTokenlessCsrfClient = false;
   for (const line of String(stdout || '').split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    const info = parseProcessLine(trimmed);
+    const info = parseProcessLine(trimmed, options);
     if (info) {
       infos.push(info);
       continue;
     }
     const split = trimmed.indexOf(' ');
+    const pid = split > 0 ? Number(trimmed.slice(0, split)) : NaN;
     const lower = split === -1 ? '' : commandForMatching(trimmed.slice(split + 1).trim());
     const kind = antigravityProcessKind(lower);
-    if (!kind || extractFlag('--csrf_token', trimmed)) continue;
+    const daemonCsrf = Number.isFinite(pid) ? options?.daemonByPid?.get(pid)?.csrfToken : '';
+    if (!kind || extractFlag('--csrf_token', trimmed) || daemonCsrf) continue;
     // Desktop/IDE language servers and hub-mode CLI services both authenticate
     // with `--csrf_token`, so a tokenless one of either is a real
     // misconfiguration worth naming instead of reporting "not running". A plain
@@ -260,22 +331,24 @@ function processInfosFromText(stdout) {
   return { infos: sortProcessInfos(infos), sawTokenlessCsrfClient };
 }
 
-function requireDetectedProcessInfos(stdout) {
-  const { infos, sawTokenlessCsrfClient } = processInfosFromText(stdout);
+function requireDetectedProcessInfos(stdout, options = {}) {
+  const { infos, sawTokenlessCsrfClient } = processInfosFromText(stdout, options);
   if (infos.length > 0) return infos;
   if (sawTokenlessCsrfClient) throw errorWithStatus('unavailable', 'Antigravity LS missing --csrf_token');
   throw errorWithStatus('notConfigured', 'Antigravity language server not running');
 }
 
 async function detectProcessInfosPosix(deps = {}) {
+  const daemonByPid = readDaemonInfos(deps);
   const stdout = await runProcessText('ps', ['-ax', '-o', 'pid=,command='], {
     deps,
     timeoutMs: Math.min(8000, Number(deps.timeoutMs) || 8000)
   });
-  return requireDetectedProcessInfos(stdout);
+  return requireDetectedProcessInfos(stdout, { daemonByPid });
 }
 
 async function detectProcessInfosWin32(deps = {}) {
+  const daemonByPid = readDaemonInfos(deps);
   // Surface both the IDE language server and the CLI (`agy` / `antigravity-cli`)
   // hosts; the command-line classifier (antigravityProcessKind) re-filters for
   // precision, so a broad Name filter here is safe.
@@ -284,7 +357,7 @@ async function detectProcessInfosWin32(deps = {}) {
     deps,
     timeoutMs: Math.min(10000, Number(deps.timeoutMs) || 10000)
   });
-  return requireDetectedProcessInfos(stdout);
+  return requireDetectedProcessInfos(stdout, { daemonByPid });
 }
 
 async function detectProcessInfos(deps = {}) {
@@ -432,8 +505,8 @@ const CC_MODEL_BLACKLIST = new Set([
 function poolForModel(label, modelId) {
   const lc = `${label || ''} ${modelId || ''}`.toLowerCase();
   if (lc.includes('argon')) return 'Gemini 4 Argon';
-  if (lc.includes('gemini') && lc.includes('pro')) return 'Gemini Pro';
   if (lc.includes('gemini') && lc.includes('flash')) return 'Gemini Flash';
+  if (lc.includes('gemini')) return 'Gemini Pro';
   return 'Claude';
 }
 
@@ -550,7 +623,7 @@ function collapsePools(models) {
 
 function endpointCandidates(processInfo, listenPorts) {
   const candidates = [];
-  // Try explicit hub port first if available (most authoritative and fastest).
+  // Try explicit hub / daemon ports first if available (most authoritative and fastest).
   if (processInfo.hubPort) {
     candidates.push({
       scheme: 'https',
@@ -560,6 +633,20 @@ function endpointCandidates(processInfo, listenPorts) {
     candidates.push({
       scheme: 'http',
       port: processInfo.hubPort,
+      csrfToken: processInfo.csrfToken
+    });
+  }
+  if (processInfo.daemonHttpsPort) {
+    candidates.push({
+      scheme: 'https',
+      port: processInfo.daemonHttpsPort,
+      csrfToken: processInfo.csrfToken
+    });
+  }
+  if (processInfo.daemonHttpPort) {
+    candidates.push({
+      scheme: 'http',
+      port: processInfo.daemonHttpPort,
       csrfToken: processInfo.csrfToken
     });
   }
@@ -574,7 +661,7 @@ function endpointCandidates(processInfo, listenPorts) {
       csrfToken: processInfo.extensionCsrfToken || processInfo.csrfToken
     });
   }
-  return candidates;
+  return dedupeCandidates(candidates);
 }
 
 const PROBE_METADATA = {
@@ -829,11 +916,16 @@ async function probe(deps = {}) {
       );
       const candidateStates = sourceInfos.map(async (info) => {
         try {
-          // An explicit `--hub-port` is authoritative, and discovery must not be
+          // An explicit `--hub-port` or daemon port is authoritative, and discovery must not be
           // able to starve it. Start discovery concurrently, but expose it as a
-          // lazy fallback so a reachable hub can begin quota retrieval without
+          // lazy fallback so a reachable endpoint can begin quota retrieval without
           // waiting for lsof/Get-NetTCPConnection to settle.
-          const explicitHub = info.hubPort ? endpointCandidates(info, []) : [];
+          const explicitPorts = new Set([
+            info.hubPort,
+            info.daemonHttpsPort,
+            info.daemonHttpPort
+          ].filter(Boolean));
+          const explicitHub = explicitPorts.size > 0 ? endpointCandidates(info, []) : [];
           const discoveryBudgetMs = explicitHub.length > 0 ? halfDeadlineMs() : probeDeadlineMs;
           const discovery = (async () => {
             try {
@@ -852,11 +944,11 @@ async function probe(deps = {}) {
           const resolveDiscoveredCandidates = async (failedHub = []) => {
             const { ports, error: discoveryError } = await discovery;
             if (discoveryError && explicitHub.length === 0) throw discoveryError;
-            // `endpointCandidates()` always re-prepends the hub port, so remove
-            // it here. A hub already failed or passed preflight and must not be
-            // resolved a second time through the discovered set.
+            // `endpointCandidates()` always re-prepends explicit ports, so remove
+            // them here. Explicit ports already failed or passed preflight and must
+            // not be resolved a second time through the discovered set.
             const discovered = endpointCandidates(info, ports).filter((candidate) => (
-              candidate.port !== info.hubPort
+              !explicitPorts.has(candidate.port)
             ));
             let resolved;
             try {
@@ -1001,5 +1093,7 @@ module.exports = {
   _poolForModel: poolForModel,
   _quotaSummaryWindows: quotaSummaryWindows,
   _quotaBucketKind: quotaBucketKind,
-  _endpointCandidates: endpointCandidates
+  _endpointCandidates: endpointCandidates,
+  _readDaemonInfos: readDaemonInfos,
+  _daemonDiscoveryDirs: daemonDiscoveryDirs
 };

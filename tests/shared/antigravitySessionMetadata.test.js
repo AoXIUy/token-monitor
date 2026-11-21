@@ -1291,3 +1291,55 @@ for (const removal of ['deletion', 'blanking']) {
     } finally { handle?.stop(); handle = null; }
   });
 }
+
+test('Antigravity resolves turnEnded from conversation_summaries status, not_fully_idle, and killed columns', { skip: !sqlite }, (t) => {
+  const temp = fs.realpathSync.native(os.tmpdir());
+  const home = fs.mkdtempSync(path.join(temp, 'antigravity-status-meta-'));
+  const dir = path.join(home, '.gemini', 'antigravity');
+  fs.mkdirSync(dir, { recursive: true });
+  const dbPath = path.join(dir, 'conversation_summaries.db');
+  const db = new sqlite.DatabaseSync(dbPath);
+  t.after(() => {
+    db.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  db.exec(`
+    CREATE TABLE conversation_summaries (
+      conversation_id TEXT PRIMARY KEY,
+      title TEXT NOT NULL DEFAULT "",
+      preview TEXT NOT NULL DEFAULT "",
+      workspace_uris TEXT,
+      status TEXT NOT NULL DEFAULT "",
+      not_fully_idle INTEGER NOT NULL DEFAULT 0,
+      killed INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+  const insert = db.prepare('INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?)');
+  insert.run('running-id', 'Running task', '', null, 'CASCADE_RUN_STATUS_RUNNING', 1, 0);
+  insert.run('busy-id', 'Busy task', '', null, 'CASCADE_RUN_STATUS_BUSY', 0, 0);
+  insert.run('canceling-id', 'Canceling task', '', null, 'CASCADE_RUN_STATUS_CANCELING', 0, 0);
+  insert.run('idle-pending-id', 'Not fully idle', '', null, 'CASCADE_RUN_STATUS_IDLE', 1, 0);
+  insert.run('idle-id', 'Idle task', '', null, 'CASCADE_RUN_STATUS_IDLE', 0, 0);
+  insert.run('killed-id', 'Killed task', '', null, 'CASCADE_RUN_STATUS_RUNNING', 1, 1);
+  insert.run('unknown-id', 'Unspecified task', '', null, 'CASCADE_RUN_STATUS_UNSPECIFIED', 0, 0);
+
+  const sessions = {
+    'antigravity:running-id': { client: 'antigravity', sessionId: 'running-id', turnEnded: true },
+    'antigravity:busy-id': { client: 'antigravity', sessionId: 'busy-id' },
+    'antigravity:canceling-id': { client: 'antigravity', sessionId: 'canceling-id' },
+    'antigravity:idle-pending-id': { client: 'antigravity', sessionId: 'idle-pending-id' },
+    'antigravity:idle-id': { client: 'antigravity', sessionId: 'idle-id', turnEnded: false },
+    'antigravity:killed-id': { client: 'antigravity', sessionId: 'killed-id', turnEnded: false },
+    'antigravity:unknown-id': { client: 'antigravity', sessionId: 'unknown-id', turnEnded: true }
+  };
+  applySessionMetadata({ today: { sessions } }, home, { sqlite, env: {}, antigravityTitleCache: new Map() });
+
+  assert.equal(sessions['antigravity:running-id'].turnEnded, false);
+  assert.equal(sessions['antigravity:busy-id'].turnEnded, false);
+  assert.equal(sessions['antigravity:canceling-id'].turnEnded, false);
+  assert.equal(sessions['antigravity:idle-pending-id'].turnEnded, false);
+  assert.equal(sessions['antigravity:idle-id'].turnEnded, true);
+  assert.equal(sessions['antigravity:killed-id'].turnEnded, true);
+  assert.equal(sessions['antigravity:unknown-id'].turnEnded, true, 'unspecified status never overwrites prior turnEnded');
+});

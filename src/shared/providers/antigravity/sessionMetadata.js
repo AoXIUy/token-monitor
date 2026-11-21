@@ -42,6 +42,21 @@ function cleanTitle(value) {
     : '';
 }
 
+function antigravityTurnEndedFromRow(row) {
+  if (!row || typeof row !== 'object') return undefined;
+  if (row.killed === 1 || row.killed === true) return true;
+  const status = typeof row.status === 'string' ? row.status.trim().toUpperCase() : '';
+  const notFullyIdle = row.not_fully_idle === 1 || row.not_fully_idle === true;
+  if (status === 'CASCADE_RUN_STATUS_RUNNING'
+    || status === 'CASCADE_RUN_STATUS_BUSY'
+    || status === 'CASCADE_RUN_STATUS_CANCELING'
+    || (notFullyIdle && (!status || status === 'CASCADE_RUN_STATUS_IDLE'))) {
+    return false;
+  }
+  if (status === 'CASCADE_RUN_STATUS_IDLE') return true;
+  return undefined;
+}
+
 function antigravityConversationSummaryCandidates({ home = os.homedir(), env = process.env } = {}) {
   const candidates = [];
   const explicit = typeof env.ANTIGRAVITY_HOME === 'string' ? env.ANTIGRAVITY_HOME.trim() : '';
@@ -108,9 +123,10 @@ function readSummaries(dbPath, sqlite, wantedIds) {
     }
     if (!hasTable) return null;
 
-    // Subagent columns arrived in a later Antigravity schema. Detect them up
-    // front so a transient prepare failure is never read as an older schema.
-    const optional = ['parent_conversation_id', 'agent_name'].filter((name) => columns.has(name));
+    // Subagent and status columns arrived in later Antigravity schemas. Detect them
+    // up front so a transient prepare failure is never read as an older schema.
+    const optional = ['parent_conversation_id', 'agent_name', 'status', 'not_fully_idle', 'killed']
+      .filter((name) => columns.has(name));
     let stmt = null;
     try {
       stmt = db.prepare(
@@ -208,6 +224,7 @@ function resolveSessionMetadata(sessionIds, context = {}) {
       const parentSessionId = typeof row?.parent_conversation_id === 'string'
         ? row.parent_conversation_id.trim()
         : '';
+      const turnEnded = antigravityTurnEndedFromRow(row);
       result.set(sessionId, {
         catalogOnly: true,
         catalogTitle: title || null,
@@ -215,6 +232,7 @@ function resolveSessionMetadata(sessionIds, context = {}) {
         catalogTitleSource: dbPath,
         ...(title ? { title } : {}),
         ...(parentSessionId && parentSessionId !== sessionId ? { parentSessionId } : {}),
+        ...(typeof turnEnded === 'boolean' ? { turnEnded } : {}),
         ...(identity || {})
       });
     }
@@ -264,8 +282,11 @@ function resolveSessionMetadata(sessionIds, context = {}) {
 }
 
 module.exports = {
+  antigravityTurnEndedFromRow,
   cleanTitle,
   antigravityConversationSummaryCandidates,
+  projectFromWorkspaceUris,
   readSummaries,
-  resolveSessionMetadata
+  resolveSessionMetadata,
+  resolveSqlite
 };

@@ -6,6 +6,7 @@ const { SESSION_ACTIVITY_PROVIDERS } = require('./sessionActivityProviders');
 // client loads no native activity adapter; portable consumers never load this
 // module. Keep file discovery and identity verification inside each adapter.
 const loaders = {
+  antigravity: () => require('./providers/antigravity/sessionActivity'),
   claude: () => require('./providers/claude/sessionActivity'),
   codex: () => require('./providers/codex/sessionActivity')
 };

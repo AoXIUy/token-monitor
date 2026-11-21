@@ -208,6 +208,7 @@ function createAntigravitySelfSync({ selfSyncThrottle, tokscaleCommand }) {
           );
         }
       });
+      let stdout = '';
       let stderr = '';
       // One outcome per spawn. A child reports more than once — a SIGTERM'd
       // timeout still emits close afterwards, and error is usually followed by
@@ -248,7 +249,12 @@ function createAntigravitySelfSync({ selfSyncThrottle, tokscaleCommand }) {
         timer = null;
         termination.request();
       }, options.timeoutMs ?? 30000);
-      child.stderr.on('data', (chunk) => {
+      child.stdout?.on('data', (chunk) => {
+        if (terminalOutcome || stdout.length >= MAX_SYNC_DETAIL_INPUT_LENGTH) return;
+        const remaining = MAX_SYNC_DETAIL_INPUT_LENGTH - stdout.length;
+        stdout += chunk.toString().slice(0, remaining);
+      });
+      child.stderr?.on('data', (chunk) => {
         if (terminalOutcome || stderr.length >= MAX_SYNC_DETAIL_INPUT_LENGTH) return;
         const remaining = MAX_SYNC_DETAIL_INPUT_LENGTH - stderr.length;
         stderr += chunk.toString().slice(0, remaining);
@@ -280,6 +286,15 @@ function createAntigravitySelfSync({ selfSyncThrottle, tokscaleCommand }) {
         }
         if (code !== 0 && !settled && typeof logger === 'function') {
           logger(`antigravity sync exited ${code}: ${stderr.trim().slice(0, 200)}`);
+        } else if (
+          code === 0
+          && !settled
+          && typeof logger === 'function'
+          && /detected connections:\s*0\b/i.test(stdout)
+          && /export candidates:\s*[1-9]\d*\b/i.test(stdout)
+          && /cached sessions after sync:\s*0\b/i.test(stdout)
+        ) {
+          logger('antigravity sync found 0 RPC connections; relying on direct conversation databases if present');
         }
         settle(code !== 0, 'sync-exit-error', {
           failureStage: code !== 0 ? 'process-exit' : null,

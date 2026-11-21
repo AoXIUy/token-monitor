@@ -501,6 +501,9 @@ function applySessionMetadata(periods, home, deps = {}) {
       if (meta.catalogOnly === true) {
         // A summary may supply a missing workspace, but a decoded scan path
         // remains authoritative. Catalog changes never clear turn state.
+        if (meta.turnEnded === true || meta.turnEnded === false) {
+          session.turnEnded = meta.turnEnded;
+        }
         const sources = deps.catalogProjects?.[periodName];
         const owned = deps.catalogProjectRows?.has(session);
         if (meta.projectId && (!session.projectId || owned)) {

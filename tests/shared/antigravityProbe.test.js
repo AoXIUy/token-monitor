@@ -1,6 +1,9 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
 
 const probe = require('../../src/shared/providers/antigravity/probe');
@@ -1272,4 +1275,133 @@ test('probe keeps the full discovery budget when there is no explicit hub port',
 
   assert.equal(discoveryResolved, true, 'discovery must be allowed to finish after half the deadline');
   assert.equal(result.accountEmail, 'nohub@example.com');
+});
+
+test('detectProcessInfos joins daemon JSON metadata for tokenless Antigravity 2.31+ servers and ignores stale PIDs', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-daemon-probe-'));
+  const daemonDir = path.join(home, '.gemini', 'antigravity', 'daemon');
+  fs.mkdirSync(daemonDir, { recursive: true });
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(daemonDir, 'hub_36243.json'), JSON.stringify({
+    pid: 1137451,
+    httpsPort: 35831,
+    httpPort: 36243,
+    lsVersion: '2.34.0',
+    csrfToken: 'hub-csrf-token'
+  }));
+  // Dead PID file with same or unrelated old PID must not attach to live PID without match.
+  fs.writeFileSync(path.join(daemonDir, 'hub_99999.json'), JSON.stringify({
+    pid: 99999,
+    httpsPort: 41111,
+    httpPort: 41112,
+    lsVersion: '2.32.1',
+    csrfToken: 'stale-csrf'
+  }));
+  fs.writeFileSync(path.join(daemonDir, 'ls_ssh.json'), JSON.stringify({
+    pid: 2117721,
+    httpsPort: 36483,
+    httpPort: 40593,
+    lsVersion: '2.33.0',
+    csrfToken: 'ssh-csrf-token'
+  }));
+
+  const stdout = [
+    '1137451 /opt/Antigravity/resources/bin/language_server --standalone --subclient_type hub --app_data_dir antigravity',
+    '2117721 /home/user/.antigravity-hub-server/bin/2.33.0-x64/language_server --standalone --app_data_dir antigravity --workspace_id agy-hub-ssh',
+    '5555555 /opt/Antigravity/resources/bin/language_server --standalone --app_data_dir antigravity'
+  ].join('\n');
+
+  const infos = await probe.detectProcessInfos({
+    platform: 'linux',
+    homeDir: home,
+    env: {},
+    spawn: fakeSpawn(stdout)
+  });
+
+  assert.equal(infos.length, 2);
+  assert.equal(infos[0].pid, 1137451);
+  assert.equal(infos[0].kind, 'app');
+  assert.equal(infos[0].csrfToken, 'hub-csrf-token');
+  assert.equal(infos[0].daemonHttpsPort, 35831);
+  assert.equal(infos[0].daemonHttpPort, 36243);
+  assert.equal(infos[1].pid, 2117721);
+  assert.equal(infos[1].csrfToken, 'ssh-csrf-token');
+
+  // If no live PID has a matching daemon JSON or --csrf_token, missing --csrf_token is still reported.
+  const err = await probe.detectProcessInfos({
+    platform: 'linux',
+    homeDir: home,
+    env: {},
+    spawn: fakeSpawn('5555555 /opt/Antigravity/resources/bin/language_server --standalone --app_data_dir antigravity\n')
+  }).catch((e) => e);
+  assert.equal(err.status, 'unavailable');
+  assert.match(err.message, /missing --csrf_token/);
+});
+
+test('probe uses daemon ports directly without waiting on lsof and tolerates a sibling HTTP 500 server', async () => {
+  const called = [];
+  const result = await probe.probe({
+    detectProcessInfos: async () => [
+      {
+        pid: 2117721,
+        kind: 'app',
+        csrfToken: 'ssh-csrf',
+        daemonHttpsPort: 36483,
+        daemonHttpPort: 40593,
+        hubPort: null,
+        extensionPort: null
+      },
+      {
+        pid: 1137451,
+        kind: 'app',
+        csrfToken: 'hub-csrf',
+        daemonHttpsPort: 35831,
+        daemonHttpPort: 36243,
+        hubPort: null,
+        extensionPort: null
+      }
+    ],
+    listeningPorts: () => new Promise(() => {}),
+    callLs: async ({ scheme, port, csrfToken, method }) => {
+      called.push(`${scheme}:${port}:${method}`);
+      if (port === 36483 || port === 40593) {
+        if (method === 'GetUnleashData') return {};
+        const error = probe._errorWithStatus('unavailable', `${method} returned 500`);
+        error.httpStatus = 500;
+        throw error;
+      }
+      assert.equal(csrfToken, 'hub-csrf');
+      if (method === 'GetUnleashData') return {};
+      if (method === 'RetrieveUserQuotaSummary') {
+        return {
+          response: {
+            groups: [{
+              displayName: 'Gemini Models',
+              buckets: [{ bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.75 }]
+            }]
+          }
+        };
+      }
+      if (method === 'GetUserStatus') {
+        return { userStatus: { email: 'live@example.com', userTier: { name: 'Google AI Pro' } } };
+      }
+      throw probe._errorWithStatus('unavailable', 'unexpected method');
+    },
+    probeTimeoutMs: 1500
+  });
+
+  assert.equal(result.sourceDetail, 'app');
+  assert.equal(result.accountEmail, 'live@example.com');
+  assert.equal(result.accountPlan, 'Google AI Pro');
+  assert.deepEqual(result.windows.map((w) => [w.name, w.remainingFraction]), [['Gemini 5-hour', 0.75]]);
+  assert.ok(called.includes('https:35831:RetrieveUserQuotaSummary'));
+});
+
+test('_poolForModel maps Gemini 4 Neon and Gemini 4 Hydrogen to Gemini Pro instead of Claude', () => {
+  assert.equal(probe._poolForModel('Gemini 4 Neon (High)', 'MODEL_PLACEHOLDER_M532'), 'Gemini Pro');
+  assert.equal(probe._poolForModel('Gemini 4 Hydrogen', 'gemini-4-hydrogen'), 'Gemini Pro');
+  assert.equal(probe._poolForModel('Gemini 3.8 Flash', 'gemini-3.8-flash'), 'Gemini Flash');
+  assert.equal(probe._poolForModel('Gemini 4 Argon (High)', 'gemini-4-argon-high'), 'Gemini 4 Argon');
+  assert.equal(probe._poolForModel('Claude Opus 5.5', 'claude-opus-5-5'), 'Claude');
 });
