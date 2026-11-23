@@ -630,6 +630,21 @@ body.is-windows.floating-bubble-collapsed-right .floating-bubble-tab {
   -webkit-mask: url("icons/actions/settings.svg") center / contain no-repeat;
   mask: url("icons/actions/settings.svg") center / contain no-repeat;
 }
+.footer-ag-manager-button {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 30px;
+}
+.footer-ag-manager-button::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  background: currentColor;
+  -webkit-mask: url("icons/actions/accounts.svg") center / contain no-repeat;
+  mask: url("icons/actions/accounts.svg") center / contain no-repeat;
+}
 .icon-button:hover, .refresh-button:hover, .mode-button:hover, .settings-actions button:hover, .shortcut-recorder button:hover { border-color: var(--line-strong); background: rgba(var(--overlay-rgb), 0.072); }
 .icon-button.active { border-color: rgba(var(--accent-rgb), 0.58); color: var(--accent); background: rgba(var(--accent-rgb), 0.08); }
 /* The settings panel is a plain view on the widget glass (like the main
@@ -7492,6 +7507,12 @@ html.native-liquid-glass :is(.tabs, .tab-indicator, .tool-detail-footer, #utilit
   box-shadow: var(--liquid-glass-specular);
 }
 html.native-liquid-glass :is(.tabs, .tab-indicator, .tool-detail-footer, #utilityActions button, .view-switcher-current, .view-switcher-disclosure) {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+html.native-liquid-glass .footer-ag-manager-button {
+  border-radius: 999px;
+  box-shadow: var(--liquid-glass-specular);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }

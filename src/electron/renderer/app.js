@@ -417,6 +417,7 @@ Object.assign(els, {
   limitsToolsBar: document.getElementById('limitsToolsBar'),
   limitsOpenAgManagerButton: document.getElementById('limitsOpenAgManagerButton'),
   antigravityOpenManagerButton: document.getElementById('antigravityOpenManagerButton'),
+  footerAgManagerButton: document.getElementById('footerAgManagerButton'),
   sessionSearchToggle: document.getElementById('sessionSearchToggle'),
   sessionSearchHost: document.getElementById('sessionSearchHost'),
   sessionSearchInput: document.getElementById('sessionSearchInput'),
@@ -18069,6 +18070,10 @@ els.limitsOpenAgManagerButton?.addEventListener('click', () => {
   void window.tokenMonitor.antigravityManager?.openWindow?.();
 });
 els.antigravityOpenManagerButton?.addEventListener('click', () => {
+  void window.tokenMonitor.antigravityManager?.openWindow?.();
+});
+els.footerAgManagerButton?.addEventListener('click', (event) => {
+  if (event.detail > 0) els.footerAgManagerButton.blur();
   void window.tokenMonitor.antigravityManager?.openWindow?.();
 });
 els.trendsPanel.addEventListener('click', (event) => {

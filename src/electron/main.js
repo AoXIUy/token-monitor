@@ -8065,8 +8065,8 @@ function createAntigravityManagerWindow() {
     return antigravityManagerWindow;
   }
   const windowOptions = {
-    width: 980,
-    height: 680,
+    width: 1160,
+    height: 740,
     minWidth: 720,
     minHeight: 500,
     frame: false,

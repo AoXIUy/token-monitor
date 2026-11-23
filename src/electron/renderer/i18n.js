@@ -2901,7 +2901,16 @@
       'agManager.toast.exportOk': 'Exported {count} accounts to JSON',
       'agManager.toast.importDone': 'Imported {success} accounts ({failed} failed)',
       'agManager.toast.importDirDone': 'Imported {count} accounts from directory',
-      'agManager.toast.importSingleOk': 'Added {email}'
+      'agManager.toast.importSingleOk': 'Added {email}',
+      'footer.openAntigravityManager': 'Antigravity Account Manager',
+      'agManager.independentBadge': 'Standalone · Separated from main collector',
+      'agManager.moreActions': 'More',
+      'agManager.copyEmail': 'Copy email',
+      'agManager.toast.emailCopied': 'Copied {email}',
+      'agManager.slot.classic': 'Classic',
+      'agManager.slot.ide': 'IDE',
+      'agManager.slot.agy': 'AGY',
+      'agManager.slot.acp': 'ACP'
     },
     'zh-TW': {
       "realtimeSession.title": "會話即時觀測速率",
@@ -5787,7 +5796,16 @@
       'agManager.toast.exportOk': '已匯出 {count} 個帳號至 JSON',
       'agManager.toast.importDone': '已匯入 {success} 個帳號（{failed} 失敗）',
       'agManager.toast.importDirDone': '已從目錄匯入 {count} 個帳號',
-      'agManager.toast.importSingleOk': '已新增 {email}'
+      'agManager.toast.importSingleOk': '已新增 {email}',
+      'footer.openAntigravityManager': 'Antigravity 帳號管理',
+      'agManager.independentBadge': '獨立視窗 · 與主採集完全隔離',
+      'agManager.moreActions': '更多',
+      'agManager.copyEmail': '複製信箱',
+      'agManager.toast.emailCopied': '已複製 {email}',
+      'agManager.slot.classic': '經典款',
+      'agManager.slot.ide': 'IDE',
+      'agManager.slot.agy': 'AGY',
+      'agManager.slot.acp': 'ACP'
     },
     'zh-CN': {
       "realtimeSession.title": "会话实时观测速率",
@@ -8673,7 +8691,16 @@
       'agManager.toast.exportOk': '已导出 {count} 个账号至 JSON',
       'agManager.toast.importDone': '已导入 {success} 个账号（{failed} 失败）',
       'agManager.toast.importDirDone': '已从目录导入 {count} 个账号',
-      'agManager.toast.importSingleOk': '已添加 {email}'
+      'agManager.toast.importSingleOk': '已添加 {email}',
+      'footer.openAntigravityManager': 'Antigravity 账号管理',
+      'agManager.independentBadge': '独立窗口 · 与主采集完全隔离',
+      'agManager.moreActions': '更多',
+      'agManager.copyEmail': '复制邮箱',
+      'agManager.toast.emailCopied': '已复制 {email}',
+      'agManager.slot.classic': '经典款',
+      'agManager.slot.ide': 'IDE',
+      'agManager.slot.agy': 'AGY',
+      'agManager.slot.acp': 'ACP'
     },
     ko: {
       "realtimeSession.title": "세션 실시간 관측 속도",
@@ -11559,7 +11586,16 @@
       'agManager.toast.exportOk': '{count}개 계정을 JSON으로 내보냈습니다',
       'agManager.toast.importDone': '{success}개 계정 가져옴 ({failed}개 실패)',
       'agManager.toast.importDirDone': '디렉터리에서 {count}개 계정 가져옴',
-      'agManager.toast.importSingleOk': '{email} 추가됨'
+      'agManager.toast.importSingleOk': '{email} 추가됨',
+      'footer.openAntigravityManager': 'Antigravity 계정 관리',
+      'agManager.independentBadge': '독립 창 · 메인 수집기와 완전 분리',
+      'agManager.moreActions': '더보기',
+      'agManager.copyEmail': '이메일 복사',
+      'agManager.toast.emailCopied': '{email} 복사됨',
+      'agManager.slot.classic': '클래식',
+      'agManager.slot.ide': 'IDE',
+      'agManager.slot.agy': 'AGY',
+      'agManager.slot.acp': 'ACP'
     },
     ja: {
       "realtimeSession.title": "セッションのリアルタイム観測速度",
@@ -14445,7 +14481,16 @@
       'agManager.toast.exportOk': '{count} 件のアカウントを JSON エクスポートしました',
       'agManager.toast.importDone': '{success} 件インポートしました ({failed} 件失敗)',
       'agManager.toast.importDirDone': 'ディレクトリから {count} 件インポートしました',
-      'agManager.toast.importSingleOk': '{email} を追加しました'
+      'agManager.toast.importSingleOk': '{email} を追加しました',
+      'footer.openAntigravityManager': 'Antigravity アカウント管理',
+      'agManager.independentBadge': '独立ウィンドウ · メイン収集から分離',
+      'agManager.moreActions': 'その他',
+      'agManager.copyEmail': 'メールをコピー',
+      'agManager.toast.emailCopied': '{email} をコピーしました',
+      'agManager.slot.classic': 'クラシック',
+      'agManager.slot.ide': 'IDE',
+      'agManager.slot.agy': 'AGY',
+      'agManager.slot.acp': 'ACP'
     },
     es: {
       "realtimeSession.title": "Ritmo observado de la sesión",
@@ -17326,7 +17371,16 @@
       'agManager.toast.exportOk': 'Exportadas {count} cuentas a JSON',
       'agManager.toast.importDone': 'Importadas {success} cuentas ({failed} fallos)',
       'agManager.toast.importDirDone': 'Importadas {count} cuentas del directorio',
-      'agManager.toast.importSingleOk': 'Añadido {email}'
+      'agManager.toast.importSingleOk': 'Añadido {email}',
+      'footer.openAntigravityManager': 'Gestor de cuentas Antigravity',
+      'agManager.independentBadge': 'Independiente · Separado del colector principal',
+      'agManager.moreActions': 'Más',
+      'agManager.copyEmail': 'Copiar correo',
+      'agManager.toast.emailCopied': 'Copiado {email}',
+      'agManager.slot.classic': 'Clásico',
+      'agManager.slot.ide': 'IDE',
+      'agManager.slot.agy': 'AGY',
+      'agManager.slot.acp': 'ACP'
     },
     'pt-BR': {
       "realtimeSession.title": "Taxa observada da sessão",
@@ -20212,7 +20266,16 @@
       'agManager.toast.exportOk': '{count} contas exportadas para JSON',
       'agManager.toast.importDone': '{success} contas importadas ({failed} falhas)',
       'agManager.toast.importDirDone': '{count} contas importadas do diretório',
-      'agManager.toast.importSingleOk': '{email} adicionado'
+      'agManager.toast.importSingleOk': '{email} adicionado',
+      'footer.openAntigravityManager': 'Gerenciador de Contas Antigravity',
+      'agManager.independentBadge': 'Independente · Separado do coletor principal',
+      'agManager.moreActions': 'Mais',
+      'agManager.copyEmail': 'Copiar e-mail',
+      'agManager.toast.emailCopied': '{email} copiado',
+      'agManager.slot.classic': 'Clássico',
+      'agManager.slot.ide': 'IDE',
+      'agManager.slot.agy': 'AGY',
+      'agManager.slot.acp': 'ACP'
     }
   };
 
