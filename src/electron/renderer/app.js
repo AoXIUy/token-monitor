@@ -6906,6 +6906,7 @@ function hidePeriodContentForMessage(message) {
   els.homePanel.classList.add('hidden');
   els.breakdown.classList.add('hidden');
   els.serviceStatusPanel?.classList.add('hidden');
+  els.limitsToolsBar?.classList.add('hidden');
   els.limitsPanel.classList.add('hidden');
   els.trendsPanel.classList.add('hidden');
   els.sessionDetail.classList.add('hidden');
@@ -8377,7 +8378,7 @@ function renderAppContent({ fromSearch = false } = {}) {
     stopHomeSessionRepaint(); stopSessionStatusRepaint(); stopServiceStatusTicker(); hideHomeActivityTooltip(); hideHomeTrendTooltip();
     cancelNumberAnimation();
     state.openSession = null;
-    for (const panel of [els.homePanel, els.breakdown, els.limitsPanel, els.trendsPanel, els.serviceStatusPanel,
+    for (const panel of [els.homePanel, els.breakdown, els.limitsToolsBar, els.limitsPanel, els.trendsPanel, els.serviceStatusPanel,
       els.sessionDetail, els.sessionDetailHead, els.sessionPagerHost, els.sessionSearchHost, els.toolDetailFooter, els.projectBreakdownFooter, els.fixedPeriodMessage, els.viewBackRow]) panel?.classList.add('hidden');
     els.shell.classList.remove('home-mode', 'session-mode');
     renderViewSwitcher(); signalContentReady();
@@ -8528,6 +8529,7 @@ function renderAppContent({ fromSearch = false } = {}) {
     void refreshOpenSessionDetail();
   } else {
     els.homePanel.classList.add('hidden');
+    els.limitsToolsBar?.classList.add('hidden');
     els.limitsPanel.classList.add('hidden');
     els.serviceStatusPanel?.classList.add('hidden');
     els.trendsPanel.classList.add('hidden');

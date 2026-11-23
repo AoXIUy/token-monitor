@@ -19,12 +19,17 @@ const state = {
   expandedModels: new Set(),
   openMoreId: '',
   confirmDeleteId: '',
+  batchDeleteConfirm: false,
   toastTimer: null,
-  oauthBusy: false
+  oauthBusy: false,
+  importBusy: false,
+  switchBestBusy: false,
+  refreshClickBusy: false
 };
 
 let nativeMaterialState = glassRenderingApi?.normalizeNativeMaterialState?.() || { type: 'transparent', reducedTransparency: false, highContrast: false };
 let nativeMaterialRevision = 0;
+const cleanupFns = [];
 
 const els = {
   body: document.body,
@@ -89,6 +94,10 @@ function t(key, params) {
   return value || key;
 }
 
+function registerCleanup(fn) {
+  if (typeof fn === 'function') cleanupFns.push(fn);
+}
+
 function applyTranslations() {
   document.querySelectorAll('[data-i18n]').forEach((node) => {
     const key = node.getAttribute('data-i18n');
@@ -106,11 +115,14 @@ function applyTranslations() {
     if (translated && translated !== key) node.setAttribute('aria-label', translated);
   });
   document.documentElement.lang = state.locale;
+  document.title = t('agManager.title');
 }
 
 function applyAppearance(settings) {
   glassRenderingApi?.applyNativeMaterialClasses?.(nativeMaterialState);
-  const opacity = Math.min(100, Math.max(0, settings?.glassOpacity ?? 68)) / 100;
+  const opacity = glassRenderingApi?.renderedGlassOpacity
+    ? glassRenderingApi.renderedGlassOpacity(settings, { userAgent: navigator.userAgent })
+    : Math.min(100, Math.max(0, settings?.glassOpacity ?? 68)) / 100;
   const depth = (glassRenderingApi?.usesNativeMaterial?.(nativeMaterialState) ? 32 : Math.min(100, Math.max(0, settings?.glassBlur ?? 32))) / 100;
   const root = document.documentElement.style;
   root.setProperty('--glass-alpha', opacity.toFixed(2));
@@ -131,6 +143,8 @@ function applyAppearance(settings) {
       else root.removeProperty(name);
     }
   }
+  const isLight = Boolean(themePresetsApi?.isLightHex?.(settings?.themeColors?.bg));
+  document.documentElement.classList.toggle('agm-light', isLight);
   els.body.classList.toggle('flat', state.flat);
 }
 
@@ -139,12 +153,34 @@ function showToast(text, isError = false) {
   els.toast.textContent = String(text || '');
   els.toast.classList.toggle('is-error', Boolean(isError));
   els.toast.classList.toggle('hidden', !text);
-  if (state.toastTimer) clearTimeout(state.toastTimer);
+  if (state.toastTimer) {
+    clearTimeout(state.toastTimer);
+    state.toastTimer = null;
+  }
   if (text) {
     state.toastTimer = setTimeout(() => {
+      state.toastTimer = null;
       els.toast.classList.add('hidden');
     }, 4000);
   }
+}
+
+function hideProgressBar() {
+  if (!els.progressBar) return;
+  els.progressBar.classList.add('hidden');
+  els.progressBar.textContent = '';
+}
+
+async function copyEmailText(text) {
+  if (typeof window.tokenMonitor?.copyText === 'function') {
+    await window.tokenMonitor.copyText(text);
+    return;
+  }
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  throw new Error(t('agManager.toast.copyFailed'));
 }
 
 function formatResetCountdown(resetIso) {
@@ -277,7 +313,7 @@ function iconClaude() {
     ['path', { d: 'M12 3v18' }],
     ['path', { d: 'M4.5 7.5l15 9' }],
     ['path', { d: 'M19.5 7.5l-15 9' }]
-  ], 11, 'agm-quota-family-icon');
+  ], 11, 'agm-quota-family-icon is-claude');
 }
 
 function makePill(text, tone = '', small = false) {
@@ -360,11 +396,13 @@ function renderSummaryAndControls() {
   const active = mgr.activeAccounts || {};
 
   const counts = { total: accounts.length, ULTRA: 0, PRO: 0, FREE: 0, abnormal: 0 };
+  let hasSwitchable = false;
   for (const a of accounts) {
     if (a.subscriptionTier === 'ULTRA') counts.ULTRA += 1;
     else if (a.subscriptionTier === 'PRO') counts.PRO += 1;
     else if (a.subscriptionTier === 'FREE') counts.FREE += 1;
     if (isAbnormalAccount(a)) counts.abnormal += 1;
+    if (a.hasToken && !a.disabled && !a.banned && !a.validationBlocked) hasSwitchable = true;
   }
 
   els.statsPills.replaceChildren(
@@ -388,13 +426,13 @@ function renderSummaryAndControls() {
     .filter(([, id]) => Boolean(id))
     .map(([slot, id]) => {
       const found = accounts.find((a) => a.id === id);
-      return found ? `${slot.toUpperCase()}: ${found.email}` : '';
+      return found ? `${formatSlotLabel(slot)}: ${found.email}` : '';
     })
     .filter(Boolean);
   if (activeSummary.length > 0) {
     metaParts.push(activeSummary.join(' · '));
   }
-  els.runtimeMeta.textContent = metaParts.join('  |  ');
+  els.runtimeMeta.textContent = metaParts.join(' · ');
 
   els.targetClient.value = cfg.defaultSwitchTarget || 'auto';
   els.startupRefreshInput.checked = cfg.startupRefresh === true;
@@ -405,15 +443,22 @@ function renderSummaryAndControls() {
   els.syncToHubInput.checked = cfg.syncToHub !== false;
   els.restoreDeviceBtn.classList.toggle('hidden', !mgr.hasOriginalDeviceBackup);
 
-  const refreshing = mgr.isRefreshing === true;
+  const refreshing = mgr.isRefreshing === true || state.refreshClickBusy;
   const selectedCount = state.selectedIds.size;
   els.refreshNowBtn.disabled = refreshing || accounts.length === 0;
   els.refreshNowLabel.textContent = refreshing
     ? t('agManager.refreshing')
     : (selectedCount > 0 ? t('agManager.refreshSelected', { count: selectedCount }) : t('agManager.refreshAll'));
-  els.cancelRefreshBtn.classList.toggle('hidden', !refreshing);
+  els.cancelRefreshBtn.classList.toggle('hidden', mgr.isRefreshing !== true);
+  els.switchBestBtn.disabled = state.switchBestBusy || !hasSwitchable;
+  els.exportBtn.disabled = accounts.length === 0;
+
+  if (selectedCount === 0) state.batchDeleteConfirm = false;
   els.batchDeleteBtn.classList.toggle('hidden', selectedCount === 0);
-  els.batchDeleteBtn.textContent = t('agManager.deleteSelectedCount', { count: selectedCount });
+  els.batchDeleteBtn.classList.toggle('is-confirm', state.batchDeleteConfirm && selectedCount > 0);
+  els.batchDeleteBtn.textContent = state.batchDeleteConfirm && selectedCount > 0
+    ? t('agManager.confirmDeleteSelected', { count: selectedCount })
+    : t('agManager.deleteSelectedCount', { count: selectedCount });
 }
 
 function is5hBucket(b) {
@@ -487,7 +532,7 @@ function renderQuotaGridCell({ icon, title = '', resetText = '—', resetTone = 
   return cell;
 }
 
-function renderQuotaGroups(acc) {
+function renderQuotaGroups(acc, hasStatusMessage = false) {
   const groups = Array.isArray(acc?.quota?.groups) ? acc.quota.groups : [];
   const models = Array.isArray(acc?.quota?.models) ? acc.quota.models : [];
 
@@ -605,25 +650,48 @@ function renderQuotaGroups(acc) {
         resetText,
         resetTone: 'weekly',
         pct,
+        isFull: true,
         ariaLabel: `${name}: ${pct}% (${resetText})`
       }));
     }
     return grid;
   }
 
+  if (hasStatusMessage) return null;
+
   const empty = document.createElement('div');
   empty.className = 'agm-card-hint';
-  empty.textContent = t('agManager.noQuotaData');
+  empty.textContent = acc?.hasToken === false ? t('agManager.noToken') : t('agManager.noQuotaData');
   return empty;
+}
+
+async function deleteSingleAccount(acc) {
+  state.confirmDeleteId = '';
+  state.openMoreId = '';
+  try {
+    const res = await agmApi().deleteAccounts([acc.id]);
+    if (res && res.ok === false) {
+      showToast(res.error || t('agManager.toast.actionFailed'), true);
+      return;
+    }
+    state.selectedIds.delete(acc.id);
+    showToast(t('agManager.toast.deletedCount', { count: 1 }));
+  } catch (err) {
+    showToast(err?.message || t('agManager.toast.actionFailed'), true);
+  } finally {
+    await loadState();
+  }
 }
 
 function renderAccountCard(acc, activeAccounts) {
   const activeSlots = Object.entries(activeAccounts || {})
     .filter(([, id]) => id === acc.id)
     .map(([slot]) => slot);
+  const isMenuOpen = state.openMoreId === acc.id;
 
   const card = document.createElement('article');
-  card.className = `agm-card${activeSlots.length > 0 ? ' is-active' : ''}${acc.disabled ? ' is-disabled' : ''}`;
+  card.className = `agm-card${activeSlots.length > 0 ? ' is-active' : ''}${acc.disabled ? ' is-disabled' : ''}${isMenuOpen ? ' has-menu-open' : ''}`;
+  card.dataset.accountId = acc.id;
 
   const head = document.createElement('div');
   head.className = 'agm-card-head';
@@ -635,11 +703,14 @@ function renderAccountCard(acc, activeAccounts) {
   checkbox.type = 'checkbox';
   checkbox.className = 'agm-card-check';
   checkbox.checked = state.selectedIds.has(acc.id);
-  checkbox.setAttribute('aria-label', `Select ${acc.email || acc.id}`);
+  checkbox.setAttribute('aria-label', t('agManager.aria.selectAccount', { email: acc.email || acc.id }));
   checkbox.addEventListener('change', () => {
     if (checkbox.checked) state.selectedIds.add(acc.id);
     else state.selectedIds.delete(acc.id);
+    state.batchDeleteConfirm = false;
     renderSummaryAndControls();
+    const visible = filteredAccounts();
+    els.selectAllInput.checked = visible.length > 0 && visible.every((item) => state.selectedIds.has(item.id));
   });
 
   const emailEl = document.createElement('div');
@@ -658,10 +729,10 @@ function renderAccountCard(acc, activeAccounts) {
   copyBtn.addEventListener('click', async () => {
     const emailText = acc.email || acc.id;
     try {
-      await navigator.clipboard?.writeText?.(emailText);
+      await copyEmailText(emailText);
       showToast(t('agManager.toast.emailCopied', { email: emailText }));
     } catch (err) {
-      showToast(err?.message || 'Copy failed', true);
+      showToast(err?.message || t('agManager.toast.copyFailed'), true);
     }
   });
 
@@ -683,11 +754,8 @@ function renderAccountCard(acc, activeAccounts) {
       renderAccounts();
       return;
     }
-    state.confirmDeleteId = '';
-    state.openMoreId = '';
-    state.selectedIds.delete(acc.id);
-    await agmApi().deleteAccounts([acc.id]);
-    await loadState();
+    headDeleteBtn.disabled = true;
+    await deleteSingleAccount(acc);
   });
 
   headActions.append(copyBtn, headDeleteBtn);
@@ -730,19 +798,35 @@ function renderAccountCard(acc, activeAccounts) {
   }
   card.appendChild(metaRow);
 
+  let hasStatusMessage = false;
   if (acc.validationBlocked && acc.validationMessage) {
     const msg = document.createElement('div');
     msg.className = 'agm-card-hint is-error';
     msg.textContent = acc.validationMessage;
     card.appendChild(msg);
+    hasStatusMessage = true;
   } else if (acc.banned && acc.banInfo?.message) {
     const msg = document.createElement('div');
     msg.className = 'agm-card-hint is-error';
     msg.textContent = acc.banInfo.message;
     card.appendChild(msg);
+    hasStatusMessage = true;
+  } else if (acc.quota?.isForbidden && acc.quota?.forbiddenReason) {
+    const msg = document.createElement('div');
+    msg.className = 'agm-card-hint is-error';
+    msg.textContent = acc.quota.forbiddenReason;
+    card.appendChild(msg);
+    hasStatusMessage = true;
+  } else if (acc.disabled && acc.disabledReason && acc.disabledReason !== 'Manually disabled') {
+    const msg = document.createElement('div');
+    msg.className = 'agm-card-hint is-error';
+    msg.textContent = acc.disabledReason;
+    card.appendChild(msg);
+    hasStatusMessage = true;
   }
 
-  card.appendChild(renderQuotaGroups(acc));
+  const quotaNode = renderQuotaGroups(acc, hasStatusMessage);
+  if (quotaNode) card.appendChild(quotaNode);
 
   const models = Array.isArray(acc?.quota?.models) ? acc.quota.models : [];
   if (models.length > 0 && state.expandedModels.has(acc.id)) {
@@ -796,10 +880,15 @@ function renderAccountCard(acc, activeAccounts) {
   refreshBtn.disabled = !acc.hasToken;
   refreshBtn.addEventListener('click', async () => {
     refreshBtn.disabled = true;
-    const res = await agmApi().refreshAccount(acc.id);
-    if (!res?.ok) showToast(res?.error || 'Refresh failed', true);
-    else showToast(t('agManager.toast.refreshOneOk', { email: acc.email }));
-    await loadState();
+    try {
+      const res = await agmApi().refreshAccount(acc.id);
+      if (!res?.ok) showToast(res?.error || t('agManager.toast.refreshFailed'), true);
+      else showToast(t('agManager.toast.refreshOneOk', { email: acc.email }));
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.refreshFailed'), true);
+    } finally {
+      await loadState();
+    }
   });
 
   const toggleDisableBtn = document.createElement('button');
@@ -809,17 +898,25 @@ function renderAccountCard(acc, activeAccounts) {
   toggleLabel.textContent = acc.disabled ? t('agManager.enable') : t('agManager.disable');
   toggleDisableBtn.append(iconPower(), toggleLabel);
   toggleDisableBtn.addEventListener('click', async () => {
-    await agmApi().setAccountDisabled(acc.id, !acc.disabled);
-    await loadState();
+    toggleDisableBtn.disabled = true;
+    try {
+      const res = await agmApi().setAccountDisabled(acc.id, !acc.disabled);
+      if (res && res.ok === false) {
+        showToast(res.error || t('agManager.toast.actionFailed'), true);
+      }
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.actionFailed'), true);
+    } finally {
+      await loadState();
+    }
   });
 
   const moreWrap = document.createElement('div');
   moreWrap.className = 'agm-more-wrap';
-  const isMenuOpen = state.openMoreId === acc.id;
 
   const moreBtn = document.createElement('button');
   moreBtn.type = 'button';
-  moreBtn.className = 'agm-action-btn';
+  moreBtn.className = 'agm-action-btn agm-more-trigger';
   moreBtn.setAttribute('aria-haspopup', 'menu');
   moreBtn.setAttribute('aria-expanded', String(isMenuOpen));
   const moreLabel = document.createElement('span');
@@ -827,8 +924,14 @@ function renderAccountCard(acc, activeAccounts) {
   moreBtn.append(iconMore(), moreLabel);
   moreBtn.addEventListener('click', (ev) => {
     ev.stopPropagation();
-    state.openMoreId = state.openMoreId === acc.id ? '' : acc.id;
+    const opening = state.openMoreId !== acc.id;
+    state.openMoreId = opening ? acc.id : '';
+    if (!opening && state.confirmDeleteId === acc.id) state.confirmDeleteId = '';
     renderAccounts();
+    if (opening) {
+      const firstItem = els.accountList.querySelector(`.agm-card[data-account-id="${CSS.escape(acc.id)}"] .agm-more-item`);
+      if (ev.detail === 0) firstItem?.focus();
+    }
   });
   moreWrap.appendChild(moreBtn);
 
@@ -836,6 +939,24 @@ function renderAccountCard(acc, activeAccounts) {
     const menu = document.createElement('div');
     menu.className = 'agm-more-menu';
     menu.setAttribute('role', 'menu');
+    menu.addEventListener('keydown', (ev) => {
+      const items = Array.from(menu.querySelectorAll('.agm-more-item'));
+      if (items.length === 0) return;
+      const idx = items.indexOf(document.activeElement);
+      if (ev.key === 'ArrowDown') {
+        ev.preventDefault();
+        items[(idx + 1 + items.length) % items.length]?.focus();
+      } else if (ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        items[(idx - 1 + items.length) % items.length]?.focus();
+      } else if (ev.key === 'Home') {
+        ev.preventDefault();
+        items[0]?.focus();
+      } else if (ev.key === 'End') {
+        ev.preventDefault();
+        items[items.length - 1]?.focus();
+      }
+    });
 
     if (models.length > 0) {
       const expanded = state.expandedModels.has(acc.id);
@@ -867,11 +988,12 @@ function renderAccountCard(acc, activeAccounts) {
     });
     menu.appendChild(deviceItem);
 
+    const isConfirmMenu = state.confirmDeleteId === acc.id;
     const deleteItem = document.createElement('button');
     deleteItem.type = 'button';
-    deleteItem.className = 'agm-more-item is-danger agm-delete-confirm-trigger';
+    deleteItem.className = `agm-more-item is-danger agm-delete-confirm-trigger${isConfirmMenu ? ' is-confirm' : ''}`;
     deleteItem.setAttribute('role', 'menuitem');
-    deleteItem.textContent = state.confirmDeleteId === acc.id
+    deleteItem.textContent = isConfirmMenu
       ? t('agManager.confirmDelete')
       : t('agManager.delete');
     deleteItem.addEventListener('click', async (ev) => {
@@ -880,13 +1002,12 @@ function renderAccountCard(acc, activeAccounts) {
         state.confirmDeleteId = acc.id;
         state.openMoreId = acc.id;
         renderAccounts();
+        const nextConfirm = els.accountList.querySelector(`.agm-card[data-account-id="${CSS.escape(acc.id)}"] .agm-more-menu .agm-delete-confirm-trigger`);
+        nextConfirm?.focus();
         return;
       }
-      state.confirmDeleteId = '';
-      state.openMoreId = '';
-      state.selectedIds.delete(acc.id);
-      await agmApi().deleteAccounts([acc.id]);
-      await loadState();
+      deleteItem.disabled = true;
+      await deleteSingleAccount(acc);
     });
     menu.appendChild(deleteItem);
 
@@ -899,8 +1020,34 @@ function renderAccountCard(acc, activeAccounts) {
   return card;
 }
 
+function positionOpenMoreMenu() {
+  const menu = els.accountList?.querySelector('.agm-more-menu');
+  if (!menu) return;
+  menu.classList.remove('is-below');
+  const listRect = els.accountList.getBoundingClientRect();
+  const menuRect = menu.getBoundingClientRect();
+  if (menuRect.top < listRect.top + 4) {
+    const triggerRect = menu.parentElement?.getBoundingClientRect();
+    const spaceBelow = triggerRect ? (listRect.bottom - triggerRect.bottom) : 0;
+    const spaceAbove = triggerRect ? (triggerRect.top - listRect.top) : 0;
+    if (spaceBelow > spaceAbove) {
+      menu.classList.add('is-below');
+    }
+  }
+}
+
+function positionRefreshPopover() {
+  if (!els.refreshPopover || els.refreshPopover.classList.contains('hidden')) return;
+  els.refreshPopover.classList.remove('align-left');
+  const rect = els.refreshPopover.getBoundingClientRect();
+  if (rect.left < 14) {
+    els.refreshPopover.classList.add('align-left');
+  }
+}
+
 function renderAccounts() {
   const list = filteredAccounts();
+  els.selectAllInput.disabled = list.length === 0;
   if (list.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'agm-empty';
@@ -914,6 +1061,7 @@ function renderAccounts() {
   const active = state.manager?.activeAccounts || {};
   els.accountList.replaceChildren(...list.map((acc) => renderAccountCard(acc, active)));
   els.selectAllInput.checked = list.every((acc) => state.selectedIds.has(acc.id));
+  if (state.openMoreId) positionOpenMoreMenu();
 }
 
 function renderAll() {
@@ -925,7 +1073,7 @@ function openDeviceDialog(acc) {
   els.deviceBody.replaceChildren();
   const info = document.createElement('p');
   info.className = 'agm-hint';
-  info.textContent = `${acc.email}`;
+  info.textContent = `${acc.email || acc.id}`;
   const pre = document.createElement('pre');
   pre.className = 'agm-mono-pre';
   pre.textContent = acc.deviceProfile
@@ -940,11 +1088,22 @@ function openDeviceDialog(acc) {
   genBtn.className = 'agm-btn agm-btn-primary';
   genBtn.textContent = t('agManager.generateDevice');
   genBtn.addEventListener('click', async () => {
-    const res = await agmApi().bindDeviceProfile(acc.id, 'generate');
-    if (res?.ok) {
-      pre.textContent = JSON.stringify(res.deviceProfile, null, 2);
-      showToast(t('agManager.toast.deviceUpdated'));
-      await loadState();
+    genBtn.disabled = true;
+    capBtn.disabled = true;
+    try {
+      const res = await agmApi().bindDeviceProfile(acc.id, 'generate');
+      if (res?.ok) {
+        pre.textContent = JSON.stringify(res.deviceProfile, null, 2);
+        showToast(t('agManager.toast.deviceUpdated'));
+        await loadState();
+      } else {
+        showToast(res?.error || t('agManager.toast.actionFailed'), true);
+      }
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.actionFailed'), true);
+    } finally {
+      genBtn.disabled = false;
+      capBtn.disabled = false;
     }
   });
 
@@ -953,11 +1112,22 @@ function openDeviceDialog(acc) {
   capBtn.className = 'agm-btn';
   capBtn.textContent = t('agManager.captureDevice');
   capBtn.addEventListener('click', async () => {
-    const res = await agmApi().bindDeviceProfile(acc.id, 'capture');
-    if (res?.ok) {
-      pre.textContent = JSON.stringify(res.deviceProfile, null, 2);
-      showToast(t('agManager.toast.deviceUpdated'));
-      await loadState();
+    genBtn.disabled = true;
+    capBtn.disabled = true;
+    try {
+      const res = await agmApi().bindDeviceProfile(acc.id, 'capture');
+      if (res?.ok) {
+        pre.textContent = JSON.stringify(res.deviceProfile, null, 2);
+        showToast(t('agManager.toast.deviceUpdated'));
+        await loadState();
+      } else {
+        showToast(res?.error || t('agManager.toast.actionFailed'), true);
+      }
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.actionFailed'), true);
+    } finally {
+      genBtn.disabled = false;
+      capBtn.disabled = false;
     }
   });
 
@@ -966,27 +1136,66 @@ function openDeviceDialog(acc) {
   els.deviceDialog.showModal();
 }
 
+function applyManagerState(nextState) {
+  state.manager = nextState;
+  const validIds = new Set((state.manager?.accounts || []).map((a) => a.id));
+  for (const id of [...state.selectedIds]) {
+    if (!validIds.has(id)) state.selectedIds.delete(id);
+  }
+  for (const id of [...state.expandedModels]) {
+    if (!validIds.has(id)) state.expandedModels.delete(id);
+  }
+  if (state.openMoreId && !validIds.has(state.openMoreId)) state.openMoreId = '';
+  if (state.confirmDeleteId && !validIds.has(state.confirmDeleteId)) state.confirmDeleteId = '';
+  if (state.selectedIds.size === 0) state.batchDeleteConfirm = false;
+  if (state.manager?.isRefreshing !== true && !state.importBusy) {
+    hideProgressBar();
+  }
+  renderAll();
+}
+
 async function loadState() {
   try {
-    state.manager = await agmApi().getState();
-    const validIds = new Set((state.manager?.accounts || []).map((a) => a.id));
-    for (const id of [...state.selectedIds]) {
-      if (!validIds.has(id)) state.selectedIds.delete(id);
-    }
-    if (state.openMoreId && !validIds.has(state.openMoreId)) state.openMoreId = '';
-    if (state.confirmDeleteId && !validIds.has(state.confirmDeleteId)) state.confirmDeleteId = '';
-    renderAll();
+    const nextState = await agmApi().getState();
+    applyManagerState(nextState);
   } catch (err) {
-    showToast(err?.message || 'Failed to load state', true);
+    showToast(err?.message || t('agManager.toast.actionFailed'), true);
   }
 }
 
 async function persistConfigPatch(patch) {
-  const res = await agmApi().updateConfig(patch);
-  if (res?.ok && state.manager) {
-    state.manager.config = res.config;
-    renderSummaryAndControls();
+  try {
+    const res = await agmApi().updateConfig(patch);
+    if (res?.ok && state.manager) {
+      state.manager.config = res.config;
+      renderSummaryAndControls();
+    } else if (res && res.ok === false) {
+      showToast(res.error || t('agManager.toast.actionFailed'), true);
+    }
+  } catch (err) {
+    showToast(err?.message || t('agManager.toast.actionFailed'), true);
   }
+}
+
+function setImportTab(target, { focus = false } = {}) {
+  for (const btn of els.importTabs) {
+    const active = btn.dataset.importTab === target;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', String(active));
+    btn.tabIndex = active ? 0 : -1;
+    if (active && focus) btn.focus();
+  }
+  els.importTabJson.classList.toggle('hidden', target !== 'json');
+  els.importTabDb.classList.toggle('hidden', target !== 'db');
+  els.importTabOauth.classList.toggle('hidden', target !== 'oauth');
+}
+
+function closeRefreshPopover({ restoreFocus = false } = {}) {
+  if (els.refreshPopover.classList.contains('hidden')) return false;
+  els.refreshPopover.classList.add('hidden');
+  els.refreshMenuBtn.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) els.refreshMenuBtn.focus();
+  return true;
 }
 
 function wireEvents() {
@@ -1003,6 +1212,7 @@ function wireEvents() {
   });
 
   els.switchBestBtn.addEventListener('click', async () => {
+    state.switchBestBusy = true;
     els.switchBestBtn.disabled = true;
     try {
       const res = await agmApi().switchBestAccount(els.targetClient.value);
@@ -1011,22 +1221,32 @@ function wireEvents() {
       } else {
         showToast(res?.error || t('agManager.toast.switchFailed'), true);
       }
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.switchFailed'), true);
     } finally {
-      els.switchBestBtn.disabled = false;
+      state.switchBestBusy = false;
       await loadState();
     }
   });
 
   els.refreshNowBtn.addEventListener('click', async () => {
-    const ids = state.selectedIds.size > 0 ? Array.from(state.selectedIds) : [];
-    const res = ids.length > 0 ? await agmApi().refreshAccounts(ids) : await agmApi().refreshAll();
-    els.progressBar.classList.add('hidden');
-    if (res?.ok) {
-      showToast(t('agManager.toast.refreshBatchDone', { success: res.success, failed: res.failed }));
-    } else if (res?.error) {
-      showToast(res.error, true);
+    state.refreshClickBusy = true;
+    renderSummaryAndControls();
+    try {
+      const ids = state.selectedIds.size > 0 ? Array.from(state.selectedIds) : [];
+      const res = ids.length > 0 ? await agmApi().refreshAccounts(ids) : await agmApi().refreshAll();
+      if (res?.ok) {
+        showToast(t('agManager.toast.refreshBatchDone', { success: res.success, failed: res.failed }));
+      } else if (res?.error) {
+        showToast(res.error, true);
+      }
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.refreshFailed'), true);
+    } finally {
+      state.refreshClickBusy = false;
+      hideProgressBar();
+      await loadState();
     }
-    await loadState();
   });
 
   els.cancelRefreshBtn.addEventListener('click', () => {
@@ -1035,26 +1255,72 @@ function wireEvents() {
 
   els.refreshMenuBtn.addEventListener('click', (ev) => {
     ev.stopPropagation();
-    const open = els.refreshPopover.classList.toggle('hidden');
-    els.refreshMenuBtn.setAttribute('aria-expanded', String(!open));
+    const isHidden = els.refreshPopover.classList.toggle('hidden');
+    els.refreshMenuBtn.setAttribute('aria-expanded', String(!isHidden));
+    if (!isHidden) positionRefreshPopover();
   });
-  document.addEventListener('click', (ev) => {
+
+  const onDocumentClick = (ev) => {
     const targetEl = ev.target instanceof Element ? ev.target : null;
     if (!els.refreshSplit.contains(ev.target)) {
-      els.refreshPopover.classList.add('hidden');
-      els.refreshMenuBtn.setAttribute('aria-expanded', 'false');
+      closeRefreshPopover();
     }
-    let shouldRender = false;
+    let shouldRenderCards = false;
     if (state.openMoreId && !targetEl?.closest?.('.agm-more-wrap')) {
       state.openMoreId = '';
-      shouldRender = true;
+      shouldRenderCards = true;
     }
     if (state.confirmDeleteId && !targetEl?.closest?.('.agm-delete-confirm-trigger')) {
       state.confirmDeleteId = '';
-      shouldRender = true;
+      shouldRenderCards = true;
     }
-    if (shouldRender) renderAccounts();
-  });
+    if (state.batchDeleteConfirm && !els.batchDeleteBtn.contains(ev.target)) {
+      state.batchDeleteConfirm = false;
+      renderSummaryAndControls();
+    }
+    if (shouldRenderCards) renderAccounts();
+  };
+  document.addEventListener('click', onDocumentClick);
+  registerCleanup(() => document.removeEventListener('click', onDocumentClick));
+
+  const onDocumentKeyDown = (ev) => {
+    if (ev.key !== 'Escape') return;
+    if (closeRefreshPopover({ restoreFocus: true })) {
+      ev.preventDefault();
+      return;
+    }
+    if (state.openMoreId) {
+      const prevId = state.openMoreId;
+      state.openMoreId = '';
+      state.confirmDeleteId = '';
+      renderAccounts();
+      const trigger = els.accountList.querySelector(`.agm-card[data-account-id="${CSS.escape(prevId)}"] .agm-more-trigger`);
+      trigger?.focus();
+      ev.preventDefault();
+      return;
+    }
+    let handled = false;
+    if (state.confirmDeleteId) {
+      state.confirmDeleteId = '';
+      renderAccounts();
+      handled = true;
+    }
+    if (state.batchDeleteConfirm) {
+      state.batchDeleteConfirm = false;
+      renderSummaryAndControls();
+      handled = true;
+    }
+    if (handled) ev.preventDefault();
+  };
+  document.addEventListener('keydown', onDocumentKeyDown);
+  registerCleanup(() => document.removeEventListener('keydown', onDocumentKeyDown));
+
+  const onWindowResize = () => {
+    positionRefreshPopover();
+    if (state.openMoreId) positionOpenMoreMenu();
+  };
+  window.addEventListener('resize', onWindowResize);
+  registerCleanup(() => window.removeEventListener('resize', onWindowResize));
 
   els.startupRefreshInput.addEventListener('change', () => {
     void persistConfigPatch({ startupRefresh: els.startupRefreshInput.checked });
@@ -1066,13 +1332,22 @@ function wireEvents() {
     void persistConfigPatch({ syncToHub: els.syncToHubInput.checked });
   });
   els.intervalInput.addEventListener('change', () => {
-    void persistConfigPatch({ refreshIntervalMinutes: Number(els.intervalInput.value || 10) });
+    const parsed = Number(els.intervalInput.value);
+    const val = Number.isFinite(parsed) ? Math.max(1, Math.min(1440, Math.round(parsed))) : 10;
+    els.intervalInput.value = String(val);
+    void persistConfigPatch({ refreshIntervalMinutes: val });
   });
   els.concurrencyInput.addEventListener('change', () => {
-    void persistConfigPatch({ refreshConcurrency: Number(els.concurrencyInput.value || 5) });
+    const parsed = Number(els.concurrencyInput.value);
+    const val = Number.isFinite(parsed) ? Math.max(1, Math.min(20, Math.round(parsed))) : 5;
+    els.concurrencyInput.value = String(val);
+    void persistConfigPatch({ refreshConcurrency: val });
   });
   els.slideDelayInput.addEventListener('change', () => {
-    void persistConfigPatch({ refreshSlideDelaySecs: Number(els.slideDelayInput.value || 0.2) });
+    const parsed = Number(els.slideDelayInput.value);
+    const val = Number.isFinite(parsed) ? Math.max(0, Math.min(10, Math.round(parsed * 100) / 100)) : 0.2;
+    els.slideDelayInput.value = String(val);
+    void persistConfigPatch({ refreshSlideDelaySecs: val });
   });
 
   els.searchInput.addEventListener('input', () => {
@@ -1083,7 +1358,11 @@ function wireEvents() {
   for (const chip of els.filterChips) {
     chip.addEventListener('click', () => {
       state.filter = chip.dataset.filter || 'all';
-      for (const c of els.filterChips) c.classList.toggle('active', c === chip);
+      for (const c of els.filterChips) {
+        const active = c === chip;
+        c.classList.toggle('active', active);
+        c.setAttribute('aria-pressed', String(active));
+      }
       renderAccounts();
     });
   }
@@ -1095,141 +1374,250 @@ function wireEvents() {
     } else {
       for (const a of visible) state.selectedIds.delete(a.id);
     }
+    state.batchDeleteConfirm = false;
     renderAll();
   });
 
-  els.batchDeleteBtn.addEventListener('click', async () => {
+  els.batchDeleteBtn.addEventListener('click', async (ev) => {
+    ev.stopPropagation();
     const ids = Array.from(state.selectedIds);
     if (ids.length === 0) return;
-    await agmApi().deleteAccounts(ids);
-    state.selectedIds.clear();
-    await loadState();
+    if (!state.batchDeleteConfirm) {
+      state.batchDeleteConfirm = true;
+      renderSummaryAndControls();
+      return;
+    }
+    state.batchDeleteConfirm = false;
+    els.batchDeleteBtn.disabled = true;
+    try {
+      const res = await agmApi().deleteAccounts(ids);
+      if (res && res.ok === false) {
+        showToast(res.error || t('agManager.toast.actionFailed'), true);
+        return;
+      }
+      state.selectedIds.clear();
+      showToast(t('agManager.toast.deletedCount', { count: ids.length }));
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.actionFailed'), true);
+    } finally {
+      els.batchDeleteBtn.disabled = false;
+      await loadState();
+    }
   });
 
   els.exportBtn.addEventListener('click', async () => {
-    const ids = state.selectedIds.size > 0 ? Array.from(state.selectedIds) : [];
-    const res = await agmApi().exportAccounts(ids);
-    if (res?.canceled) return;
-    if (res?.ok) showToast(t('agManager.toast.exportOk', { count: res.count }));
-    else showToast(res?.error || 'Export failed', true);
+    els.exportBtn.disabled = true;
+    try {
+      const ids = state.selectedIds.size > 0 ? Array.from(state.selectedIds) : [];
+      const res = await agmApi().exportAccounts(ids);
+      if (res?.canceled) return;
+      if (res?.ok) showToast(t('agManager.toast.exportOk', { count: res.count }));
+      else showToast(res?.error || t('agManager.toast.actionFailed'), true);
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.actionFailed'), true);
+    } finally {
+      renderSummaryAndControls();
+    }
   });
 
   els.restoreDeviceBtn.addEventListener('click', async () => {
-    const res = await agmApi().restoreOriginalDevice();
-    if (res?.ok) showToast(t('agManager.toast.restoreOk'));
-    else showToast(res?.error || 'Restore failed', true);
+    els.restoreDeviceBtn.disabled = true;
+    try {
+      const res = await agmApi().restoreOriginalDevice();
+      if (res?.ok) showToast(t('agManager.toast.restoreOk'));
+      else showToast(res?.error || t('agManager.toast.actionFailed'), true);
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.actionFailed'), true);
+    } finally {
+      els.restoreDeviceBtn.disabled = false;
+    }
   });
 
-  // Import dialog
-  els.openImportBtn.addEventListener('click', () => els.importDialog.showModal());
+  // Import and device dialogs
+  els.openImportBtn.addEventListener('click', () => {
+    closeRefreshPopover();
+    els.importDialog.showModal();
+  });
   els.closeImportDialog.addEventListener('click', () => els.importDialog.close());
   els.closeDeviceDialog.addEventListener('click', () => els.deviceDialog.close());
 
+  els.importDialog.addEventListener('close', () => {
+    if (state.oauthBusy) void agmApi().cancelOAuthLogin();
+  });
+  els.importDialog.addEventListener('click', (ev) => {
+    if (ev.target === els.importDialog) els.importDialog.close();
+  });
+  els.deviceDialog.addEventListener('click', (ev) => {
+    if (ev.target === els.deviceDialog) els.deviceDialog.close();
+  });
+
   for (const tab of els.importTabs) {
     tab.addEventListener('click', () => {
-      const target = tab.dataset.importTab;
-      for (const btn of els.importTabs) btn.classList.toggle('active', btn === tab);
-      els.importTabJson.classList.toggle('hidden', target !== 'json');
-      els.importTabDb.classList.toggle('hidden', target !== 'db');
-      els.importTabOauth.classList.toggle('hidden', target !== 'oauth');
+      setImportTab(tab.dataset.importTab || 'json');
+    });
+    tab.addEventListener('keydown', (ev) => {
+      const idx = els.importTabs.indexOf(tab);
+      if (ev.key === 'ArrowRight') {
+        ev.preventDefault();
+        const next = els.importTabs[(idx + 1) % els.importTabs.length];
+        setImportTab(next.dataset.importTab || 'json', { focus: true });
+      } else if (ev.key === 'ArrowLeft') {
+        ev.preventDefault();
+        const prev = els.importTabs[(idx - 1 + els.importTabs.length) % els.importTabs.length];
+        setImportTab(prev.dataset.importTab || 'json', { focus: true });
+      } else if (ev.key === 'Home') {
+        ev.preventDefault();
+        setImportTab(els.importTabs[0].dataset.importTab || 'json', { focus: true });
+      } else if (ev.key === 'End') {
+        ev.preventDefault();
+        setImportTab(els.importTabs[els.importTabs.length - 1].dataset.importTab || 'json', { focus: true });
+      }
     });
   }
 
   els.pickJsonFileBtn.addEventListener('click', async () => {
-    const res = await agmApi().pickAndImportJson({ refreshAfterImport: els.refreshAfterImportInput.checked });
-    els.progressBar.classList.add('hidden');
-    if (res?.canceled) return;
-    if (res?.ok) {
-      showToast(t('agManager.toast.importDone', { success: res.success, failed: res.failed }));
-      els.importDialog.close();
-    } else {
-      showToast(res?.error || 'Import failed', true);
+    state.importBusy = true;
+    els.pickJsonFileBtn.disabled = true;
+    try {
+      const res = await agmApi().pickAndImportJson({ refreshAfterImport: els.refreshAfterImportInput.checked });
+      if (res?.canceled) return;
+      if (res?.ok) {
+        showToast(t('agManager.toast.importDone', { success: res.success, failed: res.failed }));
+        els.importDialog.close();
+      } else {
+        showToast(res?.error || t('agManager.toast.actionFailed'), true);
+      }
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.actionFailed'), true);
+    } finally {
+      state.importBusy = false;
+      els.pickJsonFileBtn.disabled = false;
+      hideProgressBar();
+      await loadState();
     }
-    await loadState();
   });
 
   els.submitPasteBtn.addEventListener('click', async () => {
     const text = els.tokenPasteInput.value.trim();
     if (!text) return;
+    state.importBusy = true;
     els.submitPasteBtn.disabled = true;
     try {
       const res = await agmApi().importFromString(text, { refreshAfterImport: els.refreshAfterImportInput.checked });
-      els.progressBar.classList.add('hidden');
       if (res?.ok) {
         els.tokenPasteInput.value = '';
         showToast(t('agManager.toast.importDone', { success: res.success, failed: res.failed }));
         els.importDialog.close();
       } else {
-        showToast(res?.error || 'Import failed', true);
+        showToast(res?.error || t('agManager.toast.actionFailed'), true);
       }
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.actionFailed'), true);
     } finally {
+      state.importBusy = false;
       els.submitPasteBtn.disabled = false;
+      hideProgressBar();
       await loadState();
     }
   });
 
   els.importDefaultDirBtn.addEventListener('click', async () => {
-    const res = await agmApi().importDefaultDataDir();
-    if (res?.ok) {
-      showToast(t('agManager.toast.importDirDone', { count: res.imported }));
-      els.importDialog.close();
-    } else {
-      showToast(res?.error || 'Import failed', true);
+    els.importDefaultDirBtn.disabled = true;
+    try {
+      const res = await agmApi().importDefaultDataDir();
+      if (res?.ok) {
+        showToast(t('agManager.toast.importDirDone', { count: res.imported }));
+        els.importDialog.close();
+      } else {
+        showToast(res?.error || t('agManager.toast.actionFailed'), true);
+      }
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.actionFailed'), true);
+    } finally {
+      els.importDefaultDirBtn.disabled = false;
+      await loadState();
     }
-    await loadState();
   });
 
   els.pickDataDirBtn.addEventListener('click', async () => {
-    const res = await agmApi().pickAndImportDataDir();
-    if (res?.canceled) return;
-    if (res?.ok) {
-      showToast(t('agManager.toast.importDirDone', { count: res.imported }));
-      els.importDialog.close();
-    } else {
-      showToast(res?.error || 'Import failed', true);
+    els.pickDataDirBtn.disabled = true;
+    try {
+      const res = await agmApi().pickAndImportDataDir();
+      if (res?.canceled) return;
+      if (res?.ok) {
+        showToast(t('agManager.toast.importDirDone', { count: res.imported }));
+        els.importDialog.close();
+      } else {
+        showToast(res?.error || t('agManager.toast.actionFailed'), true);
+      }
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.actionFailed'), true);
+    } finally {
+      els.pickDataDirBtn.disabled = false;
+      await loadState();
     }
-    await loadState();
   });
 
   els.scanLocalBtn.addEventListener('click', async () => {
+    state.importBusy = true;
     els.scanLocalBtn.disabled = true;
     try {
       const res = await agmApi().scanLocalAccounts();
-      els.progressBar.classList.add('hidden');
       if (res?.ok) {
         showToast(t('agManager.toast.importDone', { success: res.success, failed: res.failed }));
         els.importDialog.close();
       } else {
-        showToast(res?.error || 'Scan failed', true);
+        showToast(res?.error || t('agManager.toast.actionFailed'), true);
       }
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.actionFailed'), true);
     } finally {
+      state.importBusy = false;
       els.scanLocalBtn.disabled = false;
+      hideProgressBar();
       await loadState();
     }
   });
 
   els.pickStateDbBtn.addEventListener('click', async () => {
-    const res = await agmApi().pickAndImportStateDb();
-    if (res?.canceled) return;
-    if (res?.ok) {
-      showToast(t('agManager.toast.importSingleOk', { email: res.account?.email || '' }));
-      els.importDialog.close();
-    } else {
-      showToast(res?.error || 'Import DB failed', true);
+    els.pickStateDbBtn.disabled = true;
+    try {
+      const res = await agmApi().pickAndImportStateDb();
+      if (res?.canceled) return;
+      if (res?.ok) {
+        showToast(t('agManager.toast.importSingleOk', { email: res.account?.email || '' }));
+        els.importDialog.close();
+      } else {
+        showToast(res?.error || t('agManager.toast.actionFailed'), true);
+      }
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.actionFailed'), true);
+    } finally {
+      els.pickStateDbBtn.disabled = false;
+      await loadState();
     }
-    await loadState();
   });
 
   els.pickV1DirBtn.addEventListener('click', async () => {
-    const res = await agmApi().pickAndImportV1Dir();
-    if (res?.canceled) return;
-    if (res?.ok) {
-      showToast(t('agManager.toast.importDone', { success: res.success, failed: res.failed }));
-      els.importDialog.close();
-    } else {
-      showToast(res?.error || 'V1 import failed', true);
+    state.importBusy = true;
+    els.pickV1DirBtn.disabled = true;
+    try {
+      const res = await agmApi().pickAndImportV1Dir();
+      if (res?.canceled) return;
+      if (res?.ok) {
+        showToast(t('agManager.toast.importDone', { success: res.success, failed: res.failed }));
+        els.importDialog.close();
+      } else {
+        showToast(res?.error || t('agManager.toast.actionFailed'), true);
+      }
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.actionFailed'), true);
+    } finally {
+      state.importBusy = false;
+      els.pickV1DirBtn.disabled = false;
+      hideProgressBar();
+      await loadState();
     }
-    await loadState();
   });
 
   els.startOAuthBtn.addEventListener('click', async () => {
@@ -1242,8 +1630,10 @@ function wireEvents() {
         showToast(t('agManager.toast.importSingleOk', { email: res.account?.email || '' }));
         els.importDialog.close();
       } else {
-        showToast(res?.error || 'OAuth login failed', true);
+        showToast(res?.error || t('agManager.toast.actionFailed'), true);
       }
+    } catch (err) {
+      showToast(err?.message || t('agManager.toast.actionFailed'), true);
     } finally {
       state.oauthBusy = false;
       els.startOAuthBtn.disabled = false;
@@ -1256,11 +1646,10 @@ function wireEvents() {
     void agmApi().cancelOAuthLogin();
   });
 
-  agmApi().onState?.((nextState) => {
-    state.manager = nextState;
-    renderAll();
-  });
-  agmApi().onRefreshProgress?.((p) => {
+  registerCleanup(agmApi().onState?.((nextState) => {
+    applyManagerState(nextState);
+  }));
+  registerCleanup(agmApi().onRefreshProgress?.((p) => {
     if (!p || !p.total) return;
     els.progressBar.classList.remove('hidden');
     els.progressBar.textContent = t('agManager.refreshProgress', {
@@ -1268,8 +1657,8 @@ function wireEvents() {
       total: p.total,
       email: p.currentEmail || ''
     });
-  });
-  agmApi().onImportProgress?.((p) => {
+  }));
+  registerCleanup(agmApi().onImportProgress?.((p) => {
     if (!p || !p.total) return;
     els.progressBar.classList.remove('hidden');
     els.progressBar.textContent = t('agManager.importProgress', {
@@ -1277,16 +1666,16 @@ function wireEvents() {
       total: p.total,
       email: p.email || ''
     });
-  });
+  }));
 }
 
 async function boot() {
   if (typeof window.tokenMonitor.onNativeMaterialState === 'function') {
-    window.tokenMonitor.onNativeMaterialState((next) => {
+    registerCleanup(window.tokenMonitor.onNativeMaterialState((next) => {
       nativeMaterialRevision += 1;
       nativeMaterialState = glassRenderingApi.normalizeNativeMaterialState(next);
       applyAppearance(state.settings || {});
-    });
+    }));
   }
   const rev = nativeMaterialRevision;
   try {
@@ -1302,20 +1691,33 @@ async function boot() {
   state.locale = i18n.resolveLocale(settings.locale || settings.language, navigator.languages);
   state.flat = settings.dashboardFlat === true;
 
-  window.tokenMonitor.onSettingsPush?.((next) => {
+  registerCleanup(window.tokenMonitor.onSettingsPush?.((next) => {
     if (!next) return;
     state.settings = { ...(state.settings || {}), ...next };
     if ('dashboardFlat' in next) state.flat = next.dashboardFlat === true;
-    const nextLocale = i18n.resolveLocale(next.locale || next.language, navigator.languages);
+    const nextLocale = i18n.resolveLocale(state.settings.locale || state.settings.language, navigator.languages);
     if (state.locale !== nextLocale) {
       state.locale = nextLocale;
       applyTranslations();
       renderAll();
     }
     applyAppearance(state.settings);
-  });
+  }));
 
-  reducedMotionMedia?.addEventListener?.('change', () => applyAppearance(state.settings));
+  const onReducedMotionChange = () => applyAppearance(state.settings);
+  reducedMotionMedia?.addEventListener?.('change', onReducedMotionChange);
+  registerCleanup(() => reducedMotionMedia?.removeEventListener?.('change', onReducedMotionChange));
+
+  window.addEventListener('beforeunload', () => {
+    if (state.toastTimer) {
+      clearTimeout(state.toastTimer);
+      state.toastTimer = null;
+    }
+    if (state.oauthBusy) void agmApi()?.cancelOAuthLogin?.();
+    for (const fn of cleanupFns.splice(0)) {
+      try { fn(); } catch (_) {}
+    }
+  }, { once: true });
 
   applyAppearance(settings);
   applyTranslations();

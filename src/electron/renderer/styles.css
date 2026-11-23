@@ -645,6 +645,10 @@ body.is-windows.floating-bubble-collapsed-right .floating-bubble-tab {
   -webkit-mask: url("icons/actions/accounts.svg") center / contain no-repeat;
   mask: url("icons/actions/accounts.svg") center / contain no-repeat;
 }
+.footer-ag-manager-button:focus-visible {
+  outline: 2px solid rgba(var(--accent-rgb), 0.32);
+  outline-offset: 1px;
+}
 .icon-button:hover, .refresh-button:hover, .mode-button:hover, .settings-actions button:hover, .shortcut-recorder button:hover { border-color: var(--line-strong); background: rgba(var(--overlay-rgb), 0.072); }
 .icon-button.active { border-color: rgba(var(--accent-rgb), 0.58); color: var(--accent); background: rgba(var(--accent-rgb), 0.08); }
 /* The settings panel is a plain view on the widget glass (like the main
@@ -5784,10 +5788,10 @@ html.is-windows .settings-panel select option {
 }
 .limits-tool-btn {
   appearance: none;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--line);
   border-radius: 9px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--ink);
+  background: rgba(var(--overlay-rgb), var(--control-alpha));
+  color: var(--text);
   font: inherit;
   font-size: 11px;
   font-weight: 550;
@@ -5796,8 +5800,12 @@ html.is-windows .settings-panel select option {
   transition: background 140ms ease, border-color 140ms ease;
 }
 .limits-tool-btn:hover {
-  background: rgba(255, 255, 255, 0.12);
-  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(var(--overlay-rgb), 0.08);
+  border-color: var(--line-strong);
+}
+.limits-tool-btn:focus-visible {
+  outline: 2px solid rgba(var(--accent-rgb), 0.32);
+  outline-offset: 1px;
 }
 .limits-panel {
   position: relative;
@@ -7287,6 +7295,7 @@ html.is-windows .limit-live-badge {
   --view-switcher-max-width: min(112px, max(0px, calc(50% - 66px)));
 }
 .footer.live-token-rate-obscured .live-token-rate,
+.footer:has(.footer-update-actions.is-disclosed) .live-token-rate,
 .footer:has(.utility-actions:hover) .live-token-rate,
 .footer:has(.utility-actions :focus-visible) .live-token-rate,
 .footer:has(.refresh-button:is(.is-refreshing, .is-refreshed, .is-refresh-error)) .live-token-rate,
@@ -7294,6 +7303,22 @@ html.is-windows .limit-live-badge {
   opacity: 0;
   pointer-events: none;
   visibility: hidden;
+}
+@media (max-width: 280px) {
+  .footer.live-token-rate-enabled {
+    --view-switcher-max-width: min(150px, 52%);
+  }
+  .footer .live-token-rate {
+    opacity: 0;
+    pointer-events: none;
+    visibility: hidden;
+  }
+}
+@media (max-width: 260px) {
+  .footer,
+  .footer-update-actions {
+    gap: 5px;
+  }
 }
 .view-switcher {
   position: relative;
@@ -7510,7 +7535,8 @@ html.native-liquid-glass :is(.tabs, .tab-indicator, .tool-detail-footer, #utilit
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
-html.native-liquid-glass .footer-ag-manager-button {
+html.native-liquid-glass .footer-ag-manager-button,
+html.native-liquid-glass .limits-tool-btn {
   border-radius: 999px;
   box-shadow: var(--liquid-glass-specular);
   -webkit-backdrop-filter: none;
