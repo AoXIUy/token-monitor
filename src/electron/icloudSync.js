@@ -1210,7 +1210,7 @@ function createIcloudSyncStore(options = {}) {
   }
 
   async function writeSubscriptionsNow(subscriptions, { baseRevision = '' } = {}) {
-    const normalized = normalizeSubscriptions(subscriptions);
+    const normalized = normalizeSubscriptions(subscriptions, { maxTextLength: 0 });
     if (!Array.isArray(subscriptions) || normalized.length !== subscriptions.length) {
       const error = new Error('Invalid iCloud subscriptions');
       error.code = 'invalid_subscriptions';

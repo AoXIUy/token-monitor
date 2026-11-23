@@ -137,8 +137,10 @@ function readRegularFileNoFollow(filePath, options = {}) {
         bytesRead += count;
       }
       if (bytesRead > maxBytes) throw new Error(`${description} exceeds ${maxBytes} bytes`);
+      if (options.encoding === 'buffer') return Buffer.from(buffer.subarray(0, bytesRead));
       return buffer.subarray(0, bytesRead).toString(options.encoding || 'utf8');
     }
+    if (options.encoding === 'buffer') return fsApi.readFileSync(descriptor);
     return fsApi.readFileSync(descriptor, options.encoding || 'utf8');
   } catch (error) {
     if (error?.code === 'ELOOP') {
@@ -466,6 +468,84 @@ class CredentialStore {
     }
     this.writeDocument(document);
     return cleaned;
+  }
+
+  readHubTlsPassphrase(options = {}) {
+    const document = options.document || this.readDocument();
+    const stored = valueAt(document.credentials, ['hub', 'tls', 'passphrase']);
+    if (stored === undefined || stored === null || stored === '') return '';
+    if (!isObject(stored) || stored.version !== 1 || typeof stored.data !== 'string') {
+      throw Object.assign(new Error('Unsupported Hub TLS passphrase envelope'), {
+        code: 'tls_passphrase_decrypt_failed'
+      });
+    }
+    if (stored.mode === 'safeStorage') {
+      const adapter = options.safeStorage || null;
+      if (!adapter || typeof adapter.decryptString !== 'function') {
+        throw Object.assign(new Error('Hub TLS passphrase requires OS safeStorage decryption'), {
+          code: 'tls_passphrase_decrypt_failed'
+        });
+      }
+      try {
+        return adapter.decryptString(Buffer.from(stored.data, 'base64'));
+      } catch (cause) {
+        throw Object.assign(new Error('Failed to decrypt Hub TLS passphrase'), {
+          code: 'tls_passphrase_decrypt_failed',
+          cause
+        });
+      }
+    }
+    if (stored.mode === 'plain-private') {
+      return Buffer.from(stored.data, 'base64').toString('utf8');
+    }
+    throw Object.assign(new Error(`Unsupported Hub TLS passphrase storage mode: ${String(stored.mode || 'unknown')}`), {
+      code: 'tls_passphrase_decrypt_failed'
+    });
+  }
+
+  writeHubTlsPassphrase(passphrase = '', options = {}) {
+    const document = this.readDocument();
+    const raw = typeof passphrase === 'string' ? passphrase : '';
+    if (!raw) {
+      deleteValueAt(document.credentials, ['hub', 'tls', 'passphrase']);
+      this.writeDocument(document);
+      return { configured: false, mode: 'none' };
+    }
+    if (raw.includes('\0') || Buffer.byteLength(raw, 'utf8') > 1024) {
+      throw Object.assign(new Error('Invalid Hub TLS passphrase'), { code: 'tls_invalid_passphrase' });
+    }
+    const adapter = options.safeStorage || null;
+    let canEncrypt;
+    try {
+      canEncrypt = Boolean(
+        adapter
+        && typeof adapter.isEncryptionAvailable === 'function'
+        && adapter.isEncryptionAvailable()
+        && typeof adapter.encryptString === 'function'
+        && typeof adapter.decryptString === 'function'
+      );
+    } catch (_) {
+      canEncrypt = false;
+    }
+    const envelope = canEncrypt
+      ? {
+          version: 1,
+          mode: 'safeStorage',
+          data: adapter.encryptString(raw).toString('base64')
+        }
+      : {
+          version: 1,
+          mode: 'plain-private',
+          data: Buffer.from(raw, 'utf8').toString('base64')
+        };
+    setValueAt(document.credentials, ['hub', 'tls', 'passphrase'], envelope);
+    this.writeDocument(document);
+    return { configured: true, mode: envelope.mode };
+  }
+
+  hasHubTlsPassphrase(document = this.readDocument()) {
+    const stored = valueAt(document.credentials, ['hub', 'tls', 'passphrase']);
+    return Boolean(isObject(stored) && stored.version === 1 && typeof stored.data === 'string' && stored.data.length > 0);
   }
 
   migrateLegacyMimoCredentials(entries) {

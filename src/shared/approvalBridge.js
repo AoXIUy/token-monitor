@@ -34,11 +34,33 @@ function encodeFrame(payload) {
 }
 
 function writePrivateJsonAtomic(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
-  fs.writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-  try { fs.chmodSync(tempPath, 0o600); } catch (_) {}
-  fs.renameSync(tempPath, filePath);
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true, ...(process.platform === 'win32' ? {} : { mode: 0o700 }) });
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(dir, 0o700); } catch (_) {}
+  }
+  const tempPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  const payload = `${JSON.stringify(value, null, 2)}\n`;
+  let fd = -1;
+  try {
+    if (process.platform === 'win32') {
+      fs.writeFileSync(tempPath, payload, { encoding: 'utf8', flag: 'wx' });
+    } else {
+      fd = fs.openSync(tempPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+      fs.writeFileSync(fd, payload, 'utf8');
+      try { fs.fchmodSync(fd, 0o600); } catch (_) {}
+      try { fs.fsyncSync(fd); } catch (_) {}
+      fs.closeSync(fd);
+      fd = -1;
+    }
+    fs.renameSync(tempPath, filePath);
+  } catch (err) {
+    if (fd >= 0) {
+      try { fs.closeSync(fd); } catch (_) {}
+    }
+    try { fs.unlinkSync(tempPath); } catch (_) {}
+    throw err;
+  }
 }
 
 function probeEndpoint(targetEndpoint, timeoutMs = 250) {
@@ -173,7 +195,10 @@ function createApprovalBridge({
   async function start() {
     if (stopped) return { started: false, reason: 'stopped' };
     if (server && owned) return { started: true, endpoint };
-    fs.mkdirSync(dataDir, { recursive: true });
+    fs.mkdirSync(dataDir, { recursive: true, ...(platform === 'win32' ? {} : { mode: 0o700 }) });
+    if (platform !== 'win32') {
+      try { fs.chmodSync(dataDir, 0o700); } catch (_) {}
+    }
     if (platform === 'win32') {
       // Named pipes do not appear as filesystem entries and allow duplicate listeners on win32 unless probed first.
       if (await probeEndpoint(endpoint)) {

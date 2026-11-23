@@ -1,6 +1,7 @@
 'use strict';
 
 const { coerceHistory } = require('../shared/history');
+const { createHubClientFetch } = require('../shared/hubClientFetch');
 
 function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object || {}, key);
@@ -89,8 +90,9 @@ function completeHistorySource(options = {}) {
 async function resolveCompleteHistory(options = {}) {
   const {
     aggregateHistory,
+    caCertPem = '',
     embeddedHub,
-    fetchImpl = globalThis.fetch,
+    fetchImpl,
     hubUrl,
     icloudSync,
     localDevice,
@@ -110,15 +112,17 @@ async function resolveCompleteHistory(options = {}) {
     default:
       break;
   }
-  if (typeof fetchImpl !== 'function') throw new Error('History fetch is unavailable');
+  const effectiveFetch = fetchImpl || createHubClientFetch({ caCertPem, defaultTimeoutMs: timeoutMs });
+  if (typeof effectiveFetch !== 'function') throw new Error('History fetch is unavailable');
 
   const url = `${String(hubUrl).replace(/\/$/, '')}/api/history`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetchImpl(url, {
+    const response = await effectiveFetch(url, {
       headers: secret ? { authorization: `Bearer ${secret}` } : {},
-      signal: controller.signal
+      signal: controller.signal,
+      redirect: 'error'
     });
     if (!response.ok) throw new Error(`Hub ${response.status}: ${(await response.text()).slice(0, 200)}`);
     return parseCompleteHistory(await response.json());
@@ -135,8 +139,9 @@ async function resolveCompleteHistory(options = {}) {
 async function resolveCompleteHistoryWithDevices(options = {}) {
   const {
     aggregateHistory,
+    caCertPem = '',
     embeddedHub,
-    fetchImpl = globalThis.fetch,
+    fetchImpl,
     hubUrl,
     icloudSync,
     localDevice,
@@ -162,14 +167,16 @@ async function resolveCompleteHistoryWithDevices(options = {}) {
       records = await icloudSync.getDevices();
       break;
     default: {
-      if (typeof fetchImpl !== 'function') throw new Error('Device History fetch is unavailable');
+      const effectiveFetch = fetchImpl || createHubClientFetch({ caCertPem, defaultTimeoutMs: timeoutMs });
+      if (typeof effectiveFetch !== 'function') throw new Error('Device History fetch is unavailable');
       const url = `${String(hubUrl).replace(/\/$/, '')}/api/devices`;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        const response = await fetchImpl(url, {
+        const response = await effectiveFetch(url, {
           headers: secret ? { authorization: `Bearer ${secret}` } : {},
-          signal: controller.signal
+          signal: controller.signal,
+          redirect: 'error'
         });
         if (!response.ok) throw new Error(`Hub ${response.status}: ${(await response.text()).slice(0, 200)}`);
         const payload = await response.json();

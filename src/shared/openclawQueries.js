@@ -186,6 +186,9 @@ function clampLimit(value, fallback = DEFAULT_LIMIT, max = MAX_LIMIT) {
   return Math.max(1, Math.min(max, Math.floor(parsed)));
 }
 
+const MIN_QUERY_YEAR = 2000;
+const MAX_QUERY_YEAR = 2100;
+
 /**
  * @param {any} value
  * @returns {string}
@@ -193,6 +196,8 @@ function clampLimit(value, fallback = DEFAULT_LIMIT, max = MAX_LIMIT) {
 function validateDateKey(value) {
   const key = cleanText(value, 16);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return '';
+  const year = Number(key.slice(0, 4));
+  if (!Number.isInteger(year) || year < MIN_QUERY_YEAR || year > MAX_QUERY_YEAR) return '';
   const date = new Date(`${key}T00:00:00.000Z`);
   if (Number.isNaN(date.getTime())) return '';
   return date.toISOString().slice(0, 10) === key ? key : '';
@@ -205,8 +210,9 @@ function validateDateKey(value) {
 function validateMonthKey(value) {
   const key = cleanText(value, 16);
   if (!/^\d{4}-\d{2}$/.test(key)) return '';
+  const year = Number(key.slice(0, 4));
   const month = Number(key.slice(5, 7));
-  return month >= 1 && month <= 12 ? key : '';
+  return Number.isInteger(year) && year >= MIN_QUERY_YEAR && year <= MAX_QUERY_YEAR && month >= 1 && month <= 12 ? key : '';
 }
 
 /**
@@ -2857,7 +2863,9 @@ function parseHistoryDateBound(value, boundKind) {
     if (boundKind === 'start') return `${exactMonth}-01`;
     const year = Number(exactMonth.slice(0, 4));
     const month = Number(exactMonth.slice(5, 7));
-    return new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10);
+    const endDateObj = new Date(0);
+    endDateObj.setUTCFullYear(year, month, 0);
+    return endDateObj.toISOString().slice(0, 10);
   }
   throw new Error(`Invalid history date bound "${raw}". Expected YYYY-MM-DD or YYYY-MM`);
 }

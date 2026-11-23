@@ -46,6 +46,54 @@ const ANALYSIS_KEY_RE = /^[A-Za-z0-9._-]+$/;
 const MAX_PUSH_HISTORY = 50;
 const MAX_IDEMPOTENCY_KEYS = 512;
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_CONCURRENT_OUTBOUND = 4;
+const MAX_CUSTOM_MESSAGE_CHARS = 2000;
+const MAX_CUSTOM_RESULT_BYTES = 32 * 1024;
+const DEFAULT_APPROVAL_WEBHOOK_WINDOW_MS = 60_000;
+const DEFAULT_APPROVAL_WEBHOOK_PER_DEVICE = 5;
+const DEFAULT_APPROVAL_WEBHOOK_GLOBAL = 20;
+
+/**
+ * Extract normalized `scheme://host[:port]` origin from an HTTP(S) URL, or empty string.
+ * @param {any} rawUrl
+ * @returns {string}
+ */
+function urlOrigin(rawUrl) {
+  const s = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!s) return '';
+  try {
+    return new URL(s).origin.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Truncate arbitrary `params.result` payloads to `<= maxBytes` UTF-8 before redaction or forwarding.
+ * @param {any} value
+ * @param {number} [maxBytes]
+ * @returns {any}
+ */
+function boundCustomResultPayload(value, maxBytes = MAX_CUSTOM_RESULT_BYTES) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') {
+    return Buffer.byteLength(value, 'utf8') > maxBytes
+      ? value.slice(0, maxBytes)
+      : value;
+  }
+  try {
+    const serialized = JSON.stringify(value);
+    if (typeof serialized !== 'string' || Buffer.byteLength(serialized, 'utf8') <= maxBytes) {
+      return value;
+    }
+    return {
+      truncated: true,
+      preview: serialized.slice(0, Math.min(2000, maxBytes))
+    };
+  } catch {
+    return { truncated: true, preview: String(value).slice(0, 2000) };
+  }
+}
 const QUERY_PUSH_TYPES = new Set([
   'report',
   'usage',
@@ -96,20 +144,31 @@ function readPrivateTextNoFollow(filePath) {
 function writePrivateJson(filePath, value) {
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true, ...(process.platform === 'win32' ? {} : { mode: 0o700 }) });
-  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  const payload = `${JSON.stringify(value, null, 2)}\n`;
-  if (process.platform === 'win32') {
-    fs.writeFileSync(tmpPath, payload, 'utf8');
-  } else {
-    const fd = fs.openSync(tmpPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC, 0o600);
-    try {
-      fs.writeFileSync(fd, payload, 'utf8');
-      fs.fchmodSync(fd, 0o600);
-    } finally {
-      fs.closeSync(fd);
-    }
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(dir, 0o700); } catch (_) {}
   }
-  fs.renameSync(tmpPath, filePath);
+  const tmpPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  const payload = `${JSON.stringify(value, null, 2)}\n`;
+  let fd = -1;
+  try {
+    if (process.platform === 'win32') {
+      fs.writeFileSync(tmpPath, payload, { encoding: 'utf8', flag: 'wx' });
+    } else {
+      fd = fs.openSync(tmpPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+      fs.writeFileSync(fd, payload, 'utf8');
+      try { fs.fchmodSync(fd, 0o600); } catch (_) {}
+      try { fs.fsyncSync(fd); } catch (_) {}
+      fs.closeSync(fd);
+      fd = -1;
+    }
+    fs.renameSync(tmpPath, filePath);
+  } catch (error) {
+    if (fd >= 0) {
+      try { fs.closeSync(fd); } catch (_) {}
+    }
+    try { fs.unlinkSync(tmpPath); } catch (_) {}
+    throw error;
+  }
 }
 
 /**
@@ -346,6 +405,10 @@ function buildCompletionDetailSummary(detail, secretValues) {
  *   initialSecrets?: { aiApiKey?: string, openclawHookToken?: string, weixinBotToken?: string } | null,
  *   openclawOptions?: any,
  *   fetchImpl?: typeof fetch,
+ *   allowPrivateTargets?: boolean,
+ *   dnsLookup?: (hostname: string, options: { all: true, verbatim: true }) => Promise<Array<{ address: string, family?: number }>>,
+ *   maxConcurrentOutbound?: number,
+ *   approvalWebhookRateLimit?: { windowMs?: number, perDevice?: number, global?: number },
  *   now?: () => Date,
  *   logger?: { error?: (...args: any[]) => void, warn?: (...args: any[]) => void, log?: (...args: any[]) => void }
  * }} options
@@ -364,6 +427,10 @@ function createIntegrationManager({
   initialSecrets = null,
   openclawOptions = null,
   fetchImpl,
+  allowPrivateTargets = undefined,
+  dnsLookup = undefined,
+  maxConcurrentOutbound = MAX_CONCURRENT_OUTBOUND,
+  approvalWebhookRateLimit = undefined,
   now = () => new Date(),
   logger = console
 }) {
@@ -373,7 +440,36 @@ function createIntegrationManager({
   const statePath = path.join(resolvedReportsDir, 'integrations-state.json');
   const aiAnalysisDir = path.join(resolvedReportsDir, 'ai-analysis');
   const logError = typeof logger?.error === 'function' ? logger.error.bind(logger) : console.error;
-  const httpFetch = typeof fetchImpl === 'function' ? fetchImpl : createOutboundFetch();
+  const hasCustomFetch = typeof fetchImpl === 'function';
+  const httpFetch = hasCustomFetch ? fetchImpl : createOutboundFetch();
+  const outboundSafetyOptions = {
+    allowPrivateTargets,
+    dnsLookup,
+    enforceDnsLookup: typeof dnsLookup === 'function' || !hasCustomFetch
+  };
+  const resolvedMaxOutbound = Number.isInteger(maxConcurrentOutbound) && maxConcurrentOutbound >= 1
+    ? maxConcurrentOutbound
+    : MAX_CONCURRENT_OUTBOUND;
+  const rateLimitInput = isPlainObject(approvalWebhookRateLimit) ? approvalWebhookRateLimit : {};
+  const rawWindowMs = Number(rateLimitInput?.windowMs);
+  const rawPerDevice = Number(rateLimitInput?.perDevice);
+  const rawGlobal = Number(rateLimitInput?.global);
+  const webhookRateCfg = {
+    windowMs: Number.isFinite(rawWindowMs) && rawWindowMs > 0
+      ? rawWindowMs
+      : DEFAULT_APPROVAL_WEBHOOK_WINDOW_MS,
+    perDevice: Number.isInteger(rawPerDevice) && rawPerDevice >= 1
+      ? rawPerDevice
+      : DEFAULT_APPROVAL_WEBHOOK_PER_DEVICE,
+    global: Number.isInteger(rawGlobal) && rawGlobal >= 1
+      ? rawGlobal
+      : DEFAULT_APPROVAL_WEBHOOK_GLOBAL
+  };
+  let activeOutbound = 0;
+  /** @type {Map<string, number[]>} */
+  const approvalWebhookByDevice = new Map();
+  /** @type {number[]} */
+  let approvalWebhookGlobal = [];
   const resolvedOpenClawOpts = isPlainObject(openclawOptions) ? openclawOptions : {};
 
   const envDefaults = readEnvIntegrationsDefaults();
@@ -584,36 +680,102 @@ function createIntegrationManager({
   }
 
   /**
-   * @param {any} patch
+   * Run an outbound AI/webhook call under the bounded concurrency semaphore.
+   * @template T
+   * @param {() => Promise<T>} fn
+   * @returns {Promise<T | { ok: false, statusCode: number, error: string, message: string }>}
    */
-  function updateConfig(patch = {}) {
+  async function runWithOutboundSlot(fn) {
+    if (activeOutbound >= resolvedMaxOutbound) {
+      return {
+        ok: false,
+        statusCode: 429,
+        error: 'too_many_outbound_requests',
+        message: `Too many concurrent outbound integration requests (max ${resolvedMaxOutbound}).`
+      };
+    }
+    activeOutbound += 1;
+    try {
+      return await fn();
+    } finally {
+      activeOutbound -= 1;
+    }
+  }
+
+  /**
+   * Sliding-window rate limit check for approval-alert outbound webhooks.
+   * @param {string} deviceId
+   * @param {number} currentMs
+   * @returns {boolean}
+   */
+  function consumeApprovalWebhookQuota(deviceId, currentMs) {
+    const cutoff = currentMs - webhookRateCfg.windowMs;
+    approvalWebhookGlobal = approvalWebhookGlobal.filter((ts) => ts > cutoff);
+    if (approvalWebhookGlobal.length >= webhookRateCfg.global) {
+      return false;
+    }
+    const key = String(deviceId || 'unknown').trim() || 'unknown';
+    const prevList = approvalWebhookByDevice.get(key) || [];
+    const recent = prevList.filter((ts) => ts > cutoff);
+    if (recent.length >= webhookRateCfg.perDevice) {
+      approvalWebhookByDevice.set(key, recent);
+      return false;
+    }
+    recent.push(currentMs);
+    approvalWebhookByDevice.set(key, recent);
+    approvalWebhookGlobal.push(currentMs);
+    // Keep device map bounded even under high churn.
+    if (approvalWebhookByDevice.size > 256) {
+      for (const [dev, list] of approvalWebhookByDevice) {
+        const active = list.filter((ts) => ts > cutoff);
+        if (active.length === 0) approvalWebhookByDevice.delete(dev);
+        else approvalWebhookByDevice.set(dev, active);
+      }
+    }
+    return true;
+  }
+
+  /**
+   * @param {any} patch
+   * @param {{ allowQueryPermissionMutation?: boolean }} [options]
+   */
+  function updateConfig(patch = {}, options = {}) {
     if (!isPlainObject(patch)) {
       return { ok: false, error: 'invalid_request', message: 'Integrations patch must be an object' };
     }
 
+    const allowQueryPermissionMutation = options?.allowQueryPermissionMutation === true;
     let configChanged = false;
     let secretsChanged = false;
 
     if (isPlainObject(patch.ai)) {
+      const prevAiOrigin = urlOrigin(config.ai.baseUrl);
       const mergedAi = { ...config.ai, ...patch.ai };
       delete mergedAi.apiKey;
       delete mergedAi.apiKeyConfigured;
       delete mergedAi.clearApiKey;
       config.ai = normalizeAiIntegrationConfig(mergedAi);
+      const nextAiOrigin = urlOrigin(config.ai.baseUrl);
       configChanged = true;
 
+      const hasNewApiKey = typeof patch.ai.apiKey === 'string' && patch.ai.apiKey.trim().length > 0;
       if (patch.ai.clearApiKey === true) {
         if (secrets.aiApiKey) {
           secrets.aiApiKey = '';
           secretsChanged = true;
         }
-      } else if (typeof patch.ai.apiKey === 'string' && patch.ai.apiKey.trim()) {
+      } else if (hasNewApiKey) {
         secrets.aiApiKey = cleanSecret(patch.ai.apiKey);
+        secretsChanged = true;
+      } else if (nextAiOrigin !== prevAiOrigin && secrets.aiApiKey) {
+        // Clear stored API key whenever the destination origin changes without a new explicit key.
+        secrets.aiApiKey = '';
         secretsChanged = true;
       }
     }
 
     if (isPlainObject(patch.openclaw)) {
+      const prevOcOrigin = urlOrigin(config.openclaw.webhookUrl);
       const sanitizedPatch = { ...patch.openclaw };
       delete sanitizedPatch.hookToken;
       delete sanitizedPatch.hookTokenConfigured;
@@ -621,16 +783,25 @@ function createIntegrationManager({
       delete sanitizedPatch.clearHookToken;
       delete sanitizedPatch.localBridgeToken;
       delete sanitizedPatch.localBridgeTokenConfigured;
+      if (!allowQueryPermissionMutation) {
+        delete sanitizedPatch.queryPermissions;
+      }
       config.openclaw = mergeOpenClawIntegrationConfig(config.openclaw, sanitizedPatch);
+      const nextOcOrigin = urlOrigin(config.openclaw.webhookUrl);
       configChanged = true;
 
+      const hasNewHookToken = typeof patch.openclaw.hookToken === 'string' && patch.openclaw.hookToken.trim().length > 0;
       if (patch.openclaw.clearHookToken === true) {
         if (secrets.openclawHookToken) {
           secrets.openclawHookToken = '';
           secretsChanged = true;
         }
-      } else if (typeof patch.openclaw.hookToken === 'string' && patch.openclaw.hookToken.trim()) {
+      } else if (hasNewHookToken) {
         secrets.openclawHookToken = cleanSecret(patch.openclaw.hookToken);
+        secretsChanged = true;
+      } else if (nextOcOrigin !== prevOcOrigin && secrets.openclawHookToken) {
+        // Clear stored hook token whenever the destination origin changes without a new explicit token.
+        secrets.openclawHookToken = '';
         secretsChanged = true;
       }
       syncCompletionTrackerOptions();
@@ -711,7 +882,7 @@ function createIntegrationManager({
     }
 
     const stats = getStats();
-    const result = await trackTask(invokeThirdPartyAiAnalysis({
+    const result = await trackTask(runWithOutboundSlot(() => invokeThirdPartyAiAnalysis({
       config: config.ai,
       apiKey: secrets.aiApiKey,
       report,
@@ -719,8 +890,9 @@ function createIntegrationManager({
       question: cleanQuestion,
       language: language || config.ai.language,
       fetchImpl: httpFetch,
+      ...outboundSafetyOptions,
       now
-    }));
+    })));
 
     if (!result.ok) return result;
     if (!cleanQuestion) {
@@ -915,7 +1087,7 @@ function createIntegrationManager({
 
     const executeDispatch = async () => {
       /** @type {any} */
-      const pushResult = await trackTask(sendToOpenClawWebhook({
+      const pushResult = await trackTask(runWithOutboundSlot(() => sendToOpenClawWebhook({
         config: config.openclaw,
         hookToken: secrets.openclawHookToken,
         report,
@@ -925,11 +1097,12 @@ function createIntegrationManager({
         eventType: cleanEventType,
         eventPayload: payload,
         promptPrefix: typeof promptPrefix === 'string' ? promptPrefix : '',
-        customMessage: typeof text === 'string' ? text : '',
+        customMessage: typeof text === 'string' ? text.slice(0, MAX_CUSTOM_MESSAGE_CHARS) : '',
         idempotencyKey: cleanKey,
         fetchImpl: httpFetch,
+        ...outboundSafetyOptions,
         now
-      }));
+      })));
 
       const atIso = now().toISOString();
       const ok = pushResult.ok === true;
@@ -1245,7 +1418,7 @@ function createIntegrationManager({
         models: [],
         signals: []
       };
-      const aiRes = await trackTask(invokeThirdPartyAiAnalysis({
+      const aiRes = await trackTask(runWithOutboundSlot(() => invokeThirdPartyAiAnalysis({
         config: config.ai,
         apiKey: secrets.aiApiKey,
         report: syntheticReport,
@@ -1253,8 +1426,9 @@ function createIntegrationManager({
         question,
         language: config.ai.language,
         fetchImpl: httpFetch,
+        ...outboundSafetyOptions,
         now
-      }));
+      })));
       return aiRes?.ok && aiRes.analysis ? aiRes.analysis : null;
     } catch (error) {
       logError(error, 'optional AI summary failed');
@@ -1298,10 +1472,14 @@ function createIntegrationManager({
     }
 
     const p = isPlainObject(params) ? params : {};
-    const cleanCustom = typeof customMessage === 'string' ? customMessage.trim() : '';
+    const cleanCustom = typeof customMessage === 'string'
+      ? customMessage.trim().slice(0, MAX_CUSTOM_MESSAGE_CHARS)
+      : '';
 
     if (rawType === 'test') {
-      return sendTestNotification({ message: cleanCustom || p.message || '', source: source || 'query_push' });
+      const testMsg = cleanCustom
+        || (typeof p.message === 'string' ? p.message.trim().slice(0, MAX_CUSTOM_MESSAGE_CHARS) : '');
+      return sendTestNotification({ message: testMsg, source: source || 'query_push' });
     }
 
     if (rawType === 'report') {
@@ -1320,9 +1498,10 @@ function createIntegrationManager({
 
     if (rawType === 'custom') {
       const customText = cleanCustom
-        || (typeof p.message === 'string' ? p.message.trim() : '')
-        || (typeof p.text === 'string' ? p.text.trim() : '');
-      const customPayload = p.result ?? (customText ? { message: customText } : null);
+        || (typeof p.message === 'string' ? p.message.trim().slice(0, MAX_CUSTOM_MESSAGE_CHARS) : '')
+        || (typeof p.text === 'string' ? p.text.trim().slice(0, MAX_CUSTOM_MESSAGE_CHARS) : '');
+      const boundedResult = p.result !== undefined ? boundCustomResultPayload(p.result, MAX_CUSTOM_RESULT_BYTES) : undefined;
+      const customPayload = boundedResult ?? (customText ? { message: customText } : null);
       if (!customText && !customPayload) {
         return {
           ok: false,
@@ -1415,6 +1594,31 @@ function createIntegrationManager({
     }
     const alertId = typeof alert.id === 'string' ? alert.id.trim() : '';
     const idempotencyKey = alertId ? `approval:${alertId}` : '';
+    const clockMs = now().getTime();
+    pruneIdempotencyWindow(clockMs);
+    if (idempotencyKey && succeededIdempotency.has(idempotencyKey)) {
+      return {
+        ok: true,
+        deduplicated: true,
+        skipped: true,
+        eventType: 'approval_alert',
+        idempotencyKey,
+        channel: config.openclaw.channel,
+        mode: config.openclaw.mode,
+        lastPush: state.lastPush
+      };
+    }
+    if (!consumeApprovalWebhookQuota(String(alert.deviceId || ''), clockMs)) {
+      return {
+        ok: false,
+        skipped: true,
+        rateLimited: true,
+        statusCode: 429,
+        error: 'rate_limited',
+        reason: 'rate_limited',
+        message: 'Approval alert outbound webhook rate limit exceeded.'
+      };
+    }
     const text = formatOpenClawApprovalAlertMessage(alert);
     return dispatchEvent({
       eventType: 'approval_alert',
@@ -1632,8 +1836,14 @@ function createIntegrationManager({
     };
   }
 
-  async function getOpenClawEnv() {
-    return detectOpenClawEnvironment(resolvedOpenClawOpts);
+  /**
+   * @param {{ includePaths?: boolean }} [options]
+   */
+  async function getOpenClawEnv(options = {}) {
+    return detectOpenClawEnvironment({
+      ...resolvedOpenClawOpts,
+      includePaths: options?.includePaths === true
+    });
   }
 
   async function startOpenClawWeixinQr() {
@@ -1743,12 +1953,13 @@ function createIntegrationManager({
 
   /**
    * @param {string} sessionId
+   * @param {{ signal?: AbortSignal }} [options]
    */
-  async function pollOpenClawWeixinQrStatus(sessionId) {
+  async function pollOpenClawWeixinQrStatus(sessionId, options = {}) {
     if (stopped) {
       return { ok: false, error: 'hub_stopped', message: 'Hub is stopping.' };
     }
-    const result = await trackTask(qrManager.pollStatus(sessionId));
+    const result = await trackTask(qrManager.pollStatus(sessionId, { signal: options?.signal }));
     if (result?.ok && (result.status === 'confirmed' || result.status === 'binded_redirect')) {
       return finalizeWeixinQrResult(result);
     }
@@ -1788,20 +1999,31 @@ function createIntegrationManager({
     if (stopped) {
       return { ok: false, error: 'hub_stopped', message: 'Hub is stopping.' };
     }
-    const hookSecrets = readOpenClawHookSecrets(resolvedOpenClawOpts);
+    const ensureHooks = options?.ensureHooks !== false;
+    const hookSecrets = ensureHooks ? readOpenClawHookSecrets(resolvedOpenClawOpts) : { hookToken: '' };
     const provisionRes = await trackTask(configureOpenClawHost({
-      ensureHooks: options?.ensureHooks !== false,
+      ensureHooks,
       installSkill: options?.installSkill !== false,
       restartGateway: options?.restartGateway === true,
       bumpChannelReload: options?.bumpChannelReload !== false,
-      hookToken: secrets.openclawHookToken || hookSecrets.hookToken || undefined,
+      hookToken: ensureHooks ? (secrets.openclawHookToken || hookSecrets.hookToken || undefined) : undefined,
       agentId: config.openclaw.agentId || 'main'
     }, { ...resolvedOpenClawOpts, now }));
 
-    const nextHookToken = cleanSecret(provisionRes.resolvedHookToken || hookSecrets.hookToken);
-    if (nextHookToken && nextHookToken !== secrets.openclawHookToken) {
-      secrets.openclawHookToken = nextHookToken;
-      saveSecrets();
+    if (provisionRes.ok === false) {
+      const { resolvedHookToken: _omitHookToken, ...safeProvision } = provisionRes;
+      return {
+        ...safeProvision,
+        ...getStatus()
+      };
+    }
+
+    if (ensureHooks) {
+      const nextHookToken = cleanSecret(provisionRes.resolvedHookToken || hookSecrets.hookToken);
+      if (nextHookToken && nextHookToken !== secrets.openclawHookToken) {
+        secrets.openclawHookToken = nextHookToken;
+        saveSecrets();
+      }
     }
 
     const nextWebhookUrl = config.openclaw.webhookUrl || provisionRes.webhookUrl;

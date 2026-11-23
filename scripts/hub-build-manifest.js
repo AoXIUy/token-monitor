@@ -57,6 +57,7 @@ const WORKER_SHARED_PACKAGE = Object.freeze({
 const CORE_SOURCE_FILES = WORKER_SHARED_MODULES.map((name) => `src/shared/${name}`);
 const NODE_RUNTIME_SOURCE_FILES = Object.freeze([
   'src/hub/server.js',
+  'src/hub/tls.js',
   'src/hub/reports.js',
   'src/hub/integrations.js',
   'src/hub/openclawProvisioner.js',
@@ -77,7 +78,8 @@ const NODE_RUNTIME_SOURCE_FILES = Object.freeze([
   'src/shared/antigravityManagerProtocol.js',
   'src/shared/http.js',
   'src/shared/outboundFetch.js',
-  'src/shared/config.js'
+  'src/shared/config.js',
+  'src/shared/tlsCert.js'
 ]);
 const WORKER_RUNTIME_SOURCE_FILES = Object.freeze([
   'worker/src/index.js',

@@ -8,71 +8,146 @@ const { MAX_UPLOAD_BYTES } = require('./uploadDelta');
 const MAX_JSON_BODY_BYTES = MAX_UPLOAD_BYTES;
 const JSON_COMPRESSION_MIN_BYTES = 1024;
 
-function corsHeaders(extraHeaders = {}) {
+const SECURITY_HEADERS = Object.freeze({
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+  'content-security-policy': "default-src 'none'; frame-ancestors 'none'",
+  'referrer-policy': 'no-referrer',
+  'cross-origin-resource-policy': 'same-origin'
+});
+
+function securityHeaders(extraHeaders = {}) {
   return {
-    'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET,POST,PUT,DELETE,OPTIONS',
-    'access-control-allow-headers': 'authorization,content-type,x-token-monitor-secret,x-token-monitor-response,x-token-monitor-stream,x-token-monitor-upload',
+    ...SECURITY_HEADERS,
     ...extraHeaders
   };
 }
 
 function sendJson(res, statusCode, payload, extraHeaders = {}) {
   const body = Buffer.from(JSON.stringify(payload), 'utf8');
-  const compressed = acceptsEncoding(res.req, 'gzip') && body.byteLength >= JSON_COMPRESSION_MIN_BYTES
+  const req = res?.req || null;
+  const compressed = req && acceptsEncoding(req, 'gzip') && body.byteLength >= JSON_COMPRESSION_MIN_BYTES
     ? zlib.gzipSync(body, { level: zlib.constants.Z_BEST_SPEED })
     : null;
-  res.writeHead(statusCode, corsHeaders({
+  const wire = compressed || body;
+  res.writeHead(statusCode, securityHeaders({
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
-    'content-length': String((compressed || body).byteLength),
+    'content-length': String(wire.byteLength),
     ...(compressed ? { 'content-encoding': 'gzip', vary: 'accept-encoding' } : {}),
     ...extraHeaders
   }));
-  res.end(compressed || body);
+  if (req && req.method === 'HEAD') {
+    res.end();
+    return;
+  }
+  res.end(wire);
 }
 
-function sendText(res, statusCode, body, contentType = 'text/plain; charset=utf-8') {
-  res.writeHead(statusCode, corsHeaders({
+function sendText(res, statusCode, body, contentType = 'text/plain; charset=utf-8', extraHeaders = {}) {
+  const req = res?.req || null;
+  const text = String(body ?? '');
+  res.writeHead(statusCode, securityHeaders({
     'content-type': contentType,
-    'cache-control': 'no-store'
+    'cache-control': 'no-store',
+    ...extraHeaders
   }));
-  res.end(body);
+  if (req && req.method === 'HEAD') {
+    res.end();
+    return;
+  }
+  res.end(text);
 }
 
-function readJsonBody(req, maxBytes = MAX_JSON_BODY_BYTES) {
+function makePayloadTooLargeError() {
+  const error = new Error('Request body too large');
+  error.code = 'payload_too_large';
+  return error;
+}
+
+function declaredContentLength(req) {
+  const raw = req?.headers?.['content-length'];
+  if (raw === undefined || raw === null || raw === '') return null;
+  const text = Array.isArray(raw) ? raw[0] : String(raw);
+  if (!/^\d+$/.test(text.trim())) return null;
+  const parsed = Number(text.trim());
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function readRawTextBody(req, maxBytes = MAX_JSON_BODY_BYTES) {
+  const declared = declaredContentLength(req);
+  if (declared !== null && declared > maxBytes) {
+    try { req.pause?.(); } catch (_) {}
+    return Promise.reject(makePayloadTooLargeError());
+  }
   return new Promise((resolve, reject) => {
     let body = '';
     let bytes = 0;
-    let tooLarge = false;
-    req.setEncoding('utf8');
-    req.on('data', (chunk) => {
-      if (tooLarge) return;
+    let settled = false;
+
+    const cleanup = () => {
+      req.off?.('data', onData);
+      req.off?.('end', onEnd);
+      req.off?.('error', onError);
+      req.off?.('aborted', onAborted);
+    };
+
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      body = '';
+      cleanup();
+      reject(error);
+    };
+
+    const onData = (chunk) => {
+      if (settled) return;
       bytes += Buffer.byteLength(chunk, 'utf8');
       if (bytes > maxBytes) {
-        tooLarge = true;
-        body = '';
-        const error = new Error('Request body too large');
-        error.code = 'payload_too_large';
-        reject(error);
+        try { req.pause?.(); } catch (_) {}
+        fail(makePayloadTooLargeError());
         return;
       }
       body += chunk;
-    });
-    req.on('end', () => {
-      if (tooLarge) return;
-      if (!body.trim()) return resolve({});
-      try { resolve(JSON.parse(body)); }
-      catch (error) { reject(new Error(`Invalid JSON body: ${error.message}`)); }
-    });
-    req.on('error', reject);
+    };
+
+    const onEnd = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(body);
+    };
+
+    const onError = (error) => fail(error);
+    const onAborted = () => {
+      const error = new Error('Request aborted');
+      error.code = 'request_aborted';
+      fail(error);
+    };
+
+    req.setEncoding?.('utf8');
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+    req.on('aborted', onAborted);
   });
 }
 
+async function readJsonBody(req, maxBytes = MAX_JSON_BODY_BYTES) {
+  const body = await readRawTextBody(req, maxBytes);
+  if (!body.trim()) return {};
+  try {
+    return JSON.parse(body);
+  } catch (error) {
+    throw new Error(`Invalid JSON body: ${error.message}`, { cause: error });
+  }
+}
+
 function requestSecret(req) {
-  const auth = req.headers.authorization || '';
-  if (auth.toLowerCase().startsWith('bearer ')) return auth.slice(7).trim();
-  return String(req.headers['x-token-monitor-secret'] || '').trim();
+  const auth = req?.headers?.authorization || '';
+  if (typeof auth === 'string' && auth.toLowerCase().startsWith('bearer ')) return auth.slice(7).trim();
+  const header = req?.headers?.['x-token-monitor-secret'];
+  return typeof header === 'string' ? header.trim() : '';
 }
 
 // Compare SHA-256 digests rather than the raw strings: timingSafeEqual needs
@@ -90,8 +165,12 @@ function isAuthorized(req, expectedSecret) {
 
 module.exports = {
   MAX_JSON_BODY_BYTES,
+  SECURITY_HEADERS,
   isAuthorized,
   readJsonBody,
+  readRawTextBody,
+  requestSecret,
+  securityHeaders,
   sendJson,
   sendText,
   timingSafeEqualText

@@ -59,11 +59,45 @@ function readJson(filePath, fallback = null) {
   }
 }
 
+function writeTextAtomic(filePath, content, options = {}) {
+  const fsApi = options.fs || fs;
+  const constants = fsApi.constants || fs.constants;
+  const mode = options.mode !== undefined ? options.mode : 0o600;
+  const directory = path.dirname(filePath);
+  const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  let descriptor = null;
+  let directoryDescriptor = null;
+  fsApi.mkdirSync(directory, { recursive: true });
+  try {
+    descriptor = fsApi.openSync(tempPath, 'wx', mode);
+    fsApi.writeFileSync(descriptor, String(content), 'utf8');
+    if (process.platform !== 'win32') fsApi.fchmodSync(descriptor, mode);
+    fsApi.fsyncSync(descriptor);
+    fsApi.closeSync(descriptor);
+    descriptor = null;
+    fsApi.renameSync(tempPath, filePath);
+    if (process.platform !== 'win32') {
+      try {
+        directoryDescriptor = fsApi.openSync(directory, constants.O_RDONLY);
+        fsApi.fsyncSync(directoryDescriptor);
+        fsApi.closeSync(directoryDescriptor);
+        directoryDescriptor = null;
+      } catch (_) {}
+    }
+  } catch (error) {
+    if (descriptor !== null) {
+      try { fsApi.closeSync(descriptor); } catch (_) {}
+    }
+    if (directoryDescriptor !== null) {
+      try { fsApi.closeSync(directoryDescriptor); } catch (_) {}
+    }
+    try { fsApi.rmSync(tempPath, { force: true }); } catch (_) {}
+    throw error;
+  }
+}
+
 function writeJsonAtomic(filePath, value, space = 2) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.tmp`;
-  fs.writeFileSync(tempPath, `${JSON.stringify(value, null, space)}\n`, 'utf8');
-  fs.renameSync(tempPath, filePath);
+  writeTextAtomic(filePath, `${JSON.stringify(value, null, space)}\n`);
 }
 
 function loadDotEnv() {
@@ -153,5 +187,6 @@ module.exports = {
   projectRoot,
   readJson,
   sharedDataDir,
-  writeJsonAtomic
+  writeJsonAtomic,
+  writeTextAtomic
 };

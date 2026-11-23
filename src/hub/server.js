@@ -1,6 +1,8 @@
 'use strict';
 
 const http = require('node:http');
+const https = require('node:https');
+const net = require('node:net');
 const { UPLOAD_HEADER, UPLOAD_VERSION, createUploadBaselines } = require('../shared/uploadDelta');
 const path = require('node:path');
 const { URL } = require('node:url');
@@ -34,8 +36,25 @@ const {
   wantsDeltaEvents,
   wantsMinimalResponse
 } = require('../shared/hubProtocol');
-const { MAX_JSON_BODY_BYTES, isAuthorized, readJsonBody, sendJson, sendText } = require('../shared/http');
+const {
+  MAX_JSON_BODY_BYTES,
+  readJsonBody,
+  readRawTextBody,
+  requestSecret,
+  securityHeaders,
+  sendJson: rawSendJson,
+  sendText: rawSendText,
+  timingSafeEqualText
+} = require('../shared/http');
 const { loadDotEnv, parseArgs, projectRoot, readJson, writeJsonAtomic } = require('../shared/config');
+const { loadPassphraseFromFile } = require('../shared/tlsCert');
+const {
+  createHttpRedirectServer,
+  createHubTlsController,
+  parseHostHeaderHostname,
+  parseHubTlsCliEnv,
+  resolveHubTlsConfig
+} = require('./tls');
 const { CONVERSATION_BASE, MAX_CONVERSATION_BYTES } = require('../shared/sessionConversationProtocol');
 const { createSessionConversationRelay } = require('./sessionConversations');
 const { APPROVAL_ALERT_BASE, MAX_APPROVAL_BODY_BYTES } = require('../shared/approvalProtocol');
@@ -66,43 +85,209 @@ const { createIntegrationManager } = require('./integrations');
 const { createReportManager } = require('./reports');
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const SHUTDOWN_DRAIN_TIMEOUT_MS = 5000;
 const ALLOWED_REPORT_CONFIG_KEYS = new Set(['enabled', 'daily', 'weekly', 'monthly']);
 
-function readRawTextBody(req, maxBytes = MAX_JSON_BODY_BYTES) {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    let bytes = 0;
-    let tooLarge = false;
-    req.setEncoding('utf8');
-    req.on('data', (chunk) => {
-      if (tooLarge) return;
-      bytes += Buffer.byteLength(chunk, 'utf8');
-      if (bytes > maxBytes) {
-        tooLarge = true;
-        body = '';
-        const error = new Error('Request body too large');
-        error.code = 'payload_too_large';
-        reject(error);
-        return;
-      }
-      body += chunk;
-    });
-    req.on('end', () => {
-      if (!tooLarge) resolve(body);
-    });
-    req.on('error', reject);
-  });
+const MIN_NON_LOOPBACK_SECRET_LENGTH = 24;
+const MAX_DEVICE_ID_LENGTH = 128;
+const MAX_DEVICES = 256;
+const MAX_SSE_CLIENTS = 32;
+const MAX_CONTROL_BODY_BYTES = 64 * 1024;
+const MAX_MCP_BODY_BYTES = 256 * 1024;
+const SERVER_HEADERS_TIMEOUT_MS = 15_000;
+const SERVER_REQUEST_TIMEOUT_MS = 30_000;
+const SERVER_KEEP_ALIVE_TIMEOUT_MS = 60_000;
+const SERVER_MAX_REQUESTS_PER_SOCKET = 1000;
+const SERVER_MAX_CONNECTIONS = 256;
+const DEFAULT_AUTH_RATE_LIMIT_MAX_FAILURES = 30;
+const DEFAULT_AUTH_RATE_LIMIT_WINDOW_MS = 60_000;
+const MAX_TRACKED_RATE_LIMIT_IPS = 4096;
+
+function normalizeIpAddress(value) {
+  const raw = String(value || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (!raw) return '';
+  if (raw.startsWith('::ffff:')) {
+    const mapped = raw.slice('::ffff:'.length);
+    if (net.isIPv4(mapped)) return mapped;
+  }
+  return raw;
+}
+
+function isLoopbackHost(host) {
+  const normalized = normalizeIpAddress(host);
+  if (!normalized) return false;
+  if (LOOPBACK_HOSTS.has(normalized)) return true;
+  if (net.isIPv4(normalized) && normalized.startsWith('127.')) return true;
+  return false;
 }
 
 // Without a secret the hub cannot tell its own widget from any other caller, so it
 // must not expose account identity (email/plan/key) to the network. Binding to
-// loopback keeps an unauthenticated hub usable locally while refusing LAN/remote
-// reach; set a secret to bind a non-loopback address and accept other devices.
+// loopback keeps an unauthenticated hub off LAN/remote interfaces; set a strong
+// secret to bind a non-loopback address and accept other devices.
 function resolveBindHost(host, secret) {
   const requested = String(host || '').trim() || '0.0.0.0';
-  if (secret) return requested;
+  if (String(secret || '').trim()) return requested;
   return LOOPBACK_HOSTS.has(requested.toLowerCase()) ? requested : '127.0.0.1';
+}
+
+function validateDeviceId(raw) {
+  if (typeof raw !== 'string') {
+    const error = new Error('deviceId must be a non-empty string');
+    error.code = 'invalid_device_id';
+    error.statusCode = 400;
+    throw error;
+  }
+  const value = raw.trim();
+  if (!value || value.length > MAX_DEVICE_ID_LENGTH || /[\x00-\x1f\x7f]/.test(value) || FORBIDDEN_KEYS.has(value)) {
+    const error = new Error('deviceId must be a valid string of 1..128 characters without control characters');
+    error.code = 'invalid_device_id';
+    error.statusCode = 400;
+    throw error;
+  }
+  return value;
+}
+
+function safeDecodeUriComponent(raw) {
+  try {
+    return decodeURIComponent(raw);
+  } catch (_) {
+    const error = new Error('Malformed URI path parameter');
+    error.code = 'invalid_request';
+    error.statusCode = 400;
+    throw error;
+  }
+}
+
+function parseSafeRequestUrl(req) {
+  const scheme = req?.socket?.encrypted ? 'https' : 'http';
+  try {
+    return new URL(req.url || '/', `${scheme}://hub.local`);
+  } catch (_) {
+    return null;
+  }
+}
+
+function normalizeHostList(list) {
+  const items = Array.isArray(list)
+    ? list
+    : (typeof list === 'string' ? list.split(',') : []);
+  const set = new Set();
+  for (const item of items) {
+    const clean = String(item || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+    if (clean) set.add(clean);
+  }
+  return set;
+}
+
+function normalizeProxyList(list) {
+  const items = Array.isArray(list)
+    ? list
+    : (typeof list === 'string' ? list.split(',') : []);
+  const set = new Set();
+  for (const item of items) {
+    const clean = normalizeIpAddress(item);
+    if (clean && net.isIP(clean)) set.add(clean);
+  }
+  return set;
+}
+
+function validateRequestHostHeader(req, { bindHost, allowedHosts }) {
+  const rawHost = req?.headers?.host;
+  if (rawHost === undefined) {
+    if (req?.socket && Number(req.httpVersionMajor) >= 1 && Number(req.httpVersionMinor) >= 1) {
+      return false;
+    }
+    return true;
+  }
+  const hostname = parseHostHeaderHostname(rawHost);
+  if (!hostname) return false;
+  if (allowedHosts && allowedHosts.size > 0) {
+    return allowedHosts.has(hostname) || (isLoopbackHost(bindHost) && isLoopbackHost(hostname));
+  }
+  if (isLoopbackHost(bindHost)) {
+    return isLoopbackHost(hostname);
+  }
+  return true;
+}
+
+function resolveClientIp(req, trustedProxies) {
+  const remote = normalizeIpAddress(req?.socket?.remoteAddress || '127.0.0.1') || '127.0.0.1';
+  if (trustedProxies && trustedProxies.size > 0 && trustedProxies.has(remote)) {
+    const forwarded = req?.headers?.['x-forwarded-for'];
+    if (typeof forwarded === 'string' && forwarded.trim()) {
+      const first = normalizeIpAddress(forwarded.split(',')[0]);
+      if (first && net.isIP(first)) return first;
+    }
+  }
+  return remote;
+}
+
+function createAuthRateLimiter(options) {
+  if (options === false) {
+    return {
+      check: () => ({ allowed: true, retryAfterSec: 0 }),
+      recordFailure: () => {},
+      recordSuccess: () => {}
+    };
+  }
+  const cfg = options && typeof options === 'object' ? options : {};
+  const maxFailures = Number.isInteger(cfg.maxFailures) && cfg.maxFailures > 0
+    ? cfg.maxFailures
+    : DEFAULT_AUTH_RATE_LIMIT_MAX_FAILURES;
+  const windowMs = Number.isInteger(cfg.windowMs) && cfg.windowMs > 0
+    ? cfg.windowMs
+    : DEFAULT_AUTH_RATE_LIMIT_WINDOW_MS;
+  const nowFn = typeof cfg.now === 'function' ? cfg.now : Date.now;
+  /** @type {Map<string, number[]>} */
+  const buckets = new Map();
+
+  function prune(ip, now) {
+    const list = buckets.get(ip);
+    if (!list) return [];
+    const cutoff = now - windowMs;
+    const recent = list.filter((ts) => ts > cutoff);
+    if (recent.length === 0) buckets.delete(ip);
+    else buckets.set(ip, recent);
+    return recent;
+  }
+
+  return {
+    check(ip) {
+      const now = nowFn();
+      const recent = prune(ip, now);
+      if (recent.length >= maxFailures) {
+        const retryAfterMs = Math.max(1000, (recent[0] + windowMs) - now);
+        return { allowed: false, retryAfterSec: Math.ceil(retryAfterMs / 1000) };
+      }
+      return { allowed: true, retryAfterSec: 0 };
+    },
+    recordFailure(ip) {
+      const now = nowFn();
+      const recent = prune(ip, now);
+      recent.push(now);
+      if (!buckets.has(ip) && buckets.size >= MAX_TRACKED_RATE_LIMIT_IPS) {
+        const oldestKey = buckets.keys().next().value;
+        if (oldestKey !== undefined) buckets.delete(oldestKey);
+      }
+      buckets.set(ip, recent);
+    },
+    recordSuccess(ip) {
+      buckets.delete(ip);
+    }
+  };
+}
+
+function sanitizeClientErrorMessage(error, fallback = 'Invalid request') {
+  if (!error) return fallback;
+  const msg = error instanceof Error ? error.message : String(error);
+  if (error.code === 'ENOENT' || error.code === 'EACCES' || error.code === 'EPERM'
+    || error.code === 'EROFS' || error.code === 'ENOSPC' || error.code === 'EISDIR'
+    || /(?:[A-Za-z]:\\|\/(?:home|Users|var|etc|tmp|opt|srv|root)\/)/.test(msg)) {
+    return fallback;
+  }
+  return msg.slice(0, 200);
 }
 
 function isPlainObject(value) {
@@ -142,6 +327,14 @@ function parseOptionalBoolParam(raw, fallback) {
   throw makeQueryParamError(`Invalid boolean query parameter value: ${raw}`);
 }
 
+function sendPayloadTooLarge(req, res, payload, extraHeaders = {}) {
+  res.shouldKeepAlive = false;
+  rawSendJson(res, 413, payload, { ...extraHeaders, connection: 'close' });
+  res.once?.('finish', () => {
+    try { req.destroy?.(); } catch (_) {}
+  });
+}
+
 /**
  * Shared authenticated HTTP + MCP dispatcher for `/api/query/*`, `/api/reports*`,
  * `/api/integrations/openclaw/*`, `GET /api/approval-alerts`, and `POST /api/mcp`.
@@ -177,19 +370,23 @@ function createOpenClawEndpointSurface({
   provisionOpenClaw = null,
   readCachedAnalysis = null,
   mcpServer = null,
-  mcpServerInfo = { name: 'token-monitor-hub', version: '1.0.0' }
+  mcpServerInfo = { name: 'token-monitor-hub', version: '1.0.0' },
+  canUseRemoteAdmin = () => true,
+  extraHeadersForReq = () => ({})
 } = {}) {
+  const sendJson = (res, statusCode, payload, extra = {}) => rawSendJson(res, statusCode, payload, { ...extraHeadersForReq(res?.req), ...extra });
+  const sendText = (res, statusCode, body, contentType, extra = {}) => rawSendText(res, statusCode, body, contentType, { ...extraHeadersForReq(res?.req), ...extra });
   const resolvedGetStatus = getIntegrationsStatus || (integrationManager ? () => integrationManager.getStatus() : null);
-  const resolvedUpdateConfig = updateIntegrationsConfig || (integrationManager ? (p) => integrationManager.updateConfig(p) : null);
+  const resolvedUpdateConfig = updateIntegrationsConfig || (integrationManager ? (p, o) => integrationManager.updateConfig(p, o) : null);
   const resolvedAnalyzeAi = analyzeReportWithAi || (integrationManager ? (o) => integrationManager.analyzeReport(o) : null);
   const resolvedPushReport = pushReportToOpenClaw || (integrationManager ? (o) => integrationManager.pushToOpenClaw(o) : null);
   const resolvedPushQuery = pushQueryToOpenClaw || (integrationManager ? (o) => integrationManager.pushQueryToOpenClaw(o) : null);
   const resolvedSendTest = sendTestNotification || (integrationManager ? (o) => integrationManager.sendTestNotification(o) : null);
   const resolvedGetPushHistory = getPushHistory || (integrationManager ? () => integrationManager.getPushHistory() : null);
   const resolvedBuildBrief = buildWeChatBrief || (integrationManager ? (o) => integrationManager.buildWeChatBrief(o) : null);
-  const resolvedGetEnv = getOpenClawEnv || (integrationManager ? () => integrationManager.getOpenClawEnv() : null);
+  const resolvedGetEnv = getOpenClawEnv || (integrationManager ? (o) => integrationManager.getOpenClawEnv(o) : null);
   const resolvedQrStart = startOpenClawWeixinQr || (integrationManager ? () => integrationManager.startOpenClawWeixinQr() : null);
-  const resolvedQrStatus = pollOpenClawWeixinQrStatus || (integrationManager ? (id) => integrationManager.pollOpenClawWeixinQrStatus(id) : null);
+  const resolvedQrStatus = pollOpenClawWeixinQrStatus || (integrationManager ? (id, o) => integrationManager.pollOpenClawWeixinQrStatus(id, o) : null);
   const resolvedQrVerify = submitOpenClawWeixinVerifyCode || (integrationManager ? (id, code) => integrationManager.submitOpenClawWeixinVerifyCode(id, code) : null);
   const resolvedQrCancel = cancelOpenClawWeixinQr || (integrationManager ? (id) => integrationManager.cancelOpenClawWeixinQr(id) : null);
   const resolvedProvision = provisionOpenClaw || (integrationManager ? (o) => integrationManager.provisionOpenClaw(o) : null);
@@ -690,7 +887,20 @@ function createOpenClawEndpointSurface({
    * @returns {Promise<boolean>}
    */
   async function handleRequest(req, res, urlInput = null) {
-    const url = urlInput || new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    const url = urlInput || parseSafeRequestUrl(req);
+    if (!url) {
+      sendJson(res, 400, { ok: false, error: 'invalid_request', message: 'Malformed request URL' });
+      return true;
+    }
+    const rejectRemoteAdmin = () => {
+      if (canUseRemoteAdmin(req)) return false;
+      sendJson(res, 403, {
+        ok: false,
+        error: 'remote_admin_disabled',
+        message: 'Remote host administration is disabled on this Hub.'
+      });
+      return true;
+    };
 
     if (url.pathname === APPROVAL_ALERT_BASE) {
       if (req.method !== 'GET') {
@@ -882,12 +1092,13 @@ function createOpenClawEndpointSurface({
           return true;
         }
         try {
-          const payload = await readJsonBody(req);
+          const payload = await readJsonBody(req, MAX_CONTROL_BODY_BYTES);
           if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
             sendJson(res, 400, { error: 'bad_request', message: 'Integrations payload must be an object' });
             return true;
           }
-          const updated = resolvedUpdateConfig(payload);
+          // Remote HTTP callers must never toggle privacy-sensitive queryPermissions.
+          const updated = resolvedUpdateConfig(payload, { allowQueryPermissionMutation: false });
           if (updated.ok === false) {
             sendJson(res, 400, updated);
             return true;
@@ -896,11 +1107,10 @@ function createOpenClawEndpointSurface({
           return true;
         } catch (error) {
           if (error.code === 'payload_too_large') {
-            res.shouldKeepAlive = false;
-            sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+            sendPayloadTooLarge(req, res, { error: 'payload_too_large', message: error.message }, extraHeadersForReq(req));
             return true;
           }
-          sendJson(res, 400, { error: 'bad_request', message: error.message });
+          sendJson(res, 400, { error: 'bad_request', message: sanitizeClientErrorMessage(error, 'Invalid integrations payload') });
           return true;
         }
       }
@@ -914,7 +1124,7 @@ function createOpenClawEndpointSurface({
         return true;
       }
       try {
-        const payload = await readJsonBody(req);
+        const payload = await readJsonBody(req, MAX_CONTROL_BODY_BYTES);
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
           sendJson(res, 400, { error: 'invalid_request', message: 'Request body must be an object' });
           return true;
@@ -934,11 +1144,10 @@ function createOpenClawEndpointSurface({
         return true;
       } catch (error) {
         if (error.code === 'payload_too_large') {
-          res.shouldKeepAlive = false;
-          sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+          sendPayloadTooLarge(req, res, { error: 'payload_too_large', message: error.message }, extraHeadersForReq(req));
           return true;
         }
-        sendJson(res, 400, { error: 'bad_request', message: error.message });
+        sendJson(res, 400, { error: 'bad_request', message: sanitizeClientErrorMessage(error, 'Invalid request') });
         return true;
       }
     }
@@ -949,7 +1158,7 @@ function createOpenClawEndpointSurface({
         return true;
       }
       try {
-        const payload = await readJsonBody(req);
+        const payload = await readJsonBody(req, MAX_CONTROL_BODY_BYTES);
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
           sendJson(res, 400, { error: 'invalid_request', message: 'Request body must be an object' });
           return true;
@@ -973,11 +1182,10 @@ function createOpenClawEndpointSurface({
         return true;
       } catch (error) {
         if (error.code === 'payload_too_large') {
-          res.shouldKeepAlive = false;
-          sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+          sendPayloadTooLarge(req, res, { error: 'payload_too_large', message: error.message }, extraHeadersForReq(req));
           return true;
         }
-        sendJson(res, 400, { error: 'bad_request', message: error.message });
+        sendJson(res, 400, { error: 'bad_request', message: sanitizeClientErrorMessage(error, 'Invalid request') });
         return true;
       }
     }
@@ -988,7 +1196,7 @@ function createOpenClawEndpointSurface({
         return true;
       }
       try {
-        const payload = await readJsonBody(req);
+        const payload = await readJsonBody(req, MAX_CONTROL_BODY_BYTES);
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
           sendJson(res, 400, { ok: false, error: 'invalid_request', message: 'Request body must be an object' });
           return true;
@@ -1026,11 +1234,10 @@ function createOpenClawEndpointSurface({
         return true;
       } catch (error) {
         if (error.code === 'payload_too_large') {
-          res.shouldKeepAlive = false;
-          sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+          sendPayloadTooLarge(req, res, { error: 'payload_too_large', message: error.message }, extraHeadersForReq(req));
           return true;
         }
-        sendJson(res, 400, { error: 'bad_request', message: error.message });
+        sendJson(res, 400, { error: 'bad_request', message: sanitizeClientErrorMessage(error, 'Invalid request') });
         return true;
       }
     }
@@ -1085,7 +1292,7 @@ function createOpenClawEndpointSurface({
         sendJson(res, 501, { ok: false, error: 'not_implemented' });
         return true;
       }
-      const env = await resolvedGetEnv();
+      const env = await resolvedGetEnv({ includePaths: false });
       sendJson(res, 200, env);
       return true;
     }
@@ -1095,13 +1302,14 @@ function createOpenClawEndpointSurface({
         sendJson(res, 405, { error: 'invalid_request' });
         return true;
       }
+      if (rejectRemoteAdmin()) return true;
       if (typeof resolvedQrStart !== 'function') {
         sendJson(res, 501, { ok: false, error: 'not_implemented' });
         return true;
       }
       const result = await resolvedQrStart();
       if (!result.ok) {
-        const status = result.error === 'hub_stopped' ? 503 : 502;
+        const status = result.error === 'hub_stopped' ? 503 : (result.statusCode || 502);
         sendJson(res, status, result);
         return true;
       }
@@ -1114,6 +1322,7 @@ function createOpenClawEndpointSurface({
         sendJson(res, 405, { error: 'invalid_request' });
         return true;
       }
+      if (rejectRemoteAdmin()) return true;
       if (typeof resolvedQrStatus !== 'function') {
         sendJson(res, 501, { ok: false, error: 'not_implemented' });
         return true;
@@ -1123,17 +1332,25 @@ function createOpenClawEndpointSurface({
         sendJson(res, 400, { ok: false, error: 'invalid_request', message: 'sessionId query parameter is required' });
         return true;
       }
-      const result = await resolvedQrStatus(sessionId);
-      if (!result.ok && result.error === 'qr_session_not_found') {
-        sendJson(res, 404, result);
+      const controller = new AbortController();
+      const cancel = () => controller.abort();
+      res.once('close', cancel);
+      try {
+        const result = await resolvedQrStatus(sessionId, { signal: controller.signal });
+        if (res.destroyed || res.writableEnded) return true;
+        if (!result.ok && result.error === 'qr_session_not_found') {
+          sendJson(res, 404, result);
+          return true;
+        }
+        if (!result.ok && (result.error === 'qr_poll_failed' || result.error === 'qr_refresh_failed')) {
+          sendJson(res, 502, result);
+          return true;
+        }
+        sendJson(res, 200, result);
         return true;
+      } finally {
+        res.off('close', cancel);
       }
-      if (!result.ok && (result.error === 'qr_poll_failed' || result.error === 'qr_refresh_failed')) {
-        sendJson(res, 502, result);
-        return true;
-      }
-      sendJson(res, 200, result);
-      return true;
     }
 
     if (url.pathname === '/api/integrations/openclaw/qr/verify') {
@@ -1141,12 +1358,13 @@ function createOpenClawEndpointSurface({
         sendJson(res, 405, { error: 'invalid_request' });
         return true;
       }
+      if (rejectRemoteAdmin()) return true;
       if (typeof resolvedQrVerify !== 'function') {
         sendJson(res, 501, { ok: false, error: 'not_implemented' });
         return true;
       }
       try {
-        const payload = await readJsonBody(req);
+        const payload = await readJsonBody(req, MAX_CONTROL_BODY_BYTES);
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
           sendJson(res, 400, { ok: false, error: 'invalid_request', message: 'Request body must be an object' });
           return true;
@@ -1170,11 +1388,10 @@ function createOpenClawEndpointSurface({
         return true;
       } catch (error) {
         if (error.code === 'payload_too_large') {
-          res.shouldKeepAlive = false;
-          sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+          sendPayloadTooLarge(req, res, { error: 'payload_too_large', message: error.message }, extraHeadersForReq(req));
           return true;
         }
-        sendJson(res, 400, { error: 'bad_request', message: error.message });
+        sendJson(res, 400, { error: 'bad_request', message: sanitizeClientErrorMessage(error, 'Invalid request') });
         return true;
       }
     }
@@ -1184,12 +1401,13 @@ function createOpenClawEndpointSurface({
         sendJson(res, 405, { error: 'invalid_request' });
         return true;
       }
+      if (rejectRemoteAdmin()) return true;
       if (typeof resolvedQrCancel !== 'function') {
         sendJson(res, 501, { ok: false, error: 'not_implemented' });
         return true;
       }
       try {
-        const raw = await readRawTextBody(req);
+        const raw = await readRawTextBody(req, MAX_CONTROL_BODY_BYTES);
         const payload = raw.trim() ? JSON.parse(raw) : {};
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
           sendJson(res, 400, { ok: false, error: 'invalid_request', message: 'Request body must be an object' });
@@ -1200,11 +1418,10 @@ function createOpenClawEndpointSurface({
         return true;
       } catch (error) {
         if (error.code === 'payload_too_large') {
-          res.shouldKeepAlive = false;
-          sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+          sendPayloadTooLarge(req, res, { error: 'payload_too_large', message: error.message }, extraHeadersForReq(req));
           return true;
         }
-        sendJson(res, 400, { error: 'bad_request', message: error.message });
+        sendJson(res, 400, { error: 'bad_request', message: sanitizeClientErrorMessage(error, 'Invalid request') });
         return true;
       }
     }
@@ -1214,12 +1431,13 @@ function createOpenClawEndpointSurface({
         sendJson(res, 405, { error: 'invalid_request' });
         return true;
       }
+      if (rejectRemoteAdmin()) return true;
       if (typeof resolvedProvision !== 'function') {
         sendJson(res, 501, { ok: false, error: 'not_implemented' });
         return true;
       }
       try {
-        const raw = await readRawTextBody(req);
+        const raw = await readRawTextBody(req, MAX_CONTROL_BODY_BYTES);
         const payload = raw.trim() ? JSON.parse(raw) : {};
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
           sendJson(res, 400, { ok: false, error: 'invalid_request', message: 'Request body must be an object' });
@@ -1235,11 +1453,10 @@ function createOpenClawEndpointSurface({
         return true;
       } catch (error) {
         if (error.code === 'payload_too_large') {
-          res.shouldKeepAlive = false;
-          sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+          sendPayloadTooLarge(req, res, { error: 'payload_too_large', message: error.message }, extraHeadersForReq(req));
           return true;
         }
-        sendJson(res, 400, { error: 'bad_request', message: error.message });
+        sendJson(res, 400, { error: 'bad_request', message: sanitizeClientErrorMessage(error, 'Invalid request') });
         return true;
       }
     }
@@ -1255,7 +1472,7 @@ function createOpenClawEndpointSurface({
       }
       if (req.method === 'PUT') {
         try {
-          const payload = await readJsonBody(req);
+          const payload = await readJsonBody(req, MAX_CONTROL_BODY_BYTES);
           if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length === 0) {
             sendJson(res, 400, { error: 'bad_request', message: 'Report config must be a non-empty object' });
             return true;
@@ -1275,11 +1492,10 @@ function createOpenClawEndpointSurface({
           return true;
         } catch (error) {
           if (error.code === 'payload_too_large') {
-            res.shouldKeepAlive = false;
-            sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+            sendPayloadTooLarge(req, res, { error: 'payload_too_large', message: error.message }, extraHeadersForReq(req));
             return true;
           }
-          sendJson(res, 400, { error: 'bad_request', message: error.message });
+          sendJson(res, 400, { error: 'bad_request', message: sanitizeClientErrorMessage(error, 'Invalid report config') });
           return true;
         }
       }
@@ -1293,7 +1509,7 @@ function createOpenClawEndpointSurface({
         return true;
       }
       try {
-        const payload = await readJsonBody(req);
+        const payload = await readJsonBody(req, MAX_CONTROL_BODY_BYTES);
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
           sendJson(res, 400, { error: 'invalid_request', message: 'Request body must be an object' });
           return true;
@@ -1323,11 +1539,10 @@ function createOpenClawEndpointSurface({
         return true;
       } catch (error) {
         if (error.code === 'payload_too_large') {
-          res.shouldKeepAlive = false;
-          sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+          sendPayloadTooLarge(req, res, { error: 'payload_too_large', message: error.message }, extraHeadersForReq(req));
           return true;
         }
-        sendJson(res, 400, { error: 'bad_request', message: error.message });
+        sendJson(res, 400, { error: 'bad_request', message: sanitizeClientErrorMessage(error, 'Invalid report request') });
         return true;
       }
     }
@@ -1338,8 +1553,15 @@ function createOpenClawEndpointSurface({
         sendJson(res, 501, { ok: false, error: 'not_implemented' });
         return true;
       }
-      const granularity = decodeURIComponent(reportMatch[1]);
-      const periodKey = decodeURIComponent(reportMatch[2]);
+      let granularity;
+      let periodKey;
+      try {
+        granularity = safeDecodeUriComponent(reportMatch[1]);
+        periodKey = safeDecodeUriComponent(reportMatch[2]);
+      } catch (error) {
+        sendJson(res, 400, { error: 'invalid_request', message: error.message });
+        return true;
+      }
       if (!REPORT_GRANULARITIES.includes(granularity)) {
         sendJson(res, 400, { error: 'invalid_request', message: `Invalid granularity: ${granularity}` });
         return true;
@@ -1376,7 +1598,7 @@ function createOpenClawEndpointSurface({
         return true;
       }
       try {
-        const rawBody = await readRawTextBody(req);
+        const rawBody = await readRawTextBody(req, MAX_MCP_BODY_BYTES);
         const rpcResponse = await resolvedMcpServer.handlePayload(rawBody);
         if (rpcResponse === null) {
           sendText(res, 204, '');
@@ -1386,11 +1608,10 @@ function createOpenClawEndpointSurface({
         return true;
       } catch (error) {
         if (error.code === 'payload_too_large') {
-          res.shouldKeepAlive = false;
-          sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+          sendPayloadTooLarge(req, res, { error: 'payload_too_large', message: error.message }, extraHeadersForReq(req));
           return true;
         }
-        sendJson(res, 400, { error: 'bad_request', message: error.message });
+        sendJson(res, 400, { error: 'bad_request', message: sanitizeClientErrorMessage(error, 'Invalid MCP request') });
         return true;
       }
     }
@@ -1410,6 +1631,17 @@ function createHub({
   deployment,
   host = '0.0.0.0',
   secret = '',
+  readSecret = '',
+  ingestSecret = '',
+  adminSecret = '',
+  allowInsecureLocalNoAuth = false,
+  allowRemoteAdmin = false,
+  allowedHosts = null,
+  trustedProxies = null,
+  authRateLimit = undefined,
+  maxSseClients = MAX_SSE_CLIENTS,
+  tls = null,
+  requireTls = false,
   syncSessionTitles = false,
   sessionConversations = false,
   approvalAlerts = false,
@@ -1429,6 +1661,102 @@ function createHub({
   if (!Number.isFinite(persistIntervalMs) || persistIntervalMs < 0 || persistIntervalMs > 2147483647) {
     throw new RangeError('persistIntervalMs must be a finite number between 0 and 2147483647 milliseconds');
   }
+  const masterSecret = String(secret || '').trim();
+  const scopedReadSecret = String(readSecret || '').trim();
+  const scopedIngestSecret = String(ingestSecret || '').trim();
+  const scopedAdminSecret = String(adminSecret || '').trim();
+  const anySecret = masterSecret || scopedReadSecret || scopedIngestSecret || scopedAdminSecret;
+  const hasAnySecret = Boolean(anySecret);
+  const bindHost = resolveBindHost(host, anySecret);
+  const tlsConfig = resolveHubTlsConfig(tls);
+  const effectiveRequireTls = Boolean(requireTls || tlsConfig.requireTls);
+
+  if (!isLoopbackHost(bindHost)) {
+    for (const [label, value] of [
+      ['secret', masterSecret],
+      ['readSecret', scopedReadSecret],
+      ['ingestSecret', scopedIngestSecret],
+      ['adminSecret', scopedAdminSecret]
+    ]) {
+      if (value && value.length < MIN_NON_LOOPBACK_SECRET_LENGTH) {
+        throw new Error(`Hub ${label} must be at least ${MIN_NON_LOOPBACK_SECRET_LENGTH} characters when binding to a non-loopback address`);
+      }
+    }
+    if (effectiveRequireTls && !tlsConfig.enabled) {
+      throw new Error('TLS is required when binding to a non-loopback address (--require-tls)');
+    }
+  }
+
+  const allowedHostSet = normalizeHostList(allowedHosts);
+  const trustedProxySet = normalizeProxyList(trustedProxies);
+  const authLimiter = createAuthRateLimiter(authRateLimit);
+  const sseLimit = Number.isInteger(maxSseClients) && maxSseClients > 0 ? maxSseClients : MAX_SSE_CLIENTS;
+  const tlsController = tlsConfig.enabled
+    ? createHubTlsController(tlsConfig, { logger })
+    : null;
+
+  const extraHeadersForReq = (req) => (
+    tlsConfig.enabled && tlsConfig.hsts && Boolean(req?.socket?.encrypted)
+      ? { 'strict-transport-security': 'max-age=31536000' }
+      : {}
+  );
+  const sendJson = (res, statusCode, payload, extra = {}) => rawSendJson(res, statusCode, payload, { ...extraHeadersForReq(res?.req), ...extra });
+  const sendText = (res, statusCode, body, contentType, extra = {}) => rawSendText(res, statusCode, body, contentType, { ...extraHeadersForReq(res?.req), ...extra });
+
+  function authenticateRequest(req) {
+    if (!hasAnySecret) {
+      if (allowInsecureLocalNoAuth === true && isLoopbackHost(bindHost)) {
+        return { ok: true, scope: 'local-unauth', isAdmin: Boolean(allowRemoteAdmin), authenticated: false };
+      }
+      return {
+        ok: false,
+        statusCode: 503,
+        error: 'secret_required',
+        message: 'TOKEN_MONITOR_SECRET must be set; unauthenticated access is refused.'
+      };
+    }
+    const presented = requestSecret(req);
+    const matchAdmin = Boolean(scopedAdminSecret) && timingSafeEqualText(presented, scopedAdminSecret);
+    const matchMaster = Boolean(masterSecret) && timingSafeEqualText(presented, masterSecret);
+    const matchIngest = Boolean(scopedIngestSecret) && timingSafeEqualText(presented, scopedIngestSecret);
+    const matchRead = Boolean(scopedReadSecret) && timingSafeEqualText(presented, scopedReadSecret);
+
+    if (matchAdmin) {
+      return { ok: true, scope: 'admin', isAdmin: true, authenticated: true };
+    }
+    if (matchMaster) {
+      return { ok: true, scope: 'master', isAdmin: Boolean(allowRemoteAdmin && !scopedAdminSecret), authenticated: true };
+    }
+    if (matchIngest) {
+      return { ok: true, scope: 'ingest', isAdmin: false, authenticated: true };
+    }
+    if (matchRead) {
+      return { ok: true, scope: 'read', isAdmin: false, authenticated: true };
+    }
+    return { ok: false, statusCode: 401, error: 'unauthorized' };
+  }
+
+  function isScopePermitted(auth, method, pathname) {
+    if (auth.scope === 'admin' || auth.scope === 'master' || auth.scope === 'local-unauth') return true;
+    if (auth.scope === 'read') {
+      if (method !== 'GET' && method !== 'HEAD') return false;
+      if (pathname === `${CONVERSATION_BASE}/poll`) return false;
+      if (pathname === '/api/integrations/openclaw/qr/status') return false;
+      return true;
+    }
+    if (auth.scope === 'ingest') {
+      if (method === 'POST' && (pathname === '/api/ingest' || pathname === '/api/ingest/delta')) return true;
+      if (method === 'GET' && pathname === '/api/sync/content') return true;
+      if (method === 'PUT' && /^\/api\/sync\/titles\/[^/]+$/.test(pathname)) return true;
+      if (method === 'GET' && pathname === `${CONVERSATION_BASE}/poll`) return true;
+      if (method === 'POST' && pathname === `${CONVERSATION_BASE}/result`) return true;
+      if (method === 'POST' && pathname === APPROVAL_ALERT_BASE) return true;
+      if (method === 'PUT' && pathname === AG_MANAGER_SNAPSHOT_PATH) return true;
+      return false;
+    }
+    return false;
+  }
+
   const store = readJson(dataFile, { version: 1, devices: {} }) || { version: 1, devices: {} };
   if (!store.devices || typeof store.devices !== 'object') store.devices = {};
   // Subscriptions are shared by every device on this hub rather than owned by one
@@ -1440,7 +1768,6 @@ function createHub({
   store.devices = Object.assign(Object.create(null), store.devices);
   store.syncTitlePolicies = Object.assign(Object.create(null), store.syncTitlePolicies || {});
   store.syncSettings = Object.assign(Object.create(null), store.syncSettings || {});
-  const bindHost = resolveBindHost(host, secret);
   const uploadBaselines = createUploadBaselines();
   const conversationRelay = createSessionConversationRelay({ enabled: sessionConversations === true,
     getDevice: (id) => store.devices[id] });
@@ -1476,6 +1803,7 @@ function createHub({
     fetchImpl: integrationFetch,
     logger
   });
+  const requestAuthMap = new WeakMap();
   openclawSurface = createOpenClawEndpointSurface({
     getStats,
     getHistory,
@@ -1487,7 +1815,9 @@ function createHub({
     integrationManager,
     reportManager,
     listApprovalAlerts: () => approvalAlertStore.list(),
-    mcpServerInfo: { name: 'token-monitor-hub', version: '1.0.0' }
+    mcpServerInfo: { name: 'token-monitor-hub', version: '1.0.0' },
+    canUseRemoteAdmin: (req) => Boolean(requestAuthMap.get(req)?.isAdmin),
+    extraHeadersForReq
   });
   let persistTimer = null;
   let persistPending = false;
@@ -1510,7 +1840,12 @@ function createHub({
   function persist() {
     store.version = 1;
     store.savedAt = new Date().toISOString();
-    writeJsonAtomic(dataFile, store, 0);
+    try {
+      writeJsonAtomic(dataFile, store, 0);
+    } catch (error) {
+      if (error && typeof error === 'object') error.isStorageError = true;
+      throw error;
+    }
     clearTimeout(persistTimer);
     persistTimer = null;
     persistPending = false;
@@ -1661,9 +1996,16 @@ function createHub({
     if (!payload || (!payload.deviceId && !payload.id)) {
       throw new Error('deviceId_required');
     }
-    const deviceId = String(payload.deviceId || payload.id);
+    const rawId = payload.deviceId ?? payload.id;
+    const deviceId = validateDeviceId(typeof rawId === 'string' ? rawId : String(rawId));
+    if (!Object.hasOwn(store.devices, deviceId) && Object.keys(store.devices).length >= MAX_DEVICES) {
+      throw Object.assign(new Error('Maximum number of registered devices reached'), {
+        code: 'device_limit_reached',
+        status: 429
+      });
+    }
     uploadBaselines.forget(deviceId);
-    const record = mergeSyncDeviceRecord(store.devices[deviceId], { ...payload, receivedAt: new Date().toISOString() }, {
+    const record = mergeSyncDeviceRecord(store.devices[deviceId], { ...payload, deviceId, receivedAt: new Date().toISOString() }, {
       preserveSessionTitles: acceptsSessionTitles(serverTitlesEnabled, store.syncTitlePolicies[deviceId], payload.sessionTitleSyncGeneration)
     });
     store.devices[record.deviceId] = record;
@@ -1676,27 +2018,35 @@ function createHub({
     return record;
   }
 
-  function deleteDevice(deviceId) {
+  function deleteDevice(rawDeviceId) {
+    const deviceId = validateDeviceId(rawDeviceId);
     uploadBaselines.forget(deviceId);
-    // Commit deletion and revocation together, keeping a generation tombstone.
+    const existed = Object.hasOwn(store.devices, deviceId);
+    const hadPolicy = Object.hasOwn(store.syncTitlePolicies, deviceId);
     const previousPolicy = store.syncTitlePolicies[deviceId];
     const previousDevice = store.devices[deviceId];
     const previousSavedAt = store.savedAt;
-    store.syncTitlePolicies[deviceId] = nextTitlePolicy(previousPolicy, false);
-    delete store.devices[deviceId];
-    try { persist(); } catch (error) {
-      if (previousPolicy) store.syncTitlePolicies[deviceId] = previousPolicy;
-      else delete store.syncTitlePolicies[deviceId];
-      if (previousDevice) store.devices[deviceId] = previousDevice;
-      store.savedAt = previousSavedAt;
-      throw error;
+    // Only persist revocation tombstones for devices that actually existed (or already had a policy),
+    // preventing unbounded tombstone flooding via DELETE of arbitrary unknown IDs.
+    if (existed || hadPolicy) {
+      store.syncTitlePolicies[deviceId] = nextTitlePolicy(previousPolicy, false);
+      delete store.devices[deviceId];
+      try { persist(); } catch (error) {
+        if (previousPolicy) store.syncTitlePolicies[deviceId] = previousPolicy;
+        else delete store.syncTitlePolicies[deviceId];
+        if (previousDevice) store.devices[deviceId] = previousDevice;
+        store.savedAt = previousSavedAt;
+        throw error;
+      }
     }
     conversationRelay.remove(deviceId);
     approvalAlertStore.remove(deviceId);
     antigravityManagerStore.removeDevice(deviceId);
-    broadcastStats('delete');
-    try { reportManager.onStatsChanged(); } catch (error) {
-      (logger.error || console.error)('Hub failed to update report snapshot on delete:', error);
+    if (existed) {
+      broadcastStats('delete');
+      try { reportManager.onStatsChanged(); } catch (error) {
+        (logger.error || console.error)('Hub failed to update report snapshot on delete:', error);
+      }
     }
   }
 
@@ -1728,10 +2078,21 @@ function createHub({
     return next;
   }
 
-  function setSyncTitlePolicy(deviceId, enabled) {
+  function setSyncTitlePolicy(rawDeviceId, enabled) {
+    const deviceId = validateDeviceId(rawDeviceId);
     if (enabled === true && !serverTitlesEnabled) {
       const error = new Error('session title sync is disabled on the server');
       error.code = 'forbidden';
+      throw error;
+    }
+    if (
+      !Object.hasOwn(store.devices, deviceId)
+      && !Object.hasOwn(store.syncTitlePolicies, deviceId)
+      && Object.keys(store.syncTitlePolicies).length >= MAX_DEVICES * 2
+    ) {
+      const error = new Error('Maximum number of title policies reached');
+      error.code = 'device_limit_reached';
+      error.status = 429;
       throw error;
     }
     const previous = store.syncTitlePolicies[deviceId];
@@ -1821,27 +2182,74 @@ function createHub({
       res.shouldKeepAlive = false;
       return sendJson(res, 503, { error: 'hub_stopping' }, { connection: 'close' });
     }
+    if (!validateRequestHostHeader(req, { bindHost, allowedHosts: allowedHostSet })) {
+      return sendJson(res, 400, { error: 'invalid_host', message: 'Invalid Host header' });
+    }
+    const url = parseSafeRequestUrl(req);
+    if (!url) {
+      return sendJson(res, 400, { error: 'invalid_request', message: 'Malformed request URL' });
+    }
     if (req.method === 'OPTIONS') return sendText(res, 204, '');
-    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 
     if (url.pathname === '/api/health') {
-      return sendJson(res, 200, {
-        ok: true,
-        role: 'hub',
-        runtime: 'node-hub',
-        ...(deployment ? { deployment } : {}),
-        version: store.version || 1,
-        hubBuild: currentHubBuild('node-hub'),
-        deviceCount: Object.keys(store.devices).length,
-        secretRequired: Boolean(secret),
-        now: new Date().toISOString()
-      });
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        return sendJson(res, 405, { error: 'method_not_allowed' }, { allow: 'GET, HEAD' });
+      }
+      const presented = requestSecret(req);
+      const auth = presented ? authenticateRequest(req) : null;
+      if (auth?.ok && auth.authenticated) {
+        return sendJson(res, 200, {
+          ok: true,
+          role: 'hub',
+          runtime: 'node-hub',
+          ...(deployment ? { deployment } : {}),
+          version: store.version || 1,
+          hubBuild: currentHubBuild('node-hub'),
+          deviceCount: Object.keys(store.devices).length,
+          secretRequired: hasAnySecret,
+          tls: { enabled: tlsConfig.enabled },
+          now: new Date().toISOString()
+        });
+      }
+      return sendJson(res, 200, { ok: true });
     }
 
-    if (!isAuthorized(req, secret)) return sendJson(res, 401, { error: 'unauthorized' });
+    const clientIp = resolveClientIp(req, trustedProxySet);
+    const rateCheck = authLimiter.check(clientIp);
+    if (!rateCheck.allowed) {
+      return sendJson(
+        res,
+        429,
+        { error: 'too_many_requests', message: 'Too many authentication failures; retry later.' },
+        { 'retry-after': String(rateCheck.retryAfterSec) }
+      );
+    }
+
+    const auth = authenticateRequest(req);
+    if (!auth.ok) {
+      if (auth.statusCode === 401) {
+        authLimiter.recordFailure(clientIp);
+        (logger.warn || console.warn)('[hub] unauthorized request', {
+          ip: clientIp,
+          method: req.method,
+          path: url.pathname
+        });
+      }
+      return sendJson(res, auth.statusCode || 401, {
+        error: auth.error,
+        ...(auth.message ? { message: auth.message } : {})
+      });
+    }
+    if (auth.authenticated) authLimiter.recordSuccess(clientIp);
+    if (!isScopePermitted(auth, req.method, url.pathname)) {
+      return sendJson(res, 403, { error: 'forbidden_scope', message: 'Token scope does not permit this operation' });
+    }
+    requestAuthMap.set(req, auth);
 
     if (url.pathname === CONVERSATION_BASE || url.pathname === `${CONVERSATION_BASE}/poll`) {
       if (req.method !== 'GET') return sendJson(res, 405, { error: 'invalid_request' });
+      req.setTimeout?.(0);
+      res.setTimeout?.(0);
       const controller = new AbortController();
       const cancel = () => controller.abort();
       res.once('close', cancel);
@@ -1860,8 +2268,7 @@ function createHub({
         return sendJson(res, 200, conversationRelay.result(payload));
       } catch (error) {
         if (error.code === 'payload_too_large') {
-          res.shouldKeepAlive = false;
-          return sendJson(res, 413, { error: 'invalid_request' }, { connection: 'close' });
+          return sendPayloadTooLarge(req, res, { error: 'invalid_request' }, extraHeadersForReq(req));
         }
         return sendJson(res, 400, { error: 'invalid_request' });
       }
@@ -1870,7 +2277,11 @@ function createHub({
     if (url.pathname === APPROVAL_ALERT_BASE && req.method === 'POST') {
       try {
         const payload = await readJsonBody(req, MAX_APPROVAL_BODY_BYTES);
-        const created = approvalAlertStore.create(payload);
+        const deviceId = validateDeviceId(payload?.deviceId);
+        if (!Object.hasOwn(store.devices, deviceId)) {
+          return sendJson(res, 400, { ok: false, error: 'unknown_device', message: 'Device is not registered on this Hub' });
+        }
+        const created = approvalAlertStore.create({ ...payload, deviceId });
         if (created?.ok && created.id) {
           const listed = approvalAlertStore.list();
           const record = Array.isArray(listed?.alerts)
@@ -1885,8 +2296,7 @@ function createHub({
         return sendJson(res, 200, created);
       } catch (error) {
         if (error.code === 'payload_too_large') {
-          res.shouldKeepAlive = false;
-          return sendJson(res, 413, { error: 'invalid_request' }, { connection: 'close' });
+          return sendPayloadTooLarge(req, res, { error: 'invalid_request' }, extraHeadersForReq(req));
         }
         return sendJson(res, 400, { error: 'invalid_request' });
       }
@@ -1895,14 +2305,17 @@ function createHub({
     if (url.pathname === AG_MANAGER_SNAPSHOT_PATH && req.method === 'PUT') {
       try {
         const payload = await readJsonBody(req, MAX_AG_MANAGER_SNAPSHOT_BYTES);
-        return sendJson(res, 200, antigravityManagerStore.putSnapshot(payload));
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          return sendJson(res, 400, { error: 'invalid_request', message: 'Snapshot payload must be an object' });
+        }
+        const deviceId = validateDeviceId(payload.deviceId);
+        return sendJson(res, 200, antigravityManagerStore.putSnapshot({ ...payload, deviceId }));
       } catch (error) {
         if (error.code === 'payload_too_large') {
-          res.shouldKeepAlive = false;
-          return sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+          return sendPayloadTooLarge(req, res, { error: 'payload_too_large', message: error.message }, extraHeadersForReq(req));
         }
-        if (error.code === 'invalid_request' || error instanceof SyntaxError || /^Invalid JSON body/.test(String(error.message || ''))) {
-          return sendJson(res, 400, { error: 'invalid_request', message: error.message });
+        if (error.code === 'invalid_request' || error.code === 'invalid_device_id' || error instanceof SyntaxError || /^Invalid JSON body/.test(String(error.message || ''))) {
+          return sendJson(res, 400, { error: 'invalid_request', message: sanitizeClientErrorMessage(error, 'Invalid snapshot payload') });
         }
         return sendJson(res, 500, { error: 'storage_error', message: 'Failed to persist snapshot' });
       }
@@ -1919,22 +2332,25 @@ function createHub({
     const titlesMatch = url.pathname.match(/^\/api\/sync\/titles\/([^/]+)$/);
     if (req.method === 'PUT' && (settingsMatch || titlesMatch)) {
       try {
-        const payload = await readJsonBody(req);
+        const payload = await readJsonBody(req, titlesMatch ? MAX_CONTROL_BODY_BYTES : MAX_JSON_BODY_BYTES);
         if (settingsMatch) return sendJson(res, 200, { ok: true, ...setSyncSettings(settingsMatch[1], payload) });
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)
           || Object.keys(payload).some((key) => key !== 'enabled') || typeof payload.enabled !== 'boolean') {
           return sendJson(res, 400, { error: 'bad_request', message: 'enabled must be a boolean' });
         }
-        const policy = setSyncTitlePolicy(decodeURIComponent(titlesMatch[1]), payload.enabled);
+        const policy = setSyncTitlePolicy(safeDecodeUriComponent(titlesMatch[1]), payload.enabled);
         return sendJson(res, 200, { ok: true, ...policy });
       } catch (error) {
         if (error.code === 'stale_write') return sendJson(res, 409, { error: 'stale_write', ...error.current });
         if (error.code === 'forbidden') return sendJson(res, 403, { error: 'forbidden', message: error.message });
+        if (error.status) return sendJson(res, error.status, { error: error.code });
         if (error.code === 'payload_too_large') {
-          res.shouldKeepAlive = false;
-          return sendJson(res, 413, { error: 'payload_too_large' }, { connection: 'close' });
+          return sendPayloadTooLarge(req, res, { error: 'payload_too_large' }, extraHeadersForReq(req));
         }
-        return sendJson(res, 400, { error: 'bad_request', message: error.message });
+        if (error.isStorageError) {
+          return sendJson(res, 500, { error: 'storage_error', message: 'Failed to persist hub state' });
+        }
+        return sendJson(res, 400, { error: 'bad_request', message: sanitizeClientErrorMessage(error, 'Invalid sync request') });
       }
     }
 
@@ -1943,13 +2359,19 @@ function createHub({
     if (req.method === 'GET' && url.pathname === '/api/history') return sendJson(res, 200, getHistory());
 
     if (req.method === 'GET' && url.pathname === '/api/stats/stream') {
+      if (sseClients.size >= sseLimit) {
+        return sendJson(res, 503, { error: 'too_many_streams', message: 'Maximum concurrent SSE streams reached' });
+      }
+      req.setTimeout?.(0);
+      res.setTimeout?.(0);
       const stats = getStats();
-      res.writeHead(200, {
+      res.writeHead(200, securityHeaders({
         'content-type': 'text/event-stream',
         'cache-control': 'no-cache, no-transform',
         'connection': 'keep-alive',
-        'x-accel-buffering': 'no'
-      });
+        'x-accel-buffering': 'no',
+        ...extraHeadersForReq(req)
+      }));
       const client = { res, freshnessEvents: wantsFreshnessEvents(req), deltaEvents: wantsDeltaEvents(req), streamRevision: null, blocked: false, backlogLimit: 0, needsSnapshot: false };
       let heartbeat = null;
       client.cleanup = () => {
@@ -2008,11 +2430,14 @@ function createHub({
       } catch (error) {
         if (error.status) return sendJson(res, error.status, { error: error.code });
         if (error.message === 'deviceId_required') return sendJson(res, 400, { error: 'deviceId_required' });
+        if (error.code === 'invalid_device_id') return sendJson(res, 400, { error: 'invalid_device_id', message: error.message });
         if (error.code === 'payload_too_large') {
-          res.shouldKeepAlive = false;
-          return sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+          return sendPayloadTooLarge(req, res, { error: 'payload_too_large', message: error.message }, extraHeadersForReq(req));
         }
-        return sendJson(res, 400, { error: 'bad_request', message: error.message });
+        if (error.isStorageError) {
+          return sendJson(res, 500, { error: 'storage_error', message: 'Failed to persist hub state' });
+        }
+        return sendJson(res, 400, { error: 'bad_request', message: sanitizeClientErrorMessage(error, 'Invalid ingest payload') });
       }
     }
 
@@ -2035,17 +2460,26 @@ function createHub({
           return sendJson(res, 400, { error: 'bad_request', message: error.message });
         }
         if (error.code === 'payload_too_large') {
-          res.shouldKeepAlive = false;
-          return sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+          return sendPayloadTooLarge(req, res, { error: 'payload_too_large', message: error.message }, extraHeadersForReq(req));
         }
-        return sendJson(res, 400, { error: 'bad_request', message: error.message });
+        if (error.isStorageError) {
+          return sendJson(res, 500, { error: 'storage_error', message: 'Failed to persist subscriptions' });
+        }
+        return sendJson(res, 400, { error: 'bad_request', message: sanitizeClientErrorMessage(error, 'Invalid subscriptions payload') });
       }
     }
 
     if (req.method === 'DELETE' && url.pathname.startsWith('/api/devices/')) {
-      const deviceId = decodeURIComponent(url.pathname.slice('/api/devices/'.length));
-      deleteDevice(deviceId);
-      return sendJson(res, 200, { ok: true, deviceId });
+      try {
+        const deviceId = validateDeviceId(safeDecodeUriComponent(url.pathname.slice('/api/devices/'.length)));
+        deleteDevice(deviceId);
+        return sendJson(res, 200, { ok: true, deviceId });
+      } catch (error) {
+        if (error.isStorageError) {
+          return sendJson(res, 500, { error: 'storage_error', message: 'Failed to persist device deletion' });
+        }
+        return sendJson(res, 400, { error: error.code || 'invalid_request', message: sanitizeClientErrorMessage(error, 'Invalid deviceId') });
+      }
     }
 
     if (await openclawSurface.handleRequest(req, res, url)) {
@@ -2055,21 +2489,43 @@ function createHub({
     return sendJson(res, 404, { error: 'not_found' });
   }
 
-  const server = http.createServer((req, res) => {
+  function onHttpRequest(req, res) {
     res.once('finish', () => {
       // A request can become idle after close() has already swept idle sockets.
-      if (stopping) server.closeIdleConnections();
+      if (stopping && server) server.closeIdleConnections();
     });
     handleRequest(req, res).catch((error) => {
       (logger.error || console.error)(error);
-      sendJson(res, 500, { error: 'internal_error', message: error.message });
+      if (!res.headersSent && !res.writableEnded) {
+        sendJson(res, 500, { error: 'internal_error', message: 'Internal server error' });
+      } else {
+        try { res.destroy(); } catch (_) {}
+      }
     });
-  });
+  }
 
-  function start() {
+  function configureServerTimeouts(srv) {
+    srv.headersTimeout = SERVER_HEADERS_TIMEOUT_MS;
+    srv.requestTimeout = SERVER_REQUEST_TIMEOUT_MS;
+    srv.keepAliveTimeout = SERVER_KEEP_ALIVE_TIMEOUT_MS;
+    srv.maxRequestsPerSocket = SERVER_MAX_REQUESTS_PER_SOCKET;
+    srv.maxConnections = SERVER_MAX_CONNECTIONS;
+    return srv;
+  }
+
+  let server = tlsConfig.enabled ? null : configureServerTimeouts(http.createServer(onHttpRequest));
+  let redirectServer = null;
+
+  async function start() {
     if (stopPromise) return Promise.reject(new Error('Hub is stopping'));
     stopping = false;
-    return new Promise((resolve, reject) => {
+    if (tlsController) {
+      await tlsController.loadInitial();
+      const httpsOptions = tlsController.getHttpsServerOptions();
+      server = configureServerTimeouts(https.createServer(httpsOptions, onHttpRequest));
+      tlsController.attachServer(server);
+    }
+    await new Promise((resolve, reject) => {
       const onError = (err) => { server.off('listening', onListening); reject(err); };
       const onListening = () => {
         server.off('error', onError);
@@ -2080,6 +2536,31 @@ function createHub({
       server.once('listening', onListening);
       server.listen(port, bindHost);
     });
+    if (tlsController && tlsConfig.httpRedirectPort !== null) {
+      const addr = server.address();
+      const actualHttpsPort = addr && typeof addr === 'object' ? addr.port : port;
+      redirectServer = createHttpRedirectServer({
+        httpsPort: actualHttpsPort,
+        tlsController,
+        publicHost: tlsConfig.publicHost
+      });
+      try {
+        await new Promise((resolve, reject) => {
+          const onError = (err) => { redirectServer.off('listening', onListening); reject(err); };
+          const onListening = () => {
+            redirectServer.off('error', onError);
+            resolve();
+          };
+          redirectServer.once('error', onError);
+          redirectServer.once('listening', onListening);
+          redirectServer.listen(tlsConfig.httpRedirectPort, bindHost);
+        });
+      } catch (error) {
+        redirectServer = null;
+        await stop();
+        throw error;
+      }
+    }
   }
 
   function stop() {
@@ -2089,6 +2570,9 @@ function createHub({
     conversationRelay.stop();
     approvalAlertStore.stop();
     reportManager.stop();
+    tlsController?.stop();
+    const activeRedirectServer = redirectServer;
+    redirectServer = null;
     const operation = new Promise((resolve, reject) => {
       clearTimeout(persistTimer);
       persistTimer = null;
@@ -2102,6 +2586,16 @@ function createHub({
       // A transient failure still gets a second attempt after draining.
       try { if (persistPending) persist(); } catch (error) {
         (logger.error || console.error)('Hub failed to save before draining requests:', error);
+      }
+      if (activeRedirectServer) {
+        try {
+          activeRedirectServer.closeAllConnections?.();
+          activeRedirectServer.close();
+        } catch (_) {}
+      }
+      if (!server) {
+        resolve();
+        return;
       }
       const deadline = setTimeout(() => server.closeAllConnections(), SHUTDOWN_DRAIN_TIMEOUT_MS);
       deadline.unref();
@@ -2122,7 +2616,26 @@ function createHub({
   }
 
   return {
-    start, stop, server, getStats, getHistory, getDevices, ingest, deleteDevice, onStats, bindHost,
+    start,
+    stop,
+    get server() { return server; },
+    get redirectServer() { return redirectServer; },
+    get scheme() { return tlsConfig.enabled ? 'https' : 'http'; },
+    tlsStatus: () => (tlsController ? tlsController.getStatus() : {
+      enabled: false,
+      mode: tlsConfig.mode,
+      format: null,
+      minVersion: tlsConfig.minVersion,
+      hsts: false,
+      watch: false,
+      cert: null,
+      lastReloadAt: '',
+      lastReloadError: '',
+      warnings: []
+    }),
+    reloadTls: () => (tlsController ? tlsController.reload() : Promise.resolve({ ok: false, error: 'tls_invalid_config', message: 'TLS is not enabled' })),
+    exportPublicCertPem: () => (tlsController ? tlsController.getExportablePublicCertPem() : ''),
+    getStats, getHistory, getDevices, ingest, deleteDevice, onStats, bindHost,
     getSubscriptions, setSubscriptions, getSyncContent, getSyncSettings, setSyncSettings, setSyncTitlePolicy,
     setSessionConversationsEnabled: (enabled) => conversationRelay.setEnabled(enabled),
     setApprovalAlertsEnabled: (enabled) => approvalAlertStore.setEnabled(enabled),
@@ -2135,7 +2648,7 @@ function createHub({
     generateReport: (options) => reportManager.generateReport(options),
     getIntegrationsStatus: () => integrationManager.getStatus(),
     getIntegrationSecrets: () => integrationManager.getSecrets(),
-    updateIntegrationsConfig: (patch) => integrationManager.updateConfig(patch),
+    updateIntegrationsConfig: (patch, options) => integrationManager.updateConfig(patch, options),
     setIntegrationSecrets: (secrets) => integrationManager.setSecrets(secrets),
     analyzeReportWithAi: (options) => integrationManager.analyzeReport(options),
     pushReportToOpenClaw: (options) => integrationManager.pushToOpenClaw(options),
@@ -2146,9 +2659,9 @@ function createHub({
     onApprovalAlertCreated: (alert) => integrationManager.onApprovalAlertCreated(alert),
     onStatsSnapshot: (stats) => integrationManager.onStatsSnapshot(stats),
     buildWeChatBrief: (options) => integrationManager.buildWeChatBrief(options),
-    getOpenClawEnv: () => integrationManager.getOpenClawEnv(),
+    getOpenClawEnv: (options) => integrationManager.getOpenClawEnv(options),
     startOpenClawWeixinQr: () => integrationManager.startOpenClawWeixinQr(),
-    pollOpenClawWeixinQrStatus: (sessionId) => integrationManager.pollOpenClawWeixinQrStatus(sessionId),
+    pollOpenClawWeixinQrStatus: (sessionId, options) => integrationManager.pollOpenClawWeixinQrStatus(sessionId, options),
     submitOpenClawWeixinVerifyCode: (sessionId, verifyCode) => integrationManager.submitOpenClawWeixinVerifyCode(sessionId, verifyCode),
     cancelOpenClawWeixinQr: (sessionId) => integrationManager.cancelOpenClawWeixinQr(sessionId),
     provisionOpenClaw: (options) => integrationManager.provisionOpenClaw(options),
@@ -2163,9 +2676,24 @@ if (require.main === module) {
     console.error('Hub failed to start: --persistIntervalMs requires a numeric value');
     process.exit(1);
   }
+  if (args.secret !== undefined) {
+    console.warn('Warning: passing --secret on the command line exposes it in process listings; prefer TOKEN_MONITOR_SECRET or --secret-file.');
+  }
+  const secretFile = String(args['secret-file'] ?? args.secretFile ?? process.env.TOKEN_MONITOR_SECRET_FILE ?? '').trim();
+  let secret = String(args.secret || process.env.TOKEN_MONITOR_SECRET || '').trim();
+  if (!secret && secretFile) {
+    try {
+      secret = loadPassphraseFromFile(secretFile, { noFollow: true, checkPrivateKeyPerms: true, logger: console }).trim();
+    } catch (error) {
+      console.error(`Hub failed to read secret file: ${error.message}`);
+      process.exit(1);
+    }
+  }
+  const readSecret = String(process.env.TOKEN_MONITOR_READ_SECRET || '').trim();
+  const ingestSecret = String(process.env.TOKEN_MONITOR_INGEST_SECRET || '').trim();
+  const adminSecret = String(process.env.TOKEN_MONITOR_ADMIN_SECRET || '').trim();
   const port = Number(args.port || process.env.TOKEN_MONITOR_PORT || 17321);
   const host = String(args.host || process.env.TOKEN_MONITOR_HOST || '0.0.0.0');
-  const secret = String(args.secret || process.env.TOKEN_MONITOR_SECRET || '').trim();
   const staleAfterMs = Number(args.staleAfterMs || process.env.TOKEN_MONITOR_STALE_AFTER_MS || DEFAULT_STALE_AFTER_MS);
   const persistIntervalMs = Number(args.persistIntervalMs ?? process.env.TOKEN_MONITOR_PERSIST_INTERVAL_MS ?? 0);
   const dataFile = String(args.dataFile || process.env.TOKEN_MONITOR_DATA_FILE || path.join(projectRoot(), 'data', 'devices.json'));
@@ -2173,12 +2701,54 @@ if (require.main === module) {
   const syncSessionTitles = syncSessionTitlesEnabled(args.syncSessionTitles ?? args['sync-session-titles'] ?? process.env.TOKEN_MONITOR_SYNC_SESSION_TITLES);
   const sessionConversations = syncSessionTitlesEnabled(args.sessionConversations ?? args['session-conversations'] ?? process.env.TOKEN_MONITOR_SESSION_CONVERSATIONS);
   const approvalAlerts = syncSessionTitlesEnabled(args.approvalAlerts ?? args['approval-alerts'] ?? process.env.TOKEN_MONITOR_APPROVAL_ALERTS);
+  const allowInsecureLocalNoAuth = syncSessionTitlesEnabled(
+    args['allow-insecure-local-no-auth'] ?? args.allowInsecureLocalNoAuth ?? process.env.TOKEN_MONITOR_ALLOW_INSECURE_LOCAL_NO_AUTH
+  );
+  const allowRemoteAdmin = syncSessionTitlesEnabled(
+    args['allow-remote-admin'] ?? args.allowRemoteAdmin ?? process.env.TOKEN_MONITOR_ALLOW_REMOTE_ADMIN
+  );
+  const allowedHosts = args['allowed-hosts'] ?? args.allowedHosts ?? process.env.TOKEN_MONITOR_ALLOWED_HOSTS;
+  const trustedProxies = args['trusted-proxies'] ?? args.trustedProxies ?? process.env.TOKEN_MONITOR_TRUSTED_PROXIES;
   const reportsArg = args.reports ?? process.env.TOKEN_MONITOR_REPORTS;
   const reportsDir = String(args.reportsDir ?? args['reports-dir'] ?? process.env.TOKEN_MONITOR_REPORTS_DIR ?? '').trim();
-  const hub = createHub({
-    port, deployment: 'standalone', host, secret, staleAfterMs, dataFile, syncSessionTitles, sessionConversations, approvalAlerts,
-    persistIntervalMs, reportsDir, ...(reportsArg !== undefined ? { reports: reportsArg } : {})
-  });
+
+  let tlsCli;
+  try {
+    tlsCli = parseHubTlsCliEnv(args, process.env);
+  } catch (error) {
+    console.error(`Hub failed to start: ${error.message}`);
+    process.exit(1);
+  }
+
+  let hub;
+  try {
+    hub = createHub({
+      port,
+      deployment: 'standalone',
+      host,
+      secret,
+      readSecret,
+      ingestSecret,
+      adminSecret,
+      allowInsecureLocalNoAuth,
+      allowRemoteAdmin,
+      allowedHosts,
+      trustedProxies,
+      tls: tlsCli,
+      requireTls: tlsCli.requireTls,
+      staleAfterMs,
+      dataFile,
+      syncSessionTitles,
+      sessionConversations,
+      approvalAlerts,
+      persistIntervalMs,
+      reportsDir,
+      ...(reportsArg !== undefined ? { reports: reportsArg } : {})
+    });
+  } catch (error) {
+    console.error(`Hub failed to start: ${error.message}`);
+    process.exit(1);
+  }
   for (const signal of ['SIGINT', 'SIGTERM']) {
     process.once(signal, () => {
       hub.stop().catch((error) => {
@@ -2188,11 +2758,24 @@ if (require.main === module) {
     });
   }
   hub.start().then(() => {
-    console.log(`Token Monitor hub listening on http://${hub.bindHost}:${port}`);
+    console.log(`Token Monitor hub listening on ${hub.scheme}://${hub.bindHost}:${port}`);
+    if (hub.redirectServer) {
+      const rAddr = hub.redirectServer.address();
+      if (rAddr && typeof rAddr === 'object') {
+        console.log(`HTTP->HTTPS 308 redirector listening on http://${hub.bindHost}:${rAddr.port}`);
+      }
+    }
     console.log(`Data file: ${dataFile}`);
     console.log(`Persistence interval: ${persistIntervalMs}ms`);
-    if (!secret) {
-      console.warn(`Warning: TOKEN_MONITOR_SECRET is not set, so the hub is bound to ${hub.bindHost} (localhost only) to keep account identity off the network. Set a secret to accept connections from other devices.`);
+    if (!secret && !readSecret && !ingestSecret && !adminSecret) {
+      console.warn(
+        allowInsecureLocalNoAuth
+          ? `Warning: TOKEN_MONITOR_SECRET is not set and --allow-insecure-local-no-auth is active on ${hub.bindHost}.`
+          : `Warning: TOKEN_MONITOR_SECRET is not set. Protected routes return 503 secret_required on ${hub.bindHost} until a secret is configured.`
+      );
+    }
+    if (hub.scheme === 'http' && !isLoopbackHost(hub.bindHost)) {
+      console.warn(`SECURITY WARNING: Hub is listening over unencrypted HTTP on non-loopback address ${hub.bindHost}:${port}. Configure native TLS (--tls-cert/--tls-key or --tls-pfx) or bind to 127.0.0.1 behind a TLS-terminating reverse proxy.`);
     }
   }).catch((err) => {
     console.error(`Hub failed to start: ${err.message}`);
@@ -2200,4 +2783,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createHub, createOpenClawEndpointSurface, resolveBindHost };
+module.exports = { createHub, createOpenClawEndpointSurface, resolveBindHost, isLoopbackHost, validateDeviceId };

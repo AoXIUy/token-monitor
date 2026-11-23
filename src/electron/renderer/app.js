@@ -516,11 +516,31 @@ Object.assign(els, {
   syncConnectionCancel: document.getElementById('syncConnectionCancel'),
   syncConnectionSaveError: document.getElementById('syncConnectionSaveError'),
   syncDeviceSettings: document.getElementById('syncDeviceSettings'),
+  hubClientHttpWarning: document.getElementById('hubClientHttpWarning'),
+  hubClientCaField: document.getElementById('hubClientCaField'),
+  hubClientCaSummary: document.getElementById('hubClientCaSummary'),
+  hubClientCaImportButton: document.getElementById('hubClientCaImportButton'),
+  hubClientCaClearButton: document.getElementById('hubClientCaClearButton'),
+  hubClientCaError: document.getElementById('hubClientCaError'),
   deviceIconInput: document.getElementById('deviceIconInput'),
   deviceIconLocalRow: document.getElementById('deviceIconLocalRow'),
   syncUploadIntervalRow: document.getElementById('syncUploadIntervalRow'),
   hubHostFields: document.getElementById('hubHostFields'),
   hubPortInput: document.getElementById('hubPortInput'),
+  hubHostBindInput: document.getElementById('hubHostBindInput'),
+  hubHostHttpWarning: document.getElementById('hubHostHttpWarning'),
+  hubHostTlsSection: document.getElementById('hubHostTlsSection'),
+  hubHostTlsStatus: document.getElementById('hubHostTlsStatus'),
+  hubHostTlsEnabledInput: document.getElementById('hubHostTlsEnabledInput'),
+  hubHostTlsCertInfo: document.getElementById('hubHostTlsCertInfo'),
+  hubHostTlsModeSelect: document.getElementById('hubHostTlsModeSelect'),
+  hubHostTlsPassphraseInput: document.getElementById('hubHostTlsPassphraseInput'),
+  hubHostTlsImportPemButton: document.getElementById('hubHostTlsImportPemButton'),
+  hubHostTlsImportPfxButton: document.getElementById('hubHostTlsImportPfxButton'),
+  hubHostTlsReloadButton: document.getElementById('hubHostTlsReloadButton'),
+  hubHostTlsExportCertButton: document.getElementById('hubHostTlsExportCertButton'),
+  hubHostTlsClearButton: document.getElementById('hubHostTlsClearButton'),
+  hubHostTlsMessage: document.getElementById('hubHostTlsMessage'),
   hubSecretInput: document.getElementById('hubSecretInput'),
   hubSecretCopyButton: document.getElementById('hubSecretCopyButton'),
   hubSecretRegenButton: document.getElementById('hubSecretRegenButton'),
@@ -8567,7 +8587,11 @@ const STREAM_REASON_KEYS = {
   unreachable: 'settings.sync.offline.unreachable',
   server_error: 'settings.sync.offline.serverError',
   disconnected: 'settings.sync.offline.disconnected',
-  network: 'settings.sync.offline.network'
+  network: 'settings.sync.offline.network',
+  tls_untrusted: 'settings.sync.offline.tlsUntrusted',
+  tls_expired: 'settings.sync.offline.tlsExpired',
+  tls_hostname_mismatch: 'settings.sync.offline.tlsHostnameMismatch',
+  tls_error: 'settings.sync.offline.tlsError'
 };
 
 function streamFailureText(failure) {
@@ -9933,10 +9957,82 @@ function renderIcloudStatus() {
     : t('settings.sync.icloudRootWaiting');
 }
 
+function isInsecureRemoteHttpUrlUi(rawUrl) {
+  const value = String(rawUrl || '').trim();
+  if (!value) return false;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'http:') return false;
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    return host !== 'localhost' && host !== '::1' && !host.startsWith('127.');
+  } catch (_) {
+    return false;
+  }
+}
+
+function renderHostTlsUi(info) {
+  const bindHost = info?.bindHost || state.settings?.hubHostBind || '0.0.0.0';
+  if (els.hubHostBindInput) {
+    els.hubHostBindInput.value = bindHost === '127.0.0.1' ? '127.0.0.1' : '0.0.0.0';
+  }
+  const tls = info?.tls || {
+    enabled: state.settings?.hubHostTlsEnabled === true,
+    mode: state.settings?.hubHostTlsMode || 'managed',
+    minVersion: state.settings?.hubHostTlsMinVersion || 'TLSv1.2',
+    cert: state.settings?.hubHostTlsCertMetadata || null,
+    configured: Boolean(state.settings?.hubHostTlsCertMetadata)
+  };
+  const insecureHttp = info ? Boolean(info.insecureNonLoopbackHttp) : (!tls.enabled && bindHost !== '127.0.0.1');
+  if (els.hubHostHttpWarning) els.hubHostHttpWarning.hidden = !insecureHttp;
+  if (els.hubHostTlsEnabledInput) {
+    els.hubHostTlsEnabledInput.checked = tls.enabled === true;
+    els.hubHostTlsEnabledInput.disabled = !tls.configured && !tls.enabled;
+  }
+  if (els.hubHostTlsModeSelect) {
+    els.hubHostTlsModeSelect.value = tls.mode === 'path' ? 'path' : 'managed';
+  }
+  const cert = tls.cert || null;
+  if (els.hubHostTlsStatus) {
+    if (tls.enabled && cert) {
+      const days = Number.isFinite(Number(cert.daysRemaining)) ? Number(cert.daysRemaining) : 0;
+      els.hubHostTlsStatus.textContent = t('settings.sync.hostTlsActive', {
+        minVersion: tls.minVersion || 'TLSv1.2',
+        days
+      });
+    } else if (tls.enabled) {
+      els.hubHostTlsStatus.textContent = t('settings.sync.hostTlsActive', {
+        minVersion: tls.minVersion || 'TLSv1.2',
+        days: 0
+      });
+    } else {
+      els.hubHostTlsStatus.textContent = t('settings.sync.hostTlsDisabled');
+    }
+  }
+  if (els.hubHostTlsCertInfo) {
+    if (cert) {
+      const lines = [];
+      if (cert.subject) lines.push(cert.subject);
+      if (cert.san?.dns?.length) lines.push(`SAN: ${cert.san.dns.slice(0, 4).join(', ')}`);
+      if (cert.validTo) lines.push(`${cert.validTo.slice(0, 10)}${cert.fingerprint256 ? ` · SHA-256 ${cert.fingerprint256.slice(0, 23)}…` : ''}`);
+      if (tls.lastReloadError) lines.push(`Reload error: ${tls.lastReloadError}`);
+      els.hubHostTlsCertInfo.textContent = lines.join(' | ');
+      els.hubHostTlsCertInfo.hidden = false;
+    } else {
+      els.hubHostTlsCertInfo.textContent = '';
+      els.hubHostTlsCertInfo.hidden = true;
+    }
+  }
+  const hasCert = Boolean(tls.configured || tls.enabled || cert);
+  if (els.hubHostTlsReloadButton) els.hubHostTlsReloadButton.hidden = !(tls.enabled && info?.listening);
+  if (els.hubHostTlsExportCertButton) els.hubHostTlsExportCertButton.hidden = !hasCert;
+  if (els.hubHostTlsClearButton) els.hubHostTlsClearButton.hidden = !hasCert;
+}
+
 function renderHubStatus() {
   renderIcloudStatus();
   if (!els.hubStatusRow || !els.hubAddressList) return;
   const info = state.hubInfo;
+  renderHostTlsUi(info);
   const port = Number(state.settings.hubHostPort || 17321);
   if (!info) {
     els.hubStatusRow.textContent = t('settings.sync.starting');
@@ -9959,7 +10055,7 @@ function renderHubStatus() {
   }
   els.hubStatusRow.textContent = t('settings.sync.listening', { port: info.listeningPort });
   els.hubStatusRow.className = 'hub-status ok';
-  renderHubAddresses(info.lanAddresses || [], info.listeningPort);
+  renderHubAddresses(info.lanAddresses || [], info.listeningPort, info);
 }
 
 const SYNC_PANEL_AGE_REFRESH_MS = 30_000;
@@ -10265,8 +10361,9 @@ function renderHubBuildStatus() {
 }
 
 let hubAddressesExpanded = false;
-function hubAddressRow(addr, port) {
-  const url = `http://${addr.address}:${port}`;
+function hubAddressRow(addr, port, scheme = 'http') {
+  const proto = scheme === 'https' ? 'https' : 'http';
+  const url = `${proto}://${addr.address}:${port}`;
   const row = document.createElement('div');
   row.className = 'hub-address-row';
   const code = document.createElement('code');
@@ -10284,30 +10381,44 @@ function hubAddressRow(addr, port) {
   return row;
 }
 
-function renderHubAddresses(addresses, port) {
+function renderHubAddresses(addresses, port, info = state.hubInfo) {
   els.hubAddressList.replaceChildren();
-  if (addresses.length === 0) {
+  const scheme = info?.scheme === 'https' ? 'https' : 'http';
+  const bindLoopback = info?.bindHost === '127.0.0.1';
+  const dnsSans = scheme === 'https' && Array.isArray(info?.tls?.cert?.san?.dns)
+    ? info.tls.cert.san.dns
+        .filter((name) => typeof name === 'string' && name.trim() && !name.includes('*'))
+        .map((name) => ({ address: name.trim(), interface: 'TLS SAN' }))
+    : [];
+  const effectiveAddresses = bindLoopback
+    ? [{ address: '127.0.0.1', interface: 'loopback' }]
+    : addresses;
+  if (dnsSans.length === 0 && effectiveAddresses.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'hub-address-empty';
     empty.textContent = t('settings.sync.noLanAddress', { port });
     els.hubAddressList.appendChild(empty);
     return;
   }
-  // Lead with the network card other devices most likely share, not a VPN or
-  // virtual adapter; the rest stay one click away.
+  // Lead with TLS DNS SANs (when HTTPS is active) and then the network card
+  // other devices most likely share; the rest stay one click away.
   const physical = addr => /^(en|eth|wl|wi-?fi|ethernet)/i.test(String(addr.interface || ''));
-  const ordered = [...addresses.filter(physical), ...addresses.filter(addr => !physical(addr))];
+  const ordered = [
+    ...dnsSans,
+    ...effectiveAddresses.filter(physical),
+    ...effectiveAddresses.filter(addr => !physical(addr))
+  ];
   const header = document.createElement('div');
   header.className = 'hub-address-header';
   header.textContent = t('settings.sync.connectWith');
-  els.hubAddressList.append(header, hubAddressRow(ordered[0], port));
+  els.hubAddressList.append(header, hubAddressRow(ordered[0], port, scheme));
   const rest = ordered.slice(1);
   if (rest.length === 0) return;
   const extra = document.createElement('div');
   extra.className = 'hub-address-extra';
   extra.id = 'hubAddressExtra';
   extra.hidden = !hubAddressesExpanded;
-  extra.append(...rest.map(addr => hubAddressRow(addr, port)));
+  extra.append(...rest.map(addr => hubAddressRow(addr, port, scheme)));
   const more = document.createElement('button');
   more.type = 'button';
   more.className = 'hub-address-more';
@@ -10316,7 +10427,7 @@ function renderHubAddresses(addresses, port) {
   more.textContent = hubAddressesExpanded ? t('settings.sync.fewerAddresses') : t('settings.sync.moreAddresses', { count: rest.length });
   more.addEventListener('click', () => {
     hubAddressesExpanded = !hubAddressesExpanded;
-    renderHubAddresses(addresses, port);
+    renderHubAddresses(addresses, port, info);
     els.hubAddressList.querySelector('.hub-address-more')?.focus({ preventScroll: true });
   });
   // The toggle precedes the rows it reveals, so Tab reaches them next.
@@ -10478,11 +10589,75 @@ const CLIENT_CONNECTION_FIELDS = ['hubUrl', 'secret', 'deviceId'];
 let clientConnectionEditing = false;
 let clientConnectionEditRevision = 0;
 let hubSaveError = false;
+let hubSaveErrorKey = 'settings.sync.saveFailed';
 let hubProfileAdding = false;
 let hubProfileNameDraft = null;
+let clientCaDraftMode = 'keep';
+let clientCaDraftToken = '';
+let clientCaDraftSummary = null;
+let clientCaError = '';
+
+function activeSavedHubProfile() {
+  const profiles = state.settings?.hubProfiles || [];
+  const activeId = state.settings?.activeHubProfileId || '';
+  return profiles.find((profile) => profile.id === activeId) || null;
+}
+
+function resetClientCaDraft({ notifyMain = false } = {}) {
+  const token = clientCaDraftToken;
+  clientCaDraftMode = 'keep';
+  clientCaDraftToken = '';
+  clientCaDraftSummary = null;
+  clientCaError = '';
+  if (notifyMain && token && window.tokenMonitor?.clearClientCaDraft) {
+    void window.tokenMonitor.clearClientCaDraft(token);
+  }
+}
+
+function renderClientCaUi() {
+  const urlDraft = els.hubUrlInput ? els.hubUrlInput.value : state.settings?.hubUrl;
+  if (els.hubClientHttpWarning) {
+    els.hubClientHttpWarning.hidden = !isInsecureRemoteHttpUrlUi(urlDraft);
+  }
+  if (!els.hubClientCaSummary) return;
+  const savedProfile = hubProfileAdding ? null : activeSavedHubProfile();
+  const savedHasCa = Boolean(savedProfile?.hasCustomCa);
+  const savedSummary = savedProfile?.caSummary || null;
+  let showClear;
+  if (clientCaDraftMode === 'replace' && clientCaDraftSummary) {
+    const subj = clientCaDraftSummary.subject || clientCaDraftSummary.fingerprint256?.slice(0, 23) || 'CA';
+    els.hubClientCaSummary.textContent = t('settings.sync.clientCaStaged', { subject: subj });
+    showClear = true;
+  } else if (clientCaDraftMode === 'clear') {
+    els.hubClientCaSummary.textContent = t('settings.sync.clientCaWillClear');
+    showClear = false;
+  } else if (savedHasCa) {
+    const subj = savedSummary?.subject || savedSummary?.fingerprint256?.slice(0, 23) || 'CA';
+    const expires = savedSummary?.validTo ? String(savedSummary.validTo).slice(0, 10) : '—';
+    els.hubClientCaSummary.textContent = t('settings.sync.clientCaConfigured', { subject: subj, expires });
+    showClear = true;
+  } else {
+    els.hubClientCaSummary.textContent = t('settings.sync.clientCaSystem');
+    showClear = false;
+  }
+  if (els.hubClientCaClearButton) {
+    els.hubClientCaClearButton.hidden = !showClear;
+    els.hubClientCaClearButton.disabled = hubSaveBusy;
+  }
+  if (els.hubClientCaImportButton) {
+    els.hubClientCaImportButton.disabled = hubSaveBusy;
+  }
+  if (els.hubClientCaError) {
+    els.hubClientCaError.hidden = !clientCaError;
+    els.hubClientCaError.textContent = clientCaError || '';
+  }
+}
 
 function clientConnectionHasDraft() {
-  return hubProfileAdding || hubProfileNameDraft !== null || CLIENT_CONNECTION_FIELDS.some(field => hubDraftDirty[field]);
+  return hubProfileAdding
+    || hubProfileNameDraft !== null
+    || clientCaDraftMode !== 'keep'
+    || CLIENT_CONNECTION_FIELDS.some(field => hubDraftDirty[field]);
 }
 
 function syncHubConnectionUi() {
@@ -10509,8 +10684,10 @@ function syncHubConnectionUi() {
   els.syncUploadIntervalRow.hidden = !client;
   els.syncUploadIntervalRow.inert = !client;
   els.syncConnectionSaveError.hidden = !hubSaveError;
-  els.syncConnectionSaveError.textContent = hubSaveError ? t('settings.sync.saveFailed') : '';
+  const saveErrKey = typeof hubSaveErrorKey === 'string' && hubSaveErrorKey ? hubSaveErrorKey : 'settings.sync.saveFailed';
+  els.syncConnectionSaveError.textContent = hubSaveError ? t(saveErrKey) : '';
   syncHubProfileControls();
+  if (typeof renderClientCaUi === 'function') renderClientCaUi();
 }
 
 const HUB_PROFILE_ADD_VALUE = '__add__';
@@ -10570,9 +10747,11 @@ function cancelClientConnectionEdit() {
   if (hubSaveBusy || state.settings?.hubMode !== 'client') return;
   hubProfileAdding = false;
   hubProfileNameDraft = null;
+  resetClientCaDraft({ notifyMain: true });
   clientConnectionEditing = false;
   clientConnectionEditRevision += 1;
   hubSaveError = false;
+  hubSaveErrorKey = 'settings.sync.saveFailed';
   for (const [field, inputId] of HUB_DRAFT_FIELDS) {
     if (!CLIENT_CONNECTION_FIELDS.includes(field)) continue;
     hubDraftDirty[field] = false;
@@ -10697,7 +10876,7 @@ function hubDraftValuesFromSettings() {
 }
 
 function hubDraftHasChanges() {
-  if (hubProfileAdding || hubProfileNameDraft !== null) return true;
+  if (hubProfileAdding || hubProfileNameDraft !== null || clientCaDraftMode !== 'keep') return true;
   const draft = hubDraftValuesFromInputs();
   const saved = hubDraftValuesFromSettings();
   return Object.keys(draft).some((field) => draft[field] !== saved[field]);
@@ -15121,6 +15300,7 @@ els.saveSettingsButton.addEventListener('click', async () => {
   if (hubSaveBusy || !hubDraftHasChanges()) return;
   hubSaveBusy = true;
   hubSaveError = false;
+  hubSaveErrorKey = 'settings.sync.saveFailed';
   syncHubConnectionUi();
   syncHubSaveButton();
   try {
@@ -15128,7 +15308,12 @@ els.saveSettingsButton.addEventListener('click', async () => {
     const submittedHubFields = hubDraftValuesFromInputs();
     const patch = { ...submittedHubFields };
     if (state.settings?.hubMode === 'client' && els.hubProfileNameInput) {
-      patch.hubProfileAction = { type: hubProfileAdding ? 'add' : 'save', name: els.hubProfileNameInput.value };
+      patch.hubProfileAction = {
+        type: hubProfileAdding ? 'add' : 'save',
+        name: els.hubProfileNameInput.value,
+        ...(clientCaDraftMode !== 'keep' ? { caMode: clientCaDraftMode } : {}),
+        ...(clientCaDraftMode === 'replace' && clientCaDraftToken ? { caDraftToken: clientCaDraftToken } : {})
+      };
     }
     if (Object.prototype.hasOwnProperty.call(submittedHubFields, 'hubHostPort')) {
       patch.hubHostPort = Number(submittedHubFields.hubHostPort) || 17321;
@@ -15139,13 +15324,18 @@ els.saveSettingsButton.addEventListener('click', async () => {
     hubSaveInFlightRevisions = submittedHubRevisions;
     try {
       await saveSettings(patch);
-    } catch (_) {
+    } catch (error) {
       hubSaveError = true;
+      const msg = String(error?.message || '');
+      hubSaveErrorKey = msg.includes('secret_required_on_trust_change')
+        ? 'settings.sync.secretRequiredOnTrustChange'
+        : 'settings.sync.saveFailed';
       return;
     }
     if (patch.hubProfileAction) {
       hubProfileAdding = false;
       hubProfileNameDraft = null;
+      resetClientCaDraft({ notifyMain: false });
     }
     reconcileHubDraftsAfterSave(submittedHubFields, submittedHubRevisions);
     finishClientConnectionSave(submittedHubRevisions, submittedEditRevision);
@@ -15166,6 +15356,121 @@ els.syncConnectionEdit?.addEventListener('click', () => {
 });
 els.syncConnectionCancel?.addEventListener('click', cancelClientConnectionEdit);
 
+els.hubClientCaImportButton?.addEventListener('click', async () => {
+  if (hubSaveBusy || !window.tokenMonitor?.pickClientCaCert) return;
+  clientCaError = '';
+  const result = await window.tokenMonitor.pickClientCaCert();
+  if (!result || result.cancelled) return;
+  if (!result.ok) {
+    clientCaError = result.message || result.error || t('settings.common.error');
+    renderClientCaUi();
+    return;
+  }
+  if (clientCaDraftToken && clientCaDraftToken !== result.draftToken) {
+    void window.tokenMonitor.clearClientCaDraft?.(clientCaDraftToken);
+  }
+  clientCaDraftMode = 'replace';
+  clientCaDraftToken = result.draftToken || '';
+  clientCaDraftSummary = result.summary || null;
+  beginClientConnectionEdit();
+  syncHubConnectionUi();
+  syncHubSaveButton();
+});
+
+els.hubClientCaClearButton?.addEventListener('click', () => {
+  if (hubSaveBusy) return;
+  clientCaError = '';
+  const savedHasCa = !hubProfileAdding && Boolean(activeSavedHubProfile()?.hasCustomCa);
+  if (clientCaDraftToken) {
+    void window.tokenMonitor?.clearClientCaDraft?.(clientCaDraftToken);
+    clientCaDraftToken = '';
+    clientCaDraftSummary = null;
+  }
+  clientCaDraftMode = savedHasCa ? 'clear' : 'keep';
+  beginClientConnectionEdit();
+  syncHubConnectionUi();
+  syncHubSaveButton();
+});
+
+function setHostTlsFeedback(message = '', tone = '') {
+  if (!els.hubHostTlsMessage) return;
+  els.hubHostTlsMessage.textContent = message;
+  els.hubHostTlsMessage.className = `hub-status${tone ? ` ${tone}` : ''}`;
+  els.hubHostTlsMessage.hidden = !message;
+}
+
+els.hubHostBindInput?.addEventListener('change', async () => {
+  const bindHost = els.hubHostBindInput.value === '127.0.0.1' ? '127.0.0.1' : '0.0.0.0';
+  setHostTlsFeedback('');
+  try {
+    await saveSettings({ hubHostBind: bindHost });
+    await refreshHubInfo();
+  } catch (error) {
+    setHostTlsFeedback(error?.message || t('settings.sync.saveFailed'), 'error');
+    renderHostTlsUi(state.hubInfo);
+  }
+});
+
+els.hubHostTlsEnabledInput?.addEventListener('change', async () => {
+  const nextEnabled = els.hubHostTlsEnabledInput.checked === true;
+  setHostTlsFeedback('');
+  try {
+    await saveSettings({ hubHostTlsEnabled: nextEnabled });
+    await refreshHubInfo();
+  } catch (error) {
+    setHostTlsFeedback(error?.message || t('settings.sync.saveFailed'), 'error');
+    renderHostTlsUi(state.hubInfo);
+  }
+});
+
+async function runHostTlsImport(format) {
+  if (!window.tokenMonitor?.importHostTls) return;
+  setHostTlsFeedback('');
+  const mode = els.hubHostTlsModeSelect?.value === 'path' ? 'path' : 'managed';
+  const passphrase = els.hubHostTlsPassphraseInput ? els.hubHostTlsPassphraseInput.value : '';
+  if (els.hubHostTlsPassphraseInput) els.hubHostTlsPassphraseInput.value = '';
+  const result = await window.tokenMonitor.importHostTls({ format, mode, passphrase });
+  if (!result || result.cancelled) return;
+  if (!result.ok) {
+    setHostTlsFeedback(result.message || result.error || t('settings.common.error'), 'error');
+    return;
+  }
+  if (result.info) state.hubInfo = result.info;
+  renderHubStatus();
+  setHostTlsFeedback(Array.isArray(result.warnings) && result.warnings.length ? result.warnings.join(' · ') : '', 'ok');
+}
+
+els.hubHostTlsImportPemButton?.addEventListener('click', () => void runHostTlsImport('pem'));
+els.hubHostTlsImportPfxButton?.addEventListener('click', () => void runHostTlsImport('pfx'));
+
+els.hubHostTlsReloadButton?.addEventListener('click', async () => {
+  if (!window.tokenMonitor?.reloadHostTls) return;
+  setHostTlsFeedback('');
+  const result = await window.tokenMonitor.reloadHostTls();
+  if (result?.info) state.hubInfo = result.info;
+  renderHubStatus();
+  if (result?.ok) setHostTlsFeedback(t('settings.sync.hostTlsReloaded'), 'ok');
+  else setHostTlsFeedback(result?.message || result?.error || t('settings.common.error'), 'error');
+});
+
+els.hubHostTlsExportCertButton?.addEventListener('click', async () => {
+  if (!window.tokenMonitor?.exportHostPublicCert) return;
+  setHostTlsFeedback('');
+  const result = await window.tokenMonitor.exportHostPublicCert();
+  if (!result || result.cancelled) return;
+  if (result.ok) setHostTlsFeedback(t('settings.sync.hostTlsExported'), 'ok');
+  else setHostTlsFeedback(result.message || result.error || t('settings.common.error'), 'error');
+});
+
+els.hubHostTlsClearButton?.addEventListener('click', async () => {
+  if (!window.tokenMonitor?.clearHostTls) return;
+  setHostTlsFeedback('');
+  const result = await window.tokenMonitor.clearHostTls();
+  if (result?.info) state.hubInfo = result.info;
+  renderHubStatus();
+  if (!result?.ok) setHostTlsFeedback(result?.message || result?.error || t('settings.common.error'), 'error');
+});
+
 els.hubProfileNameInput?.addEventListener('input', () => {
   const savedName = state.settings?.hubProfiles?.find(profile => profile.id === state.settings?.activeHubProfileId)?.name || '';
   hubProfileNameDraft = els.hubProfileNameInput.value === savedName ? null : els.hubProfileNameInput.value;
@@ -15176,6 +15481,7 @@ function beginHubProfileAdd() {
   if (hubSaveBusy || clientConnectionEditing || clientConnectionHasDraft()) return;
   hubProfileAdding = true;
   hubProfileNameDraft = '';
+  resetClientCaDraft({ notifyMain: true });
   els.hubProfileNameInput.value = '';
   for (const field of ['hubUrl', 'secret']) {
     const inputId = HUB_DRAFT_FIELDS.find(([name]) => name === field)[1];

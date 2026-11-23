@@ -749,30 +749,62 @@ function aggregateLimits(devices, staleAfterMs = 0, nowMs = Date.now()) {
   return aggregate;
 }
 
+const PUBLIC_BALANCE_FIELDS = [
+  'amount',
+  'currency',
+  'todaySpend',
+  'weekSpend',
+  'monthSpend',
+  'allTimeSpend',
+  'requestCount',
+  'expiresAt',
+  'trackingSince',
+  'monthSinceTracking',
+  'giftBalance',
+  'cashBalance',
+  'planUsed',
+  'planLimit',
+  'planPercent',
+  'planStatus',
+  'todayTokenTotal',
+  'todayUsageDate',
+  'latestModelUsageDate',
+  'todayUsageBasis',
+  'snapshotDate'
+];
+
+function publicProviderBalance(balance) {
+  if (!balance || typeof balance !== 'object') return null;
+  const out = {};
+  for (const field of PUBLIC_BALANCE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(balance, field)) {
+      out[field] = balance[field];
+    }
+  }
+  return out;
+}
+
 function publicLimits(limits) {
   const normalized = normalizeLimitsSummary(limits);
   return {
     updatedAt: normalized.updatedAt,
     refreshMs: normalized.refreshMs,
-    providers: normalized.providers.map(({
-      accountKey,
-      accountKeyPortable,
-      relatedAccountKey,
-      webAccountKey,
-      accountKeyAliases,
-      accountEmail,
-      accountName,
-      accountLabel,
-      planLabel,
-      workspaceKind,
-      usageSummary,
-      ...provider
-    }) => {
-      if (!provider.balance) return provider;
-      // `tranches` carries per-grant amounts and expiry dates — billing detail
-      // with no public value, dropped alongside the custom group label.
-      const { quotaGroup, tranches, searchSpend, fetchSpend, ...publicBalance } = provider.balance;
-      return { ...provider, balance: publicBalance };
+    providers: normalized.providers.map((provider) => {
+      const publicProvider = {
+        provider: provider.provider,
+        ...(provider.adapterId ? { adapterId: provider.adapterId } : {}),
+        status: provider.status,
+        ...(provider.actionRequired ? { actionRequired: provider.actionRequired } : {}),
+        source: provider.source,
+        sourceDetail: provider.sourceDetail,
+        updatedAt: provider.updatedAt,
+        windows: provider.windows,
+        balanceUsd: provider.balanceUsd,
+        balance: publicProviderBalance(provider.balance),
+        resetCredits: provider.resetCredits,
+        region: provider.region
+      };
+      return publicProvider;
     })
   };
 }

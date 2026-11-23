@@ -14,8 +14,10 @@ function destinationBinding(context) {
     const url = new URL(context.url);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
     url.hash = '';
+    const caFp = String(context.caFingerprintSha256 || '').trim();
     return { mode: context.mode, url: url.href.replace(/\/$/, ''),
-      secret: String(context.secret || ''), deviceId: String(context.deviceId || '') };
+      secret: String(context.secret || ''), deviceId: String(context.deviceId || ''),
+      ...(caFp ? { caFingerprintSha256: caFp } : {}) };
   } catch (_) { return null; }
 }
 

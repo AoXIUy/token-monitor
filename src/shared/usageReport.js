@@ -331,6 +331,10 @@ function dayKeyInTimeZone(value, timeZone) {
   }
 }
 
+const MIN_REPORT_YEAR = 2000;
+const MAX_REPORT_YEAR = 2100;
+const MAX_ENUMERATED_DAYS = 366;
+
 /**
  * @param {string} value
  * @returns {string}
@@ -338,6 +342,8 @@ function dayKeyInTimeZone(value, timeZone) {
 function validateDateKey(value) {
   const key = String(value || '').trim();
   if (!DATE_KEY_RE.test(key)) return '';
+  const year = Number(key.slice(0, 4));
+  if (!Number.isInteger(year) || year < MIN_REPORT_YEAR || year > MAX_REPORT_YEAR) return '';
   const date = new Date(`${key}T00:00:00.000Z`);
   if (Number.isNaN(date.getTime())) return '';
   return date.toISOString().slice(0, 10) === key ? key : '';
@@ -350,12 +356,14 @@ function validateDateKey(value) {
  */
 function isoWeekOfDateKey(dateKey) {
   const [year, month, day] = dateKey.split('-').map(Number);
-  const utcDate = new Date(Date.UTC(year, month - 1, day));
+  const utcDate = new Date(0);
+  utcDate.setUTCFullYear(year, month - 1, day);
   const dow = utcDate.getUTCDay() || 7;
   const thursday = new Date(utcDate);
   thursday.setUTCDate(utcDate.getUTCDate() + (4 - dow));
   const isoYear = thursday.getUTCFullYear();
-  const jan1 = new Date(Date.UTC(isoYear, 0, 1));
+  const jan1 = new Date(0);
+  jan1.setUTCFullYear(isoYear, 0, 1);
   const days = Math.round((thursday.getTime() - jan1.getTime()) / 86400000);
   const isoWeek = Math.floor(days / 7) + 1;
   return {
@@ -375,10 +383,18 @@ function parseIsoWeekKey(weekKey) {
   if (!match) return null;
   const isoYear = Number(match[1]);
   const isoWeek = Number(match[2]);
-  if (!Number.isInteger(isoYear) || !Number.isInteger(isoWeek) || isoWeek < 1 || isoWeek > 53) {
+  if (
+    !Number.isInteger(isoYear)
+    || isoYear < MIN_REPORT_YEAR
+    || isoYear > MAX_REPORT_YEAR
+    || !Number.isInteger(isoWeek)
+    || isoWeek < 1
+    || isoWeek > 53
+  ) {
     return null;
   }
-  const jan4 = new Date(Date.UTC(isoYear, 0, 4));
+  const jan4 = new Date(0);
+  jan4.setUTCFullYear(isoYear, 0, 4);
   const jan4Dow = jan4.getUTCDay() || 7;
   const week1Monday = new Date(jan4);
   week1Monday.setUTCDate(jan4.getUTCDate() - (jan4Dow - 1));
@@ -408,12 +424,21 @@ function parseMonthKey(monthKey) {
   if (!match) return null;
   const year = Number(match[1]);
   const month = Number(match[2]);
-  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+  if (
+    !Number.isInteger(year)
+    || year < MIN_REPORT_YEAR
+    || year > MAX_REPORT_YEAR
+    || !Number.isInteger(month)
+    || month < 1
+    || month > 12
+  ) {
     return null;
   }
   const key = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`;
   const startDate = `${key}-01`;
-  const endDate = new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10);
+  const endDateObj = new Date(0);
+  endDateObj.setUTCFullYear(year, month, 0);
+  const endDate = endDateObj.toISOString().slice(0, 10);
   const prevYear = month === 1 ? year - 1 : year;
   const prevMonth = month === 1 ? 12 : month - 1;
   const previousPeriodKey = `${String(prevYear).padStart(4, '0')}-${String(prevMonth).padStart(2, '0')}`;
@@ -497,9 +522,15 @@ function resolveReportPeriod(granularity, periodKey = 'latest', options = {}) {
  * @returns {string[]}
  */
 function enumerateDateRange(startDate, endDate) {
+  if (!validateDateKey(startDate) || !validateDateKey(endDate) || startDate > endDate) {
+    return [];
+  }
   /** @type {string[]} */
   const dates = [];
-  for (let d = startDate; d <= endDate; d = dayKeyAddDays(d, 1)) {
+  for (let d = startDate; d && d <= endDate; d = dayKeyAddDays(d, 1)) {
+    if (dates.length >= MAX_ENUMERATED_DAYS) {
+      throw new Error(`Date range exceeds maximum span of ${MAX_ENUMERATED_DAYS} days`);
+    }
     dates.push(d);
   }
   return dates;

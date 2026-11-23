@@ -12,16 +12,31 @@ const {
  * Node-Hub-only store for sanitized Antigravity Manager snapshots.
  * Stores zero credentials and never touches DeviceRecord, Worker, or public stats.
  *
- * @param {{ dataFile?: string, logger?: { warn?: Function, error?: Function } }} [options]
+ * @param {{ dataFile?: string, now?: () => number, logger?: { warn?: Function, error?: Function } }} [options]
  */
-function createAntigravityManagerStore({ dataFile = '', logger = console } = {}) {
+function createAntigravityManagerStore({ dataFile = '', now = Date.now, logger = console } = {}) {
   const persistFile = typeof dataFile === 'string' && dataFile.trim()
     ? path.join(path.dirname(dataFile), 'antigravity-manager-snapshots.json')
     : '';
 
-  /** @type {Map<string, ReturnType<typeof sanitizeAntigravityManagerSnapshot>>} */
+  /** @type {Map<string, { snapshot: ReturnType<typeof sanitizeAntigravityManagerSnapshot>, receivedAt: number }>} */
   const snapshots = new Map();
   let updatedAt = '';
+  let lastReceivedAt = 0;
+
+  /**
+   * Monotonic server-assigned arrival timestamp in ms (immune to client-forged `updatedAt`).
+   * @param {number} [candidate]
+   * @returns {number}
+   */
+  function nextServerReceivedAt(candidate) {
+    const base = typeof candidate === 'number' && Number.isFinite(candidate) && candidate > 0
+      ? Math.floor(candidate)
+      : now();
+    const next = base > lastReceivedAt ? base : lastReceivedAt + 1;
+    lastReceivedAt = next;
+    return next;
+  }
 
   function loadInitial() {
     if (!persistFile) return;
@@ -32,7 +47,11 @@ function createAntigravityManagerStore({ dataFile = '', logger = console } = {})
       if (snapshots.size >= MAX_AG_MANAGER_DEVICES) break;
       try {
         const clean = sanitizeAntigravityManagerSnapshot(raw);
-        snapshots.set(clean.deviceId, clean);
+        const rawReceived = typeof raw?.receivedAt === 'number' && Number.isFinite(raw.receivedAt)
+          ? raw.receivedAt
+          : (typeof raw?.receivedAt === 'string' ? Date.parse(raw.receivedAt) : NaN);
+        const receivedAt = nextServerReceivedAt(Number.isFinite(rawReceived) ? rawReceived : undefined);
+        snapshots.set(clean.deviceId, { snapshot: clean, receivedAt });
       } catch (_) {}
     }
     if (typeof saved.updatedAt === 'string') updatedAt = saved.updatedAt;
@@ -43,7 +62,10 @@ function createAntigravityManagerStore({ dataFile = '', logger = console } = {})
     writeJsonAtomic(persistFile, {
       version: 1,
       updatedAt,
-      devices: Array.from(snapshots.values())
+      devices: Array.from(snapshots.values()).map(({ snapshot, receivedAt }) => ({
+        ...snapshot,
+        receivedAt
+      }))
     });
   }
 
@@ -54,9 +76,8 @@ function createAntigravityManagerStore({ dataFile = '', logger = console } = {})
       let oldestId = '';
       let oldestTime = Infinity;
       for (const [id, entry] of snapshots) {
-        const ts = Date.parse(entry.updatedAt) || 0;
-        if (ts < oldestTime) {
-          oldestTime = ts;
+        if (entry.receivedAt < oldestTime) {
+          oldestTime = entry.receivedAt;
           oldestId = id;
         }
       }
@@ -77,15 +98,18 @@ function createAntigravityManagerStore({ dataFile = '', logger = console } = {})
     const clean = sanitizeAntigravityManagerSnapshot(raw);
     const previousEntries = Array.from(snapshots.entries());
     const previousUpdatedAt = updatedAt;
+    const previousLastReceivedAt = lastReceivedAt;
     evictOldestIfNeeded(clean.deviceId);
-    snapshots.set(clean.deviceId, clean);
-    updatedAt = new Date().toISOString();
+    const receivedAt = nextServerReceivedAt();
+    snapshots.set(clean.deviceId, { snapshot: clean, receivedAt });
+    updatedAt = new Date(now()).toISOString();
     try {
       persistOrThrow();
     } catch (error) {
       snapshots.clear();
       for (const [id, entry] of previousEntries) snapshots.set(id, entry);
       updatedAt = previousUpdatedAt;
+      lastReceivedAt = previousLastReceivedAt;
       (logger.warn || console.warn)(`[antigravity-manager-hub] failed to save snapshots: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
     }
@@ -99,12 +123,8 @@ function createAntigravityManagerStore({ dataFile = '', logger = console } = {})
 
   function getSnapshots() {
     const devices = Array.from(snapshots.values())
-      .sort((a, b) => {
-        const ta = Date.parse(a.updatedAt) || 0;
-        const tb = Date.parse(b.updatedAt) || 0;
-        return tb - ta;
-      })
-      .map((entry) => structuredClone(entry));
+      .sort((a, b) => b.receivedAt - a.receivedAt)
+      .map(({ snapshot }) => structuredClone(snapshot));
     return {
       ok: true,
       version: 1,

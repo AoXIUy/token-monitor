@@ -33,12 +33,29 @@ const {
   readSessionUsageArchiveSnapshot
 } = require('../shared/usage/sessionUsageArchiveStore');
 const { createCursorUsageEventIndex } = require('../shared/providers/cursor/usageEvents');
+const {
+  createHubClientFetch,
+  isInsecureRemoteHttpUrl,
+  readClientCaFile,
+  readPrivateSecretFile
+} = require('../shared/hubClientFetch');
 
 loadDotEnv();
 const args = parseArgs(process.argv.slice(2));
 
 const hubUrl = String(args.hub || args.hubUrl || process.env.TOKEN_MONITOR_HUB_URL || 'http://127.0.0.1:17321').replace(/\/$/, '');
-const secret = String(args.secret || process.env.TOKEN_MONITOR_SECRET || '').trim();
+const cliSecret = typeof args.secret === 'string' ? args.secret.trim() : '';
+const secretFile = String(args['secret-file'] || args.secretFile || process.env.TOKEN_MONITOR_SECRET_FILE || '').trim();
+const secret = cliSecret
+  || (secretFile ? readPrivateSecretFile(secretFile, { logger: console }) : '')
+  || String(process.env.TOKEN_MONITOR_SECRET || '').trim();
+const caCertPath = String(args['ca-cert'] || args.caCert || process.env.TOKEN_MONITOR_CA_CERT || '').trim();
+const requireHttps = parseBoolean(args['require-https'] ?? args.requireHttps ?? process.env.TOKEN_MONITOR_REQUIRE_HTTPS, false);
+const loadedClientCa = caCertPath ? readClientCaFile(caCertPath) : null;
+const caCertPem = loadedClientCa ? loadedClientCa.caCertPem : '';
+const contextFetchImpl = !caCertPem && typeof fetch === 'function' ? fetch : undefined;
+const hubFetch = createHubClientFetch({ caCertPem, requireHttps, defaultTimeoutMs: 15_000, fetchImpl: contextFetchImpl });
+const hubStreamFetch = createHubClientFetch({ caCertPem, requireHttps, defaultTimeoutMs: 0, fetchImpl: contextFetchImpl });
 const deviceId = String(args.device || args.deviceId || process.env.TOKEN_MONITOR_DEVICE_ID || defaultDeviceId());
 const intervalMs = Number(args.interval || args.intervalMs || process.env.TOKEN_MONITOR_INTERVAL_MS || 5 * 60 * 1000);
 const watchEnabled = String(args.watch ?? process.env.TOKEN_MONITOR_WATCH ?? '1') !== '0';
@@ -156,9 +173,9 @@ function summaryWithSessionUsageArchive(summary, now = new Date()) {
   return projectsEnabled ? applyProjectRollups(visibleSummary) : visibleSummary;
 }
 
-const titleSyncNegotiator = createAgentTitleSync({ dataDir: path.dirname(pidFilePath()), fetchFn: fetch });
+const titleSyncNegotiator = createAgentTitleSync({ dataDir: path.dirname(pidFilePath()), fetchFn: hubFetch });
 const conversationClient = sessionConversations && secret && !once && !dryRun
-  ? createSessionConversationClient({ hubUrl, secret, deviceId, wslScanEnabled }) : null;
+  ? createSessionConversationClient({ hubUrl, secret, deviceId, wslScanEnabled, fetchFn: hubStreamFetch }) : null;
 const approvalAlertRuntime = approvalAlerts && !once && !dryRun
   ? createApprovalAlertRuntime({
     onError: (error) => console.error(`[approval-alerts] ${error.message}`)
@@ -169,7 +186,7 @@ async function postUsage(summary) {
   const titleSyncOptions = await titleSyncNegotiator.negotiate({
     hubUrl, headers: authHeaders, deviceId: summary.deviceId || deviceId, enabled: syncSessionTitles
   });
-  const { response } = await postSyncPayload((url, options) => fetch(url, { ...options, redirect: 'error' }), `${hubUrl}/api/ingest`, {
+  const { response } = await postSyncPayload((url, options) => hubFetch(url, { ...options, redirect: 'error' }), `${hubUrl}/api/ingest`, {
     headers: {
       'content-type': 'application/json',
       [HUB_RESPONSE_HEADER]: HUB_RESPONSE_MINIMAL,
@@ -210,7 +227,19 @@ function registerPidFile(stopRuntime) {
 }
 
 async function main() {
-  const startupMessage = `Token Monitor agent device=${deviceId} hub=${hubUrl} intervalMs=${intervalMs} watch=${watchEnabled} projects=${projectsEnabled ? 'on' : 'off'} history=${historyEnabled ? 'on' : 'off'} sessionArchive=${sessionUsageArchiveEnabled ? 'on' : 'off'} limits=${limitsEnabled ? `${limitProviders || 'none'}:${limitsRefreshMode === 'adaptive' ? 'adaptive' : `${limitsRefreshMs}ms`}` : 'off'}`;
+  if (cliSecret) {
+    console.warn('Warning: passing --secret on the command line exposes it in process listings. Prefer TOKEN_MONITOR_SECRET or --secret-file.');
+  }
+  if (!dryRun && isInsecureRemoteHttpUrl(hubUrl)) {
+    if (requireHttps) {
+      throw Object.assign(
+        new Error('Refusing plain HTTP connection to non-loopback Hub because --require-https / TOKEN_MONITOR_REQUIRE_HTTPS is enabled.'),
+        { code: 'insecure_http_blocked' }
+      );
+    }
+    console.warn(`Warning: Hub URL (${hubUrl}) uses plain HTTP on a non-loopback host. Use https:// (and --ca-cert if self-signed) or pass --require-https to enforce TLS.`);
+  }
+  const startupMessage = `Token Monitor agent device=${deviceId} hub=${hubUrl} intervalMs=${intervalMs} watch=${watchEnabled} projects=${projectsEnabled ? 'on' : 'off'} history=${historyEnabled ? 'on' : 'off'} sessionArchive=${sessionUsageArchiveEnabled ? 'on' : 'off'} limits=${limitsEnabled ? `${limitProviders || 'none'}:${limitsRefreshMode === 'adaptive' ? 'adaptive' : `${limitsRefreshMs}ms`}` : 'off'}${caCertPem ? ' customCa=on' : ''}`;
   if (dryRun) console.error(startupMessage);
   else console.log(startupMessage);
   if (!secret) console.warn('Warning: TOKEN_MONITOR_SECRET is not set. Posting without authorization header.');
@@ -222,6 +251,8 @@ async function main() {
     void approvalAlertRuntime?.stop();
     runtimeHandle?.stop();
     sessionUsageArchiveStore.close();
+    void hubFetch.destroy?.();
+    void hubStreamFetch.destroy?.();
   });
   // Reconcile old destinations even if the first collector scan later fails.
   // Dry runs never read/write private cleanup state or make sync requests.
@@ -243,6 +274,8 @@ async function main() {
       await runAgentOnce(runtimeOptions);
     } finally {
       sessionUsageArchiveStore?.close();
+      await hubFetch.destroy?.();
+      await hubStreamFetch.destroy?.();
     }
     return;
   }

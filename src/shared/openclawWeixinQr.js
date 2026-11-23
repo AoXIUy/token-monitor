@@ -14,8 +14,63 @@ const ILINK_CLIENT_VERSION = String((2 << 16) | (4 << 8) | 10);
 const ACTIVE_LOGIN_TTL_MS = 5 * 60_000;
 const QR_LONG_POLL_TIMEOUT_MS = 35_000;
 const MAX_QR_REFRESH_COUNT = 3;
+const MAX_ACTIVE_QR_SESSIONS = 4;
+const MAX_QR_RESPONSE_BYTES = 256 * 1024;
 
-const REDIRECT_HOST_RE = /^[A-Za-z0-9.-]+(?::\d{1,5})?$/;
+// Strict *.weixin.qq.com allowlist (no IP literals, no arbitrary domains, no custom ports).
+const ALLOWED_REDIRECT_HOST_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+weixin\.qq\.com$/;
+
+/**
+ * Validate a `scaned_but_redirect` redirect_host strictly against `*.weixin.qq.com`.
+ * @param {any} value
+ * @returns {string}
+ */
+function normalizeAllowedRedirectHost(value) {
+  if (typeof value !== 'string') return '';
+  const lower = value.trim().toLowerCase();
+  if (!lower || lower.length > 253) return '';
+  return ALLOWED_REDIRECT_HOST_RE.test(lower) ? lower : '';
+}
+
+/**
+ * Read a fetch Response body up to `maxBytes` without buffering unbounded streams.
+ * @param {Response} response
+ * @param {number} [maxBytes]
+ * @returns {Promise<string>}
+ */
+async function readBoundedText(response, maxBytes = MAX_QR_RESPONSE_BYTES) {
+  if (response?.body && typeof response.body.getReader === 'function') {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let totalBytes = 0;
+    let out = '';
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        const remaining = maxBytes - totalBytes;
+        if (remaining <= 0) {
+          try { await reader.cancel(); } catch {}
+          break;
+        }
+        const slice = value.byteLength > remaining ? value.subarray(0, remaining) : value;
+        totalBytes += slice.byteLength;
+        out += decoder.decode(slice, { stream: true });
+        if (totalBytes >= maxBytes) {
+          try { await reader.cancel(); } catch {}
+          break;
+        }
+      }
+      out += decoder.decode();
+      return out;
+    } finally {
+      try { reader.releaseLock(); } catch {}
+    }
+  }
+  const text = await response.text();
+  return text.length > maxBytes ? text.slice(0, maxBytes) : text;
+}
 
 /**
  * Normalize an iLink bot/user ID (e.g. `b0f5860fdecb@im.bot` -> `b0f5860fdecb-im-bot`)
@@ -189,9 +244,9 @@ function createWeixinQrLoginManager({
   }
 
   function purgeExpiredSessions() {
-    const cutoff = nowMs() - resolvedTtlMs * 2;
+    const nowValue = nowMs();
     for (const [id, session] of sessions) {
-      if (session.startedAt < cutoff && !session.inFlightPoll) {
+      if (session.cancelled || (nowValue - session.startedAt >= resolvedTtlMs && !session.inFlightPoll)) {
         sessions.delete(id);
       }
     }
@@ -227,9 +282,10 @@ function createWeixinQrLoginManager({
         method: 'POST',
         headers: buildPostHeaders({ routeTag: getRouteTag() }),
         body: JSON.stringify({ local_token_list: localTokenList }),
+        redirect: 'error',
         signal: controller.signal
       });
-      rawText = await response.text();
+      rawText = await readBoundedText(response, MAX_QR_RESPONSE_BYTES);
     } finally {
       clearTimeout(timer);
     }
@@ -258,8 +314,9 @@ function createWeixinQrLoginManager({
    * @param {string} qrcode
    * @param {string} verifyCode
    * @param {QrSession} session
+   * @param {AbortSignal} [callerSignal]
    */
-  async function requestQrStatus(pollBaseUrl, qrcode, verifyCode, session) {
+  async function requestQrStatus(pollBaseUrl, qrcode, verifyCode, session, callerSignal) {
     const fn = getFetch();
     let endpoint = `${pollBaseUrl}/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`;
     if (verifyCode) {
@@ -267,14 +324,23 @@ function createWeixinQrLoginManager({
     }
     const controller = new AbortController();
     session.activeAbort = controller;
+    const onCallerAbort = () => controller.abort();
+    if (callerSignal) {
+      if (callerSignal.aborted) {
+        controller.abort();
+      } else {
+        callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+      }
+    }
     const timer = setTimeout(() => controller.abort(), resolvedPollTimeoutMs);
     try {
       const response = await fn(endpoint, {
         method: 'GET',
         headers: buildCommonHeaders({ routeTag: getRouteTag() }),
+        redirect: 'error',
         signal: controller.signal
       });
-      const rawText = await response.text();
+      const rawText = await readBoundedText(response, MAX_QR_RESPONSE_BYTES);
       if (!response.ok) {
         if (response.status === 502 || response.status === 504 || response.status === 524) {
           return { status: session.status === 'scaned' ? 'scaned' : 'wait', transientTimeout: true };
@@ -290,12 +356,15 @@ function createWeixinQrLoginManager({
       if (session.cancelled) {
         return { status: 'cancelled' };
       }
-      if (isAbortError(error)) {
+      if (isAbortError(error) || callerSignal?.aborted) {
         return { status: session.status === 'scaned' ? 'scaned' : 'wait', transientTimeout: true };
       }
       throw error;
     } finally {
       clearTimeout(timer);
+      if (callerSignal) {
+        try { callerSignal.removeEventListener('abort', onCallerAbort); } catch {}
+      }
       if (session.activeAbort === controller) {
         session.activeAbort = null;
       }
@@ -307,8 +376,25 @@ function createWeixinQrLoginManager({
    */
   async function start() {
     purgeExpiredSessions();
+    if (sessions.size >= MAX_ACTIVE_QR_SESSIONS) {
+      return {
+        ok: false,
+        statusCode: 429,
+        error: 'too_many_qr_sessions',
+        message: `Maximum concurrent QR login sessions (${MAX_ACTIVE_QR_SESSIONS}) reached.`
+      };
+    }
     try {
       const qr = await fetchQrCode();
+      purgeExpiredSessions();
+      if (sessions.size >= MAX_ACTIVE_QR_SESSIONS) {
+        return {
+          ok: false,
+          statusCode: 429,
+          error: 'too_many_qr_sessions',
+          message: `Maximum concurrent QR login sessions (${MAX_ACTIVE_QR_SESSIONS}) reached.`
+        };
+      }
       const sessionId = generateSessionId();
       /** @type {QrSession} */
       const session = {
@@ -391,8 +477,9 @@ function createWeixinQrLoginManager({
   /**
    * Perform one long-poll status step for an active session.
    * @param {string} sessionId
+   * @param {{ signal?: AbortSignal }} [options]
    */
-  async function pollStatus(sessionId) {
+  async function pollStatus(sessionId, options = {}) {
     const cleanId = typeof sessionId === 'string' ? sessionId.trim() : '';
     const session = cleanId ? sessions.get(cleanId) : null;
     if (!session || session.cancelled) {
@@ -405,6 +492,7 @@ function createWeixinQrLoginManager({
       };
     }
 
+    const callerSignal = options?.signal;
     if (session.inFlightPoll) {
       return session.inFlightPoll;
     }
@@ -421,7 +509,8 @@ function createWeixinQrLoginManager({
           session.currentApiBaseUrl,
           session.qrcode,
           usedVerifyCode,
-          session
+          session,
+          callerSignal
         );
       } catch (error) {
         logger?.warn?.(
@@ -467,15 +556,15 @@ function createWeixinQrLoginManager({
           };
 
         case 'scaned_but_redirect': {
-          const host = typeof statusResp.redirect_host === 'string' ? statusResp.redirect_host.trim() : '';
-          if (host && REDIRECT_HOST_RE.test(host)) {
-            session.currentApiBaseUrl = `https://${host}`;
+          const allowedHost = normalizeAllowedRedirectHost(statusResp.redirect_host);
+          if (allowedHost) {
+            session.currentApiBaseUrl = `https://${allowedHost}`;
           }
           session.status = 'scaned_but_redirect';
           return {
             ok: true,
             ...publicSessionView(session),
-            redirected: Boolean(host && REDIRECT_HOST_RE.test(host))
+            redirected: Boolean(allowedHost)
           };
         }
 
@@ -628,6 +717,7 @@ function createWeixinQrLoginManager({
   return {
     start,
     pollStatus,
+    getStatus: pollStatus,
     submitVerifyCode,
     cancel,
     cancelAll,
@@ -641,9 +731,12 @@ module.exports = {
   DEFAULT_ILINK_BOT_TYPE,
   ILINK_APP_ID,
   ILINK_CLIENT_VERSION,
+  MAX_ACTIVE_QR_SESSIONS,
   MAX_QR_REFRESH_COUNT,
+  MAX_QR_RESPONSE_BYTES,
   QR_LONG_POLL_TIMEOUT_MS,
   createWeixinQrLoginManager,
+  normalizeAllowedRedirectHost,
   normalizeIlinkBaseUrl,
   normalizeWeixinAccountId
 };

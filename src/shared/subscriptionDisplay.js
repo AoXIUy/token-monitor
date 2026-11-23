@@ -23,6 +23,11 @@
   // account, so no per-provider rule gets this right for everyone.
   const KINDS = Object.freeze(['subscription', 'topup']);
   const MS_PER_DAY = 86400000;
+  const MAX_SUBSCRIPTIONS = 100;
+  const MAX_TOP_UPS = 500;
+  const MAX_TEXT_LENGTH = 256;
+  const MAX_ID_LENGTH = 128;
+  const MAX_PROVIDER_LENGTH = 64;
 
   function finiteNumber(value) {
     if (value === null || value === undefined || value === '') return null;
@@ -30,8 +35,13 @@
     return Number.isFinite(number) ? number : null;
   }
 
+  function cleanTextBounded(value, maxLength) {
+    const trimmed = String(value === null || value === undefined ? '' : value).trim();
+    return maxLength > 0 && trimmed.length > maxLength ? trimmed.slice(0, maxLength) : trimmed;
+  }
+
   function cleanText(value) {
-    return String(value === null || value === undefined ? '' : value).trim();
+    return cleanTextBounded(value, MAX_TEXT_LENGTH);
   }
 
   function pad2(value) {
@@ -68,7 +78,9 @@
 
   function daysInMonth(year, month) {
     // Day 0 of the next month is the last day of this one.
-    return new Date(Date.UTC(year, month, 0)).getUTCDate();
+    const d = new Date(0);
+    d.setUTCFullYear(year, month, 0);
+    return d.getUTCDate();
   }
 
   function todayString(now = new Date()) {
@@ -83,9 +95,11 @@
     const from = parseDate(fromDate);
     const to = parseDate(toDate);
     if (!from || !to) return null;
-    const fromMs = Date.UTC(from.year, from.month - 1, from.day);
-    const toMs = Date.UTC(to.year, to.month - 1, to.day);
-    return Math.round((toMs - fromMs) / MS_PER_DAY);
+    const dFrom = new Date(0);
+    dFrom.setUTCFullYear(from.year, from.month - 1, from.day);
+    const dTo = new Date(0);
+    dTo.setUTCFullYear(to.year, to.month - 1, to.day);
+    return Math.round((dTo.getTime() - dFrom.getTime()) / MS_PER_DAY);
   }
 
   // Add months to an anchor, clamping to the target month's last day.
@@ -165,7 +179,7 @@
     const date = normalizeDateField(input?.date);
     if (!date) return null;
     return {
-      id: cleanText(input?.id) || `top_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      id: cleanTextBounded(input?.id, MAX_ID_LENGTH) || `top_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       date,
       amountMinor: normalizeAmountMinor(input?.amountMinor)
     };
@@ -177,6 +191,7 @@
     if (!Array.isArray(input)) return [];
     const out = [];
     for (const entry of input) {
+      if (out.length >= MAX_TOP_UPS) break;
       const topUp = normalizeTopUp(entry);
       if (topUp) out.push(topUp);
     }
@@ -185,7 +200,8 @@
 
   function normalizeSubscription(input, options = {}) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
-    const provider = cleanText(input.provider).toLowerCase();
+    const maxText = options.maxTextLength === 0 ? 0 : MAX_TEXT_LENGTH;
+    const provider = cleanTextBounded(input.provider, MAX_PROVIDER_LENGTH).toLowerCase();
     const kind = normalizeKind(input.kind);
     const startDate = normalizeDateField(input.startDate);
     const topUps = normalizeTopUps(input.topUps);
@@ -194,11 +210,11 @@
     if (kind === 'topup' ? topUps.length === 0 : !startDate) return null;
 
     return {
-      id: cleanText(input.id) || `sub_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      id: cleanTextBounded(input.id, MAX_ID_LENGTH) || `sub_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       provider,
       kind,
       binding: normalizeBinding(input.binding),
-      planName: cleanText(input.planName),
+      planName: cleanTextBounded(input.planName, maxText),
       amountMinor: normalizeAmountMinor(input.amountMinor),
       currency: normalizeSubscriptionCurrency(input.currency, options.currencyApi),
       interval: normalizeInterval(input.interval),
@@ -208,8 +224,8 @@
       autoRenew: input.autoRenew !== false,
       nextRenewalOverride: normalizeDateField(input.nextRenewalOverride),
       endDate: normalizeDateField(input.endDate),
-      note: cleanText(input.note),
-      updatedAt: cleanText(input.updatedAt) || new Date().toISOString()
+      note: cleanTextBounded(input.note, maxText),
+      updatedAt: cleanTextBounded(input.updatedAt, MAX_ID_LENGTH) || new Date().toISOString()
     };
   }
 
@@ -218,6 +234,7 @@
     const seen = new Set();
     const out = [];
     for (const entry of input) {
+      if (out.length >= MAX_SUBSCRIPTIONS) break;
       const subscription = normalizeSubscription(entry, options);
       if (!subscription || seen.has(subscription.id)) continue;
       seen.add(subscription.id);

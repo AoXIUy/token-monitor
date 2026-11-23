@@ -345,7 +345,7 @@ test('Worker: server permission changes purge offline titles at read time and re
   assert.equal((await readDevice(client)).periods.today.sessions['codex:a'].title, '');
 });
 
-test('Node: failed persistence rolls shared group and title policy back in memory', () => {
+test('Node: failed persistence rolls shared group and title policy back in memory', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'tm-sync-write-failure-'));
   const dataFile = path.join(directory, 'devices.json');
   const hub = createHub({ dataFile, syncSessionTitles: true });
@@ -353,12 +353,20 @@ test('Node: failed persistence rolls shared group and title policy back in memor
     const first = hub.setSyncTitlePolicy('a', true);
     hub.ingest(titledPayload(first.generation));
     hub.setSyncSettings('customPricing', { baseRevision: 0, value: [] });
-    fs.mkdirSync(`${dataFile}.tmp`);
-    assert.throws(() => hub.setSyncSettings('customPricing', { baseRevision: 1, value: [{ modelId: 'gpt', inputPerM: 0 }] }));
-    assert.equal(hub.getSyncSettings('customPricing').revision, 1);
-    assert.throws(() => hub.setSyncTitlePolicy('a', false));
-    assert.deepEqual(hub.setSyncTitlePolicy('a', true), first);
-    assert.equal(hub.getDevices()[0].periods.today.sessions['codex:a'].title, 'private title');
+    const realRename = fs.renameSync;
+    const blocked = t.mock.method(fs, 'renameSync', (src, dst) => {
+      if (dst === dataFile) throw new Error('synthetic write failure');
+      return realRename(src, dst);
+    });
+    try {
+      assert.throws(() => hub.setSyncSettings('customPricing', { baseRevision: 1, value: [{ modelId: 'gpt', inputPerM: 0 }] }));
+      assert.equal(hub.getSyncSettings('customPricing').revision, 1);
+      assert.throws(() => hub.setSyncTitlePolicy('a', false));
+      assert.deepEqual(hub.setSyncTitlePolicy('a', true), first);
+      assert.equal(hub.getDevices()[0].periods.today.sessions['codex:a'].title, 'private title');
+    } finally {
+      blocked.mock.restore();
+    }
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -425,7 +433,11 @@ test('Node CLI: camel/kebab flags override server environment with explicit fals
         if (error.code !== 'EADDRINUSE' || attempt === 2) throw error;
       }
     }
-    const health = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(5000) });
+    const unauthHealth = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(5000) });
+    assert.deepEqual(await unauthHealth.json(), { ok: true });
+    const health = await fetch(`http://127.0.0.1:${port}/api/health`, {
+      headers: { authorization: 'Bearer secret' }, signal: AbortSignal.timeout(5000)
+    });
     assert.equal((await health.json()).deployment, 'standalone');
     const response = await fetch(`http://127.0.0.1:${port}/api/sync/content`, {
       headers: { authorization: 'Bearer secret' }, signal: AbortSignal.timeout(5000)
@@ -494,7 +506,12 @@ test('Worker: a scrub write failure rolls policy revocation back and the next re
   await assert.rejects(hub.ready, /scrub write failed/);
   assert.deepEqual(state.map.get('title-policy:a'), { enabled: true, generation: 1 });
   assert.equal(state.resets, 0);
-  const response = await hub.fetch(new Request('https://hub.example/api/health'));
+  const unauthHealth = await hub.fetch(new Request('https://hub.example/api/health'));
+  assert.equal(unauthHealth.status, 200);
+  assert.deepEqual(await unauthHealth.json(), { ok: true });
+  const response = await hub.fetch(new Request('https://hub.example/api/health', {
+    headers: { authorization: 'Bearer secret' }
+  }));
   assert.equal(response.status, 200);
   assert.deepEqual(state.map.get('title-policy:a'), { enabled: false, generation: 2 });
   assert.doesNotMatch(JSON.stringify(state.map.get('dev:a')), /private title|secret preview/);

@@ -1,12 +1,14 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { dayKeyAddDays, localDayKey, num } = require('../shared/history');
 const { canonicalProjectKey, deterministicProjectLabel } = require('../shared/projectKey');
 const { isReasonixSyntheticSession } = require('../shared/providers/reasonix/sessionGuard');
 const { normalizeClientName, normalizeModelName } = require('../shared/usage');
-const { projectRoot, readJson, writeJsonAtomic } = require('../shared/config');
+const configModule = require('../shared/config');
+const { projectRoot, readJson, writeJsonAtomic } = configModule;
 const {
   REPORT_GRANULARITIES,
   REPORT_SCHEMA,
@@ -20,6 +22,8 @@ const {
 } = require('../shared/usageReport');
 
 const MAX_SNAPSHOT_DAYS = 400;
+const MAX_LIST_LIMIT = 200;
+const MAX_ARCHIVED_REPORTS_PER_GRANULARITY = 500;
 const DEFAULT_DEBOUNCE_MS = 100;
 const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -44,10 +48,34 @@ function round6(value) {
  * @param {string} content
  */
 function writeTextAtomic(filePath, content) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.tmp`;
-  fs.writeFileSync(tempPath, content, 'utf8');
-  fs.renameSync(tempPath, filePath);
+  if (typeof configModule.writeTextAtomic === 'function') {
+    configModule.writeTextAtomic(filePath, content);
+    return;
+  }
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(dir, 0o700); } catch { /* ignore non-owner/RO fs */ }
+  }
+  const tempPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  let fd = -1;
+  try {
+    fd = fs.openSync(tempPath, 'wx', 0o600);
+    if (process.platform !== 'win32') {
+      try { fs.fchmodSync(fd, 0o600); } catch { /* ignore */ }
+    }
+    fs.writeFileSync(fd, content, 'utf8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = -1;
+    fs.renameSync(tempPath, filePath);
+  } catch (error) {
+    if (fd >= 0) {
+      try { fs.closeSync(fd); } catch { /* ignore */ }
+    }
+    try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
+    throw error;
+  }
 }
 
 /**
@@ -487,23 +515,45 @@ function createReportManager({
   /**
    * @param {import('../shared/usageReport').ReportGranularity} granularity
    * @param {string} periodKey
-   * @returns {{ jsonPath: string, mdPath: string }}
+   * @returns {{ jsonPath: string, mdPath: string, relJson: string, relMd: string }}
    */
   function reportFilePaths(granularity, periodKey) {
     const dir = path.join(resolvedReportsDir, granularity);
     return {
       jsonPath: path.join(dir, `${periodKey}.json`),
-      mdPath: path.join(dir, `${periodKey}.md`)
+      mdPath: path.join(dir, `${periodKey}.md`),
+      relJson: `${granularity}/${periodKey}.json`,
+      relMd: `${granularity}/${periodKey}.md`
     };
   }
 
   /**
+   * @param {import('../shared/usageReport').ReportGranularity} granularity
+   * @returns {number}
+   */
+  function countArchivedReports(granularity) {
+    const dir = path.join(resolvedReportsDir, granularity);
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      let count = 0;
+      for (const entry of entries) {
+        if (entry.isFile() && entry.name.endsWith('.json')) count += 1;
+      }
+      return count;
+    } catch (error) {
+      if (/** @type {any} */ (error).code === 'ENOENT') return 0;
+      throw error;
+    }
+  }
+
+  /**
    * @param {any} report
-   * @param {string} jsonPath
+   * @param {string} relJson
    * @param {string} mdPath
+   * @param {string} relMd
    * @returns {any}
    */
-  function toReportSummary(report, jsonPath, mdPath) {
+  function toReportSummary(report, relJson, mdPath, relMd) {
     return {
       reportId: String(report.reportId || ''),
       granularity: report.granularity,
@@ -516,8 +566,8 @@ function createReportManager({
       knownCostUsd: round6(Math.max(0, num(report.summary?.knownCostUsd))),
       projectCount: Math.max(0, Math.round(num(report.summary?.projectCount))),
       files: {
-        json: jsonPath,
-        markdown: fs.existsSync(mdPath) ? mdPath : null
+        json: relJson,
+        markdown: fs.existsSync(mdPath) ? relMd : null
       }
     };
   }
@@ -544,16 +594,17 @@ function createReportManager({
       timeZone
     });
 
-    const { jsonPath, mdPath } = reportFilePaths(granularity, report.period.key);
+    const { jsonPath, mdPath, relJson, relMd } = reportFilePaths(granularity, report.period.key);
     const nextSignature = reportContentSignature(report);
+    const alreadyExists = fs.existsSync(jsonPath);
 
-    if (!force && fs.existsSync(jsonPath) && fs.existsSync(mdPath)) {
+    if (!force && alreadyExists && fs.existsSync(mdPath)) {
       const existing = readJson(jsonPath, null);
       if (existing && typeof existing === 'object') {
         const existingSignature = reportContentSignature(existing);
         if (existingSignature === nextSignature) {
           return {
-            ...toReportSummary(existing, jsonPath, mdPath),
+            ...toReportSummary(existing, relJson, mdPath, relMd),
             signature: existingSignature,
             written: false
           };
@@ -561,11 +612,19 @@ function createReportManager({
       }
     }
 
+    if (!alreadyExists && countArchivedReports(granularity) >= MAX_ARCHIVED_REPORTS_PER_GRANULARITY) {
+      const err = /** @type {Error & { code?: string }} */ (new Error(
+        `Archived ${granularity} report limit (${MAX_ARCHIVED_REPORTS_PER_GRANULARITY}) reached`
+      ));
+      err.code = 'ARCHIVE_LIMIT_REACHED';
+      throw err;
+    }
+
     writeTextAtomic(jsonPath, renderReportJson(report));
     writeTextAtomic(mdPath, renderReportMarkdown(report));
 
     return {
-      ...toReportSummary(report, jsonPath, mdPath),
+      ...toReportSummary(report, relJson, mdPath, relMd),
       signature: nextSignature,
       written: true
     };
@@ -663,10 +722,13 @@ function createReportManager({
     reportTimer.unref();
   }
 
-  function getConfig() {
+  /**
+   * @param {{ includePaths?: boolean }} [options]
+   */
+  function getConfig({ includePaths = false } = {}) {
     return {
       ...currentConfig,
-      reportsDir: resolvedReportsDir
+      ...(includePaths === true ? { reportsDir: resolvedReportsDir } : {})
     };
   }
 
@@ -766,7 +828,7 @@ function createReportManager({
     }
 
     const parsedLimit = Number(limit);
-    const maxItems = Number.isInteger(parsedLimit) && parsedLimit >= 1 ? parsedLimit : 50;
+    const maxItems = Math.min(MAX_LIST_LIMIT, Number.isInteger(parsedLimit) && parsedLimit >= 1 ? parsedLimit : 50);
     const targetGranularities = granularity
       ? [/** @type {import('../shared/usageReport').ReportGranularity} */ (String(granularity).trim().toLowerCase())]
       : REPORT_GRANULARITIES;
@@ -788,8 +850,9 @@ function createReportManager({
         const parsed = readJson(jsonPath, null);
         if (!isPlainObject(parsed) || !isPlainObject(parsed.period) || !isPlainObject(parsed.summary)) continue;
         if (parsed.schema && parsed.schema !== REPORT_SCHEMA) continue;
-        const mdPath = path.join(dir, `${entry.name.slice(0, -5)}.md`);
-        items.push(toReportSummary(parsed, jsonPath, mdPath));
+        const base = entry.name.slice(0, -5);
+        const mdPath = path.join(dir, `${base}.md`);
+        items.push(toReportSummary(parsed, `${gran}/${entry.name}`, mdPath, `${gran}/${base}.md`));
       }
     }
 
@@ -817,7 +880,8 @@ function createReportManager({
    */
   function hasDataForPeriod(resolved, stats, history, devices) {
     if (devices.length > 0) return true;
-    for (let d = resolved.startDate; d <= resolved.endDate; d = dayKeyAddDays(d, 1)) {
+    let steps = 0;
+    for (let d = resolved.startDate; d && d <= resolved.endDate && steps < 366; d = dayKeyAddDays(d, 1), steps += 1) {
       if (snapshots[d]) return true;
     }
     if (Array.isArray(history?.daily)) {
@@ -847,7 +911,7 @@ function createReportManager({
    * @returns {any | null}
    */
   function readPersistedReport(granularity, periodKey, format) {
-    const { jsonPath, mdPath } = reportFilePaths(granularity, periodKey);
+    const { jsonPath, mdPath, relJson, relMd } = reportFilePaths(granularity, periodKey);
     if (!fs.existsSync(jsonPath)) return null;
     const report = readJson(jsonPath, null);
     if (!isPlainObject(report)) return null;
@@ -862,8 +926,8 @@ function createReportManager({
     }
 
     const files = {
-      json: jsonPath,
-      markdown: fs.existsSync(mdPath) ? mdPath : null
+      json: relJson,
+      markdown: fs.existsSync(mdPath) ? relMd : null
     };
 
     if (format === 'json') return { ok: true, report, files };
@@ -1046,13 +1110,26 @@ function createReportManager({
       }
     }
 
-    const generated = resolvedTargets.map((resolved) => (
-      persistSingleReport(resolved.granularity, resolved.key, {
-        force: Boolean(force),
-        timeZone,
-        nowDate: refDate
-      })
-    ));
+    /** @type {any[]} */
+    const generated = [];
+    for (const resolved of resolvedTargets) {
+      try {
+        generated.push(persistSingleReport(resolved.granularity, resolved.key, {
+          force: Boolean(force),
+          timeZone,
+          nowDate: refDate
+        }));
+      } catch (error) {
+        if (/** @type {any} */ (error)?.code === 'ARCHIVE_LIMIT_REACHED') {
+          return {
+            ok: false,
+            error: 'archive_limit_reached',
+            message: error instanceof Error ? error.message : 'Archived report limit reached'
+          };
+        }
+        throw error;
+      }
+    }
 
     return {
       ok: true,
@@ -1109,6 +1186,7 @@ function createReportManager({
 
   return {
     getConfig,
+    getReportsDir: () => resolvedReportsDir,
     setConfig,
     recordIngestSnapshot,
     onStatsChanged,
@@ -1122,6 +1200,8 @@ function createReportManager({
 }
 
 module.exports = {
+  MAX_ARCHIVED_REPORTS_PER_GRANULARITY,
+  MAX_LIST_LIMIT,
   MAX_SNAPSHOT_DAYS,
   createReportManager
 };

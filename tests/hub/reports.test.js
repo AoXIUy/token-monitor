@@ -158,7 +158,7 @@ test('HTTP routes enforce secret, validate config, generate & deduplicate report
   assert.equal(initialCfg.daily, true);
   assert.equal(initialCfg.weekly, true);
   assert.equal(initialCfg.monthly, true);
-  assert.equal(initialCfg.reportsDir, reportsDir);
+  assert.equal(initialCfg.reportsDir, undefined);
 
   for (const badBody of [{}, [], { enabled: 'yes' }, { unknown: true }, { daily: 1 }]) {
     const badRes = await fetch(`${baseUrl}/api/reports/config`, {
@@ -230,8 +230,10 @@ test('HTTP routes enforce secret, validate config, generate & deduplicate report
   assert.equal(listData.ok, true);
   assert.equal(listData.reports.length, 3);
   for (const item of listData.reports) {
-    assert.ok(fs.existsSync(item.files.json));
-    assert.ok(fs.existsSync(item.files.markdown));
+    assert.equal(path.isAbsolute(item.files.json), false);
+    assert.equal(path.isAbsolute(item.files.markdown), false);
+    assert.ok(fs.existsSync(path.join(reportsDir, item.files.json)));
+    assert.ok(fs.existsSync(path.join(reportsDir, item.files.markdown)));
   }
 
   // Verify daily-snapshots.json content
@@ -274,7 +276,7 @@ test('HTTP routes enforce secret, validate config, generate & deduplicate report
   assert.equal(weeklyList.reports[0].granularity, 'weekly');
 
   // 6. Hub JS methods match main.js integration contract
-  assert.equal(hub.getReportConfig().reportsDir, reportsDir);
+  assert.equal(hub.getReportConfig().reportsDir, undefined);
   assert.equal((await hub.listReports({ granularity: 'monthly' })).reports.length, 1);
   assert.equal(hub.getReport('daily', 'latest', { format: 'json' }).report.summary.totalTokens, 4000);
 
@@ -639,5 +641,13 @@ test('Node CLI parses --reports / --reports-dir flags and TOKEN_MONITOR_REPORTS 
   assert.equal(cfg.daily, true);
   assert.equal(cfg.weekly, true);
   assert.equal(cfg.monthly, false);
-  assert.equal(cfg.reportsDir, reportsDir);
+  assert.equal(cfg.reportsDir, undefined);
+
+  const genRes = await fetch(`http://127.0.0.1:${port}/api/reports/generate`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer cli-secret', 'content-type': 'application/json' },
+    body: JSON.stringify({ granularity: 'daily', periodKey: localDayKey(), force: true })
+  });
+  assert.equal(genRes.status, 200);
+  assert.ok(fs.existsSync(path.join(reportsDir, 'daily', `${localDayKey()}.json`)));
 });

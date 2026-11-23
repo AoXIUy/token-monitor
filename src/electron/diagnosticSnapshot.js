@@ -89,6 +89,10 @@ function diagnosticStreamDetailCode(failure = {}) {
   if (reason === 'disconnected') return 'eof';
   if (reason === 'unreachable') return 'unreachable';
   if (reason === 'server_error') return 'http-error';
+  if (reason === 'tls_untrusted') return 'tls-untrusted-cert';
+  if (reason === 'tls_expired') return 'tls-expired-cert';
+  if (reason === 'tls_hostname_mismatch') return 'tls-hostname-mismatch';
+  if (reason === 'tls_error') return 'tls-handshake-failed';
   if (reason === 'network') {
     const detail = String(failure.detail || '').trim().toUpperCase();
     if (detail === 'ECONNREFUSED') return 'connection-refused';
@@ -148,7 +152,8 @@ function createDiagnosticSnapshotBuilder(options = {}) {
   function diagnosticRuntimeInfo() {
     const settings = getSettings() || {};
     const hubMode = settings.hubMode || 'local';
-    const { url: hubUrl } = getEffectiveHubConfig() || {};
+    const effectiveHub = getEffectiveHubConfig() || {};
+    const hubUrl = effectiveHub.url;
     const externalAgentActive = Boolean(getExternalAgentActive());
     const runtimeHandle = getDeviceRuntime();
     const icloud = getIcloudSync() || null;
@@ -221,6 +226,39 @@ function createDiagnosticSnapshotBuilder(options = {}) {
       : hubStatsCacheMatchesMode
         ? diagnosticAgeSeconds(getLatestHubStatsReceivedAt(), getNowMs())
         : 'not-applicable';
+    const hubTls = embeddedHub?.hub?.tlsStatus?.() || null;
+    const hubHostTlsEnabled = hubMode === 'host'
+      && (hubTls ? hubTls.enabled === true : settings.hubHostTlsEnabled === true);
+    const hubHostTlsMode = !hubHostTlsEnabled
+      ? 'none'
+      : ((hubTls?.mode || settings.hubHostTlsMode) === 'path' ? 'path' : 'managed');
+    const rawMinVersion = String(hubTls?.minVersion || settings.hubHostTlsMinVersion || 'TLSv1.2');
+    const hubHostTlsMinVersion = !hubHostTlsEnabled
+      ? 'none'
+      : (rawMinVersion === 'TLSv1.3' ? 'TLSv1.3' : 'TLSv1.2');
+    const certMeta = hubTls?.cert || settings.hubHostTlsCertMetadata || null;
+    let hubHostTlsCertState = 'none';
+    if (hubHostTlsEnabled) {
+      if (hubTls?.lastReloadError) {
+        hubHostTlsCertState = 'error';
+      } else if (certMeta?.validTo) {
+        const toMs = Date.parse(String(certMeta.validTo));
+        if (!Number.isFinite(toMs)) {
+          hubHostTlsCertState = 'error';
+        } else {
+          const daysRemaining = Math.floor((toMs - getNowMs()) / 86400000);
+          hubHostTlsCertState = daysRemaining <= 0
+            ? 'expired'
+            : daysRemaining <= 30
+              ? 'expiring-soon'
+              : 'valid';
+        }
+      } else {
+        hubHostTlsCertState = 'error';
+      }
+    }
+    const hubClientCustomCaConfigured = hubMode === 'client'
+      && Boolean(effectiveHub.caCertPem || effectiveHub.caFingerprintSha256 || settings.caFingerprintSha256);
     const hubRuntime = {
       hubKind,
       hubSoftwareVersion,
@@ -232,7 +270,12 @@ function createDiagnosticSnapshotBuilder(options = {}) {
         ? 'none'
         : hubMode === 'icloud' ? 'filesystem' : diagnosticHubTransport(hubUrl),
       streamState,
-      hubStatsCacheAgeSeconds
+      hubStatsCacheAgeSeconds,
+      hubHostTlsEnabled,
+      hubHostTlsMode,
+      hubHostTlsMinVersion,
+      hubHostTlsCertState,
+      hubClientCustomCaConfigured
     };
     return {
       externalAgentActive,

@@ -7,6 +7,30 @@
 // Cloudflare Worker can import it. Pure functions only — no I/O.
 const { REASONIX_CLIENT } = require('./providers/reasonix/paths');
 
+const PROTOTYPE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const MONTH_KEY_RE = /^\d{4}-\d{2}$/;
+
+function isSafeKey(key) {
+  return typeof key === 'string' && key.length > 0 && !PROTOTYPE_KEYS.has(key) && !PROTOTYPE_KEYS.has(key.toLowerCase());
+}
+
+function hasOwn(obj, key) {
+  return Boolean(obj) && Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function isPlainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function toPlainSafeObject(map) {
+  const out = {};
+  for (const key of Object.keys(map || {})) {
+    if (isSafeKey(key)) out[key] = map[key];
+  }
+  return out;
+}
+
 const TOKSCALE_CLIENT_ALIASES = new Map([
   ['antigravity-cli', 'antigravity'],
   ['antigravity-extension', 'antigravity'],
@@ -27,12 +51,14 @@ const TOKSCALE_CLIENT_ALIASES = new Map([
 // history and the durable archive need the same raw-id aliases as live usage.
 function normalizeTokscaleClientName(value) {
   const raw = String(value || '').trim().toLowerCase();
-  if (!raw) return null;
-  return TOKSCALE_CLIENT_ALIASES.get(raw) || raw;
+  if (!raw || !isSafeKey(raw)) return null;
+  const mapped = TOKSCALE_CLIENT_ALIASES.get(raw) || raw;
+  return isSafeKey(mapped) ? mapped : null;
 }
 
 function normalizeTokscaleModelNameForClient(value, client) {
   const model = String(value ?? '').trim();
+  if (!isSafeKey(model)) return '';
   if (normalizeTokscaleClientName(client) === 'cursor' && /^(?:auto|default)$/i.test(model)) {
     return 'cursor-auto';
   }
@@ -43,19 +69,20 @@ function normalizeTokscaleModelNameForClient(value, client) {
 // per-model buckets can follow a Cursor rename only if no other client shares
 // the old label; otherwise the aggregate has no client split to recover.
 function normalizeTokscaleModelComponentSummary(summary, rows) {
-  if (!summary?.perModel) return summary;
+  if (!summary?.perModel || !isPlainObject(summary.perModel)) return summary;
   const renames = new Map();
   for (const row of rows || []) {
     const model = String(row?.modelId || row?.model || row?.model_id || 'unknown');
-    const canonical = normalizeTokscaleModelNameForClient(model, row?.client);
+    const canonical = normalizeTokscaleModelNameForClient(model, row?.client) || 'unknown';
     if (renames.has(model) && renames.get(model) !== canonical) return null;
     renames.set(model, canonical);
   }
   if (![...renames].some(([before, after]) => before !== after)) return summary;
-  const perModel = {};
+  const perModel = Object.create(null);
   for (const [model, components] of Object.entries(summary.perModel)) {
     const key = renames.get(model) || model;
-    const previous = perModel[key];
+    if (!isSafeKey(key)) continue;
+    const previous = hasOwn(perModel, key) ? perModel[key] : null;
     perModel[key] = previous ? {
       cacheReadTokens: num(previous.cacheReadTokens) + num(components?.cacheReadTokens),
       cacheWriteTokens: num(previous.cacheWriteTokens) + num(components?.cacheWriteTokens),
@@ -63,7 +90,7 @@ function normalizeTokscaleModelComponentSummary(summary, rows) {
       unclassifiedTokens: num(previous.unclassifiedTokens) + num(components?.unclassifiedTokens)
     } : components;
   }
-  return { ...summary, perModel };
+  return { ...summary, perModel: toPlainSafeObject(perModel) };
 }
 
 function num(value) {
@@ -142,15 +169,17 @@ function applyComponentSummary(summary, totalTokens, perClient, perModel) {
   const exact = summary.tokenComponentsAvailable === true;
   const totals = componentValues(summary, totalTokens, exact);
   if (!totals) return null;
-  const clients = {};
+  const clients = Object.create(null);
   for (const [key, value] of Object.entries(perClient)) {
-    const components = componentValues(summary.perClient?.[key], num(value.tokens), exact);
+    if (!isSafeKey(key)) continue;
+    const components = componentValues(hasOwn(summary.perClient, key) ? summary.perClient[key] : undefined, num(value.tokens), exact);
     if (!components) return null;
     clients[key] = components;
   }
-  const models = {};
+  const models = Object.create(null);
   for (const [key, value] of Object.entries(perModel)) {
-    const components = componentValues(summary.perModel?.[key], num(value.tokens), exact);
+    if (!isSafeKey(key)) continue;
+    const components = componentValues(hasOwn(summary.perModel, key) ? summary.perModel[key] : undefined, num(value.tokens), exact);
     if (!components) return null;
     models[key] = components;
   }
@@ -166,8 +195,8 @@ function parseGraphResult(raw) {
     if (!row || typeof row !== 'object') continue;
     const date = String(row.date || '').slice(0, 10);
     if (!date) continue;
-    const perClient = {};
-    const perModel = {};
+    const perClient = Object.create(null);
+    const perModel = Object.create(null);
     let tokens = 0;
     let cost = 0;
     let unpricedTokens = 0;
@@ -181,7 +210,7 @@ function parseGraphResult(raw) {
     for (const c of clientRows) {
       if (!c || typeof c !== 'object') continue;
       const client = normalizeTokscaleClientName(c.client) || 'unknown';
-      const model = normalizeTokscaleModelNameForClient(c.modelId || c.model || c.model_id || 'unknown', client);
+      const model = normalizeTokscaleModelNameForClient(c.modelId || c.model || c.model_id || 'unknown', client) || 'unknown';
       const t = sumTokens(c.tokens, client);
       const cst = num(c.cost);
       const unpriced = unpricedTokensFor({ tokens: t, unpricedTokens: c.unpricedTokens });
@@ -208,7 +237,7 @@ function parseGraphResult(raw) {
       unclassifiedTokens += unclassified;
       tokenComponentsAvailable = tokenComponentsAvailable
         && (t === 0 || (componentsAvailable && unclassified === 0));
-      const pc = perClient[client] || (perClient[client] = {
+      const pc = hasOwn(perClient, client) ? perClient[client] : (perClient[client] = {
         tokens: 0, cost: 0, messages: 0, unclassifiedTokens: 0
       });
       pc.tokens += t; pc.cost += cst; pc.messages += msg;
@@ -217,7 +246,7 @@ function parseGraphResult(raw) {
       if (cacheWrite > 0) pc.cacheWriteTokens = num(pc.cacheWriteTokens) + cacheWrite;
       if (output > 0) pc.outputTokens = num(pc.outputTokens) + output;
       pc.unclassifiedTokens += unclassified;
-      const pm = perModel[model] || (perModel[model] = {
+      const pm = hasOwn(perModel, model) ? perModel[model] : (perModel[model] = {
         tokens: 0, cost: 0, unclassifiedTokens: 0
       });
       pm.tokens += t; pm.cost += cst;
@@ -266,8 +295,8 @@ function parseGraphResult(raw) {
       unclassifiedTokens,
       tokenComponentsAvailable,
       activeTimeMs: num(row.activeTimeMs ?? row.active_time_ms),
-      perClient,
-      perModel
+      perClient: toPlainSafeObject(perClient),
+      perModel: toPlainSafeObject(perModel)
     });
   }
   const timeMetrics = normalizeTimeMetrics(raw?.timeMetrics ?? raw?.time_metrics);
@@ -288,10 +317,12 @@ function computeIntensities(days) {
   let maxTokens = 0;
   let maxCost = 0;
   for (const d of list) {
+    if (!isPlainObject(d)) continue;
     maxTokens = Math.max(maxTokens, num(d.tokens));
     maxCost = Math.max(maxCost, num(d.cost));
   }
   for (const d of list) {
+    if (!isPlainObject(d)) continue;
     d.tokenIntensity = intensityBucket(d.tokens, maxTokens);
     d.costIntensity = intensityBucket(d.cost, maxCost);
     d.intensity = d.costIntensity;
@@ -300,8 +331,13 @@ function computeIntensities(days) {
 }
 
 function dayKeyAddDays(key, delta) {
-  const ms = Date.parse(`${key}T00:00:00Z`) + delta * 86400000;
-  return new Date(ms).toISOString().slice(0, 10);
+  if (typeof key !== 'string' || !DAY_KEY_RE.test(key) || !Number.isFinite(delta)) return '';
+  const baseMs = Date.parse(`${key}T00:00:00Z`);
+  if (!Number.isFinite(baseMs)) return '';
+  const ms = baseMs + delta * 86400000;
+  if (!Number.isFinite(ms)) return '';
+  const date = new Date(ms);
+  return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : '';
 }
 
 // Every day key reaching this module is a local calendar day: the collector stamps
@@ -321,12 +357,14 @@ function localDayKey(date = new Date()) {
 function computeStreaks(days, todayKey) {
   const active = new Set();
   for (const d of (Array.isArray(days) ? days : [])) {
-    if (num(d.tokens) > 0) active.add(String(d.date).slice(0, 10));
+    if (!isPlainObject(d) || typeof d.date !== 'string') continue;
+    const key = d.date.slice(0, 10);
+    if (DAY_KEY_RE.test(key) && num(d.tokens) > 0) active.add(key);
   }
   // current: walk back from todayKey while active
   let currentStreak = 0;
-  let cursor = String(todayKey).slice(0, 10);
-  while (active.has(cursor)) {
+  let cursor = typeof todayKey === 'string' ? todayKey.slice(0, 10) : '';
+  while (cursor && active.has(cursor)) {
     currentStreak += 1;
     cursor = dayKeyAddDays(cursor, -1);
   }
@@ -336,7 +374,8 @@ function computeStreaks(days, todayKey) {
   let run = 0;
   let prev = null;
   for (const key of sorted) {
-    run = (prev !== null && key === dayKeyAddDays(prev, 1)) ? run + 1 : 1;
+    const expectedNext = prev !== null ? dayKeyAddDays(prev, 1) : '';
+    run = (expectedNext && key === expectedNext) ? run + 1 : 1;
     longestStreak = Math.max(longestStreak, run);
     prev = key;
   }
@@ -344,9 +383,12 @@ function computeStreaks(days, todayKey) {
 }
 
 function addPerClient(target, source, includeTokenComponents = false) {
-  for (const [rawClient, v] of Object.entries(source || {})) {
-    const client = normalizeTokscaleClientName(rawClient) || rawClient;
-    const t = target[client] || (target[client] = { tokens: 0, cost: 0, messages: 0 });
+  if (!isPlainObject(source) || !target || typeof target !== 'object') return;
+  for (const [rawClient, v] of Object.entries(source)) {
+    if (!isPlainObject(v)) continue;
+    const client = normalizeTokscaleClientName(rawClient);
+    if (!isSafeKey(client)) continue;
+    const t = hasOwn(target, client) ? target[client] : (target[client] = { tokens: 0, cost: 0, messages: 0 });
     t.tokens += num(v.tokens); t.cost += num(v.cost); t.messages += num(v.messages);
     addUnpricedTokens(t, v);
     if (includeTokenComponents) {
@@ -361,8 +403,10 @@ function addPerClient(target, source, includeTokenComponents = false) {
 }
 
 function addPerModel(target, source, includeTokenComponents = false) {
-  for (const [model, v] of Object.entries(source || {})) {
-    const t = target[model] || (target[model] = { tokens: 0, cost: 0 });
+  if (!isPlainObject(source) || !target || typeof target !== 'object') return;
+  for (const [model, v] of Object.entries(source)) {
+    if (!isSafeKey(model) || !isPlainObject(v)) continue;
+    const t = hasOwn(target, model) ? target[model] : (target[model] = { tokens: 0, cost: 0 });
     t.tokens += num(v.tokens); t.cost += num(v.cost);
     addUnpricedTokens(t, v);
     if (includeTokenComponents) {
@@ -389,7 +433,7 @@ function unclassifiedTokensFor(value) {
 }
 
 function activeTimeTotal(days) {
-  return (Array.isArray(days) ? days : []).reduce((sum, day) => sum + num(day.activeTimeMs), 0);
+  return (Array.isArray(days) ? days : []).reduce((sum, day) => sum + (isPlainObject(day) ? num(day.activeTimeMs) : 0), 0);
 }
 
 // Full-history daily totals stay intentionally compact: they carry exactly what
@@ -398,8 +442,9 @@ function activeTimeTotal(days) {
 function compactDailyTotals(days) {
   const byDate = new Map();
   for (const day of (Array.isArray(days) ? days : [])) {
-    const date = String(day?.date || '').slice(0, 10);
-    if (!date) continue;
+    if (!isPlainObject(day) || typeof day.date !== 'string') continue;
+    const date = day.date.slice(0, 10);
+    if (!DAY_KEY_RE.test(date)) continue;
     const current = byDate.get(date) || { date, tokens: 0, cost: 0, activeTimeMs: 0 };
     current.tokens += num(day.tokens);
     current.cost += num(day.cost);
@@ -412,16 +457,22 @@ function compactDailyTotals(days) {
 function monthlyRollup(days) {
   const byMonth = new Map();
   for (const d of (Array.isArray(days) ? days : [])) {
-    const month = String(d.date).slice(0, 7);
-    if (month.length !== 7) continue;
-    const m = byMonth.get(month) || { month, tokens: 0, cost: 0, activeTimeMs: 0, perClient: {}, perModel: {} };
+    if (!isPlainObject(d) || typeof d.date !== 'string') continue;
+    const month = d.date.slice(0, 7);
+    if (!MONTH_KEY_RE.test(month)) continue;
+    const m = byMonth.get(month) || {
+      month, tokens: 0, cost: 0, activeTimeMs: 0,
+      perClient: Object.create(null), perModel: Object.create(null)
+    };
     m.tokens += num(d.tokens); m.cost += num(d.cost); m.activeTimeMs += num(d.activeTimeMs);
     addUnpricedTokens(m, d);
     addPerClient(m.perClient, d.perClient);
     addPerModel(m.perModel, d.perModel);
     byMonth.set(month, m);
   }
-  return [...byMonth.values()].sort((a, b) => a.month.localeCompare(b.month));
+  return [...byMonth.values()]
+    .map((m) => ({ ...m, perClient: toPlainSafeObject(m.perClient), perModel: toPlainSafeObject(m.perModel) }))
+    .sort((a, b) => a.month.localeCompare(b.month));
 }
 
 const DEFAULT_CAP_DAYS = 370;
@@ -430,17 +481,21 @@ function rollingDailyWindow(days, todayKey, capDays = DEFAULT_CAP_DAYS) {
   const count = Math.max(0, Math.floor(num(capDays)));
   if (count === 0) return [];
   const startKey = dayKeyAddDays(todayKey, -(count - 1));
+  if (!startKey) return [];
   return (Array.isArray(days) ? days : []).filter((d) => {
-    const key = String(d?.date || '').slice(0, 10);
+    if (!isPlainObject(d) || typeof d.date !== 'string') return false;
+    const key = d.date.slice(0, 10);
     return key >= startKey && key <= todayKey;
   });
 }
 
 function favoriteModelOf(contributions) {
-  const totals = {};
-  for (const d of contributions) {
-    for (const [model, v] of Object.entries(d.perModel || {})) {
-      totals[model] = (totals[model] || 0) + num(v.tokens);
+  const totals = Object.create(null);
+  for (const d of (Array.isArray(contributions) ? contributions : [])) {
+    if (!isPlainObject(d) || !isPlainObject(d.perModel)) continue;
+    for (const [model, v] of Object.entries(d.perModel)) {
+      if (!isSafeKey(model) || !isPlainObject(v)) continue;
+      totals[model] = (hasOwn(totals, model) ? totals[model] : 0) + num(v.tokens);
     }
   }
   let best = '';
@@ -458,6 +513,7 @@ function normalizeHistory(graphData, options = {}) {
   const capDays = Number.isFinite(options.capDays) ? options.capDays : DEFAULT_CAP_DAYS;
   const todayKey = String(options.todayKey || localDayKey()).slice(0, 10);
   const full = (graphData && Array.isArray(graphData.contributions) ? graphData.contributions : [])
+    .filter((d) => isPlainObject(d) && typeof d.date === 'string' && DAY_KEY_RE.test(d.date.slice(0, 10)))
     .slice()
     .sort((a, b) => a.date.localeCompare(b.date));
   const dailyTotals = compactDailyTotals(full);
@@ -494,12 +550,15 @@ function mergeDailyMaps(histories) {
   const byDate = new Map();
   for (const h of histories) {
     for (const d of (h && Array.isArray(h.daily) ? h.daily : [])) {
-      const cur = byDate.get(d.date)
+      if (!isPlainObject(d) || typeof d.date !== 'string') continue;
+      const dateKey = d.date.slice(0, 10);
+      if (!DAY_KEY_RE.test(dateKey)) continue;
+      const cur = byDate.get(dateKey)
         || {
-          date: d.date, tokens: 0, cost: 0, messages: 0, activeTimeMs: 0,
+          date: dateKey, tokens: 0, cost: 0, messages: 0, activeTimeMs: 0,
           cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0, unclassifiedTokens: 0,
           tokenComponentsAvailable: true,
-          perClient: {}, perModel: {}
+          perClient: Object.create(null), perModel: Object.create(null)
         };
       cur.tokens += num(d.tokens); cur.cost += num(d.cost); cur.messages += num(d.messages); cur.activeTimeMs += num(d.activeTimeMs);
       addUnpricedTokens(cur, d);
@@ -510,31 +569,44 @@ function mergeDailyMaps(histories) {
       cur.tokenComponentsAvailable = cur.tokenComponentsAvailable && d.tokenComponentsAvailable === true;
       addPerClient(cur.perClient, d.perClient, true);
       addPerModel(cur.perModel, d.perModel, true);
-      byDate.set(d.date, cur);
+      byDate.set(dateKey, cur);
     }
   }
-  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+  return [...byDate.values()]
+    .map((cur) => ({ ...cur, perClient: toPlainSafeObject(cur.perClient), perModel: toPlainSafeObject(cur.perModel) }))
+    .sort((a, b) => a.date.localeCompare(b.date));
 }
 
 function mergeMonthlyMaps(histories) {
   const byMonth = new Map();
   for (const h of histories) {
     for (const m of (h && Array.isArray(h.monthly) ? h.monthly : [])) {
-      const cur = byMonth.get(m.month) || { month: m.month, tokens: 0, cost: 0, activeTimeMs: 0, perClient: {}, perModel: {} };
+      if (!isPlainObject(m) || typeof m.month !== 'string') continue;
+      const monthKey = m.month.slice(0, 7);
+      if (!MONTH_KEY_RE.test(monthKey)) continue;
+      const cur = byMonth.get(monthKey) || {
+        month: monthKey, tokens: 0, cost: 0, activeTimeMs: 0,
+        perClient: Object.create(null), perModel: Object.create(null)
+      };
       cur.tokens += num(m.tokens); cur.cost += num(m.cost); cur.activeTimeMs += num(m.activeTimeMs);
       addUnpricedTokens(cur, m);
       addPerClient(cur.perClient, m.perClient);
       addPerModel(cur.perModel, m.perModel);
-      byMonth.set(m.month, cur);
+      byMonth.set(monthKey, cur);
     }
   }
-  return [...byMonth.values()].sort((a, b) => a.month.localeCompare(b.month));
+  return [...byMonth.values()]
+    .map((cur) => ({ ...cur, perClient: toPlainSafeObject(cur.perClient), perModel: toPlainSafeObject(cur.perModel) }))
+    .sort((a, b) => a.month.localeCompare(b.month));
 }
 
 function mergeDailyTotalMaps(histories) {
   const days = [];
   for (const history of histories) {
-    for (const day of history.dailyTotals) days.push(day);
+    if (!Array.isArray(history?.dailyTotals)) continue;
+    for (const day of history.dailyTotals) {
+      if (isPlainObject(day)) days.push(day);
+    }
   }
   return compactDailyTotals(days);
 }
@@ -565,7 +637,7 @@ function mergeHistories(histories, options = {}) {
   const totalCost = monthly.reduce((s, m) => s + num(m.cost), 0);
   const unpricedTokens = monthly.reduce((s, m) => s + unpricedTokensFor(m), 0);
   const messages = monthly.reduce((s, m) => {
-    for (const v of Object.values(m.perClient || {})) s += num(v.messages);
+    for (const v of Object.values(m.perClient || {})) s += num(v?.messages);
     return s;
   }, 0);
   const activeDays = dailyDerived.reduce((s, d) => s + (num(d.tokens) > 0 ? 1 : 0), 0);
@@ -586,15 +658,100 @@ function mergeHistories(histories, options = {}) {
   };
 }
 
+function sanitizeBreakdownEntry(entry) {
+  if (!isPlainObject(entry)) return null;
+  const out = {};
+  for (const [k, v] of Object.entries(entry)) {
+    if (!isSafeKey(k)) continue;
+    if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
+    else if (typeof v === 'boolean') out[k] = v;
+  }
+  return out;
+}
+
+function sanitizeBreakdownMap(rawMap, normalizeKey) {
+  if (!isPlainObject(rawMap)) return {};
+  const out = {};
+  for (const [rawKey, entry] of Object.entries(rawMap)) {
+    const key = normalizeKey ? normalizeKey(rawKey) : rawKey;
+    if (!isSafeKey(key)) continue;
+    const clean = sanitizeBreakdownEntry(entry);
+    if (clean) out[key] = clean;
+  }
+  return out;
+}
+
+function sanitizeHistoryRow(row, keyField, keyRe) {
+  if (!isPlainObject(row) || typeof row[keyField] !== 'string') return null;
+  const key = row[keyField].slice(0, keyField === 'date' ? 10 : 7);
+  if (!keyRe.test(key)) return null;
+  const out = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (!isSafeKey(k)) continue;
+    if (k === keyField) {
+      out[k] = key;
+    } else if (k === 'perClient') {
+      out.perClient = sanitizeBreakdownMap(v, normalizeTokscaleClientName);
+    } else if (k === 'perModel') {
+      out.perModel = sanitizeBreakdownMap(v, null);
+    } else if (typeof v === 'number' && Number.isFinite(v)) {
+      out[k] = v;
+    } else if (typeof v === 'boolean') {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+function sanitizeSafePlainObject(rawObj, depth = 0) {
+  if (!isPlainObject(rawObj) || depth > 4) return {};
+  const out = {};
+  for (const [k, v] of Object.entries(rawObj)) {
+    if (!isSafeKey(k)) continue;
+    if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
+    else if (typeof v === 'boolean' || typeof v === 'string') out[k] = v;
+    else if (isPlainObject(v)) out[k] = sanitizeSafePlainObject(v, depth + 1);
+  }
+  return out;
+}
+
+function sanitizeSummary(rawSummary) {
+  if (!isPlainObject(rawSummary)) return {};
+  const out = {};
+  for (const [k, v] of Object.entries(rawSummary)) {
+    if (!isSafeKey(k)) continue;
+    if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
+    else if (typeof v === 'boolean') out[k] = v;
+    else if (typeof v === 'string') out[k] = v;
+    else if (k === 'timeMetrics' && isPlainObject(v)) {
+      const tm = normalizeTimeMetrics(v);
+      if (tm) out.timeMetrics = tm;
+    } else if (isPlainObject(v)) {
+      out[k] = sanitizeSafePlainObject(v, 1);
+    }
+  }
+  return out;
+}
+
 // Defensively normalize arbitrary wire JSON to the { daily, monthly, summary } shape.
 function coerceHistory(raw) {
-  const src = raw && typeof raw === 'object' ? raw : {};
+  const src = isPlainObject(raw) ? raw : {};
+  const daily = Array.isArray(src.daily)
+    ? src.daily.map((row) => sanitizeHistoryRow(row, 'date', DAY_KEY_RE)).filter(Boolean)
+    : [];
+  const monthly = Array.isArray(src.monthly)
+    ? src.monthly.map((row) => sanitizeHistoryRow(row, 'month', MONTH_KEY_RE)).filter(Boolean)
+    : [];
   const history = {
-    daily: Array.isArray(src.daily) ? src.daily : [],
-    monthly: Array.isArray(src.monthly) ? src.monthly : [],
-    summary: src.summary && typeof src.summary === 'object' ? src.summary : {}
+    daily,
+    monthly,
+    summary: sanitizeSummary(src.summary)
   };
-  if (Array.isArray(src.dailyTotals)) history.dailyTotals = src.dailyTotals;
+  if (Array.isArray(src.dailyTotals)) {
+    history.dailyTotals = src.dailyTotals
+      .map((row) => sanitizeHistoryRow(row, 'date', DAY_KEY_RE))
+      .filter(Boolean);
+  }
   if (Number.isFinite(src.dailyTotalsOmitted)) history.dailyTotalsOmitted = src.dailyTotalsOmitted;
   return history;
 }

@@ -5,7 +5,7 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
 const { contentSecurityPolicyForRequest } = require('./contentSecurityPolicy');
-const { initializeHubProfiles, hubProfilesForRenderer, prepareHubProfilePatch } = require('./hubProfiles');
+const { activeHubProfile, initializeHubProfiles, hubProfilesForRenderer, prepareHubProfilePatch } = require('./hubProfiles');
 const { app, BaseWindow, BrowserWindow, WebContentsView, clipboard, dialog, globalShortcut, ipcMain, nativeImage, nativeTheme, net, Notification, powerMonitor, protocol, safeStorage, screen, session, shell, systemPreferences, webContents } = require('electron');
 // The renderer's 8 MiB semi-space keeps the long-lived widget lean.
 const RENDERER_JS_FLAGS = '--max-semi-space-size=8 --expose-gc';
@@ -24,6 +24,9 @@ const { createIdleHeapCollector } = require('./idleHeap');
 const { autoUpdater } = require('electron-updater');
 const { defaultDeviceId, generateHubSecret, lanIpv4Addresses, loadDotEnv, pidFilePath, readJson, sharedDataDir } = require('../shared/config');
 const { CredentialStore, credentialSettingsForRenderer, hasCredentialSettings, persistSettingsAndCredentials, stripCredentialSettings, writePrivateJsonAtomic } = require('../shared/credentialStore');
+const { createHubClientFetch, readClientCaFile, resetHubClientFetchCache } = require('../shared/hubClientFetch');
+const { classifyTlsError } = require('../shared/tlsCert');
+const { clearManagedTlsMaterials, exportPublicCertPem, importManagedTlsMaterials, validateExternalTlsPaths } = require('../hub/tls');
 const { installSafeStdout } = require('../shared/safeStdio');
 const { appVersion } = require('../shared/appVersion');
 const { macWidgetRuntimeSupport } = require('../shared/macSystemRequirements');
@@ -620,6 +623,20 @@ function normalizeHomeLimitAccountCount(value) {
   return Math.max(1, Math.min(HOME_LIMIT_ACCOUNT_COUNT_MAX, count));
 }
 
+function normalizeHubHostBind(value, fallback = '0.0.0.0') {
+  const raw = String(value || '').trim();
+  if (raw === '127.0.0.1' || raw === 'localhost' || raw === '::1') return '127.0.0.1';
+  if (raw === '0.0.0.0') return '0.0.0.0';
+  return fallback === '127.0.0.1' ? '127.0.0.1' : '0.0.0.0';
+}
+
+function normalizeHubHostTlsMinVersion(value, fallback = 'TLSv1.2') {
+  const raw = String(value || '').trim();
+  if (raw === 'TLSv1.3') return 'TLSv1.3';
+  if (raw === 'TLSv1.2') return 'TLSv1.2';
+  return fallback === 'TLSv1.3' ? 'TLSv1.3' : 'TLSv1.2';
+}
+
 function defaultSettings() {
   const envHubUrl = process.env.TOKEN_MONITOR_HUB_URL || '';
   const windowBehavior = process.env.TOKEN_MONITOR_ALWAYS_ON_TOP === '0' ? 'normal' : 'floating';
@@ -628,12 +645,22 @@ function defaultSettings() {
     hubUrl: envHubUrl,
     hubProfiles: [],
     activeHubProfileId: '',
+    hubHostBind: normalizeHubHostBind(process.env.TOKEN_MONITOR_BIND || '0.0.0.0'),
     hubHostPort: Math.max(1, Math.min(65535, Number(process.env.TOKEN_MONITOR_PORT) || HUB_DEFAULT_PORT)),
     // Default to TOKEN_MONITOR_SECRET so agents that already trust this env
     // value (matching what the CLI hub uses) can connect to the widget's
     // embedded hub without a fresh round of credential sharing. Falls back
     // to a random secret generated in startEmbeddedHub() if env is empty.
     hubHostSecret: process.env.TOKEN_MONITOR_SECRET || '',
+    hubHostTlsEnabled: false,
+    hubHostTlsMode: 'managed',
+    hubHostTlsMinVersion: 'TLSv1.2',
+    hubHostTlsCertPath: '',
+    hubHostTlsKeyPath: '',
+    hubHostTlsCaPath: '',
+    hubHostTlsPfxPath: '',
+    hubHostTlsCertMetadata: null,
+    caFingerprintSha256: '',
     secret: process.env.TOKEN_MONITOR_SECRET || '',
     hubSyncSessionTitles: parseBoolean(process.env.TOKEN_MONITOR_SYNC_SESSION_TITLES, false),
     sessionConversationsEnabled: parseBoolean(process.env.TOKEN_MONITOR_SESSION_CONVERSATIONS, true),
@@ -3070,20 +3097,93 @@ function drainPendingRuntimeActions(runtime) {
 
 function effectiveHubConfig(sourceSettings = settings) {
   if (sourceSettings?.hubMode === 'host') {
+    const scheme = (typeof embeddedHub !== 'undefined' && embeddedHub?.scheme)
+      || (sourceSettings.hubHostTlsEnabled === true ? 'https' : 'http');
     return {
-      url: `http://127.0.0.1:${normalizeHubPort(sourceSettings.hubHostPort)}`,
-      secret: sourceSettings.hubHostSecret || ''
+      url: `${scheme}://127.0.0.1:${normalizeHubPort(sourceSettings.hubHostPort)}`,
+      secret: sourceSettings.hubHostSecret || '',
+      caCertPem: '',
+      caFingerprintSha256: ''
     };
   }
   if (sourceSettings?.hubMode === 'client') {
     const url = String(sourceSettings.hubUrl || '').trim();
-    return { url: url || null, secret: sourceSettings.secret || '' };
+    const active = typeof activeHubProfile === 'function' ? activeHubProfile(sourceSettings) : null;
+    const caCertPem = typeof active?.caCertPem === 'string' ? active.caCertPem : '';
+    const caFingerprintSha256 = typeof active?.caFingerprintSha256 === 'string'
+      ? active.caFingerprintSha256
+      : String(sourceSettings.caFingerprintSha256 || '');
+    return { url: url || null, secret: sourceSettings.secret || '', caCertPem, caFingerprintSha256 };
   }
-  return { url: null, secret: '' };
+  return { url: null, secret: '', caCertPem: '', caFingerprintSha256: '' };
 }
 
 function hubDataFile() {
   return path.join(app.getPath('userData'), 'hub-devices.json');
+}
+
+const MAX_CLIENT_CA_DRAFTS = 4;
+const clientCaDrafts = new Map();
+
+function storeClientCaDraft(draft) {
+  const token = crypto.randomUUID();
+  clientCaDrafts.set(token, {
+    caCertPem: draft.caCertPem,
+    caFingerprintSha256: draft.caFingerprintSha256,
+    summary: draft.summary
+  });
+  while (clientCaDrafts.size > MAX_CLIENT_CA_DRAFTS) {
+    const oldest = clientCaDrafts.keys().next().value;
+    if (oldest) clientCaDrafts.delete(oldest);
+    else break;
+  }
+  return token;
+}
+
+function resolveClientCaDraft(token) {
+  const key = typeof token === 'string' ? token.trim() : '';
+  return key ? (clientCaDrafts.get(key) || null) : null;
+}
+
+function clearClientCaDraft(token) {
+  if (typeof token === 'string' && token.trim()) {
+    clientCaDrafts.delete(token.trim());
+  } else {
+    clientCaDrafts.clear();
+  }
+}
+
+function hubClientFetchFor(config = effectiveHubConfig(), options = {}) {
+  const timeoutMs = options.timeoutMs === 0 || options.timeoutMs === null
+    ? 0
+    : (Number.isFinite(Number(options.timeoutMs)) ? Number(options.timeoutMs) : 15_000);
+  return createHubClientFetch({
+    caCertPem: typeof config?.caCertPem === 'string' ? config.caCertPem : '',
+    defaultTimeoutMs: timeoutMs
+  });
+}
+
+function buildHostTlsConfigFromSettings(sourceSettings = settings) {
+  if (sourceSettings?.hubHostTlsEnabled !== true) return null;
+  const mode = sourceSettings.hubHostTlsMode === 'path' ? 'path' : 'managed';
+  const certPath = String(sourceSettings.hubHostTlsCertPath || '').trim();
+  const keyPath = String(sourceSettings.hubHostTlsKeyPath || '').trim();
+  const caPath = String(sourceSettings.hubHostTlsCaPath || '').trim();
+  const pfxPath = String(sourceSettings.hubHostTlsPfxPath || '').trim();
+  if (!pfxPath && (!certPath || !keyPath)) return null;
+  const passphrase = typeof ensureCredentialStore === 'function'
+    ? ensureCredentialStore().readHubTlsPassphrase({ safeStorage })
+    : '';
+  return {
+    enabled: true,
+    mode,
+    certPath,
+    keyPath,
+    caPath,
+    pfxPath,
+    ...(passphrase ? { passphrase } : {}),
+    minVersion: normalizeHubHostTlsMinVersion(sourceSettings.hubHostTlsMinVersion)
+  };
 }
 
 function reportsConfigFromSettings(source = settings) {
@@ -3150,7 +3250,8 @@ async function requestClientHubJson(pathname, {
   timeoutMs = 15_000,
   fallback = { ok: true }
 } = {}) {
-  const { url: hubUrl, secret } = effectiveHubConfig();
+  const cfg = effectiveHubConfig();
+  const { url: hubUrl, secret } = cfg;
   if (!hubUrl) return { ok: false, error: 'hub_required' };
   try {
     const url = new URL(`${hubUrl.replace(/\/$/, '')}${pathname}`);
@@ -3165,9 +3266,13 @@ async function requestClientHubJson(pathname, {
       ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
       ...(secret ? { authorization: `Bearer ${secret}` } : {})
     };
-    const response = await hubReportsFetch(url.toString(), {
+    const transportFetch = typeof hubClientFetchFor === 'function'
+      ? hubClientFetchFor(cfg, { timeoutMs })
+      : fetch;
+    const response = await transportFetch(url.toString(), {
       method,
       headers,
+      redirect: 'error',
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       signal: AbortSignal.timeout(timeoutMs)
     });
@@ -3225,14 +3330,40 @@ function sendHubPush(payload) {
 
 function getHubInfo() {
   const port = normalizeHubPort(settings?.hubHostPort);
+  const bindHost = embeddedHub?.host || normalizeHubHostBind(settings?.hubHostBind);
+  const liveTls = embeddedHub?.hub?.tlsStatus?.() || null;
+  const hasConfiguredMaterial = Boolean(
+    settings?.hubHostTlsPfxPath
+    || (settings?.hubHostTlsCertPath && settings?.hubHostTlsKeyPath)
+  );
+  const tls = liveTls || {
+    enabled: settings?.hubHostTlsEnabled === true,
+    mode: settings?.hubHostTlsMode === 'path' ? 'path' : 'managed',
+    format: settings?.hubHostTlsPfxPath ? 'pfx' : settings?.hubHostTlsCertPath ? 'pem' : null,
+    minVersion: normalizeHubHostTlsMinVersion(settings?.hubHostTlsMinVersion),
+    hsts: false,
+    watch: false,
+    cert: settings?.hubHostTlsCertMetadata || null,
+    lastReloadAt: '',
+    lastReloadError: '',
+    warnings: []
+  };
+  const scheme = embeddedHub?.scheme || (tls.enabled ? 'https' : 'http');
   return {
     mode: settings?.hubMode || 'local',
+    bindHost,
+    scheme,
     port,
     secret: settings?.hubHostSecret || '',
     listening: Boolean(embeddedHub),
     listeningPort: embeddedHub ? embeddedHub.port : null,
     error: embeddedHubError,
     lanAddresses: lanIpv4Addresses(),
+    tls: {
+      ...tls,
+      configured: hasConfiguredMaterial || Boolean(liveTls?.enabled)
+    },
+    insecureNonLoopbackHttp: !tls.enabled && bindHost !== '127.0.0.1',
     icloud: icloudRuntimeHandle?.getStatus?.() || {
       state: process.platform === 'darwin' ? 'waiting' : 'unavailable',
       availability: process.platform === 'darwin' ? 'unknown' : 'unavailable',
@@ -3247,8 +3378,9 @@ function getHubInfo() {
 
 async function getHubBuildStatus() {
   if (settings?.hubMode !== 'client') return { status: 'notConfigured', runtime: '', hubUrl: '' };
-  const hubUrl = String(settings.hubUrl || '').trim();
-  return probeHubBuild(hubUrl);
+  const cfg = effectiveHubConfig();
+  const hubUrl = String(cfg.url || '').trim();
+  return probeHubBuild(hubUrl, { secret: cfg.secret, caCertPem: cfg.caCertPem });
 }
 
 let openclawBridgeInstance = null;
@@ -3366,11 +3498,18 @@ async function startEmbeddedHub() {
     const integrationSecrets = typeof ensureCredentialStore === 'function'
       ? ensureCredentialStore().readIntegrationSecrets()
       : null;
+    const bindHost = typeof normalizeHubHostBind === 'function'
+      ? normalizeHubHostBind(settings.hubHostBind)
+      : '0.0.0.0';
+    const tlsConfig = typeof buildHostTlsConfigFromSettings === 'function'
+      ? buildHostTlsConfigFromSettings(settings)
+      : null;
     const hub = createHub({
       port,
       deployment: 'app',
-      host: '0.0.0.0',
+      host: bindHost,
       secret: settings.hubHostSecret,
+      ...(tlsConfig ? { tls: tlsConfig } : {}),
       syncSessionTitles: settings.hubSyncSessionTitles === true,
       sessionConversations: settings.sessionConversationsEnabled !== false,
       approvalAlerts: settings.approvalAlertsEnabled === true,
@@ -3389,8 +3528,9 @@ async function startEmbeddedHub() {
       logger: { error: (err) => console.log(`[hub] ${err?.message || err}`) }
     });
     await hub.start();
-    embeddedHub = { hub, port, secret: settings.hubHostSecret };
-    console.log(`[hub] listening on 0.0.0.0:${port}`);
+    const scheme = hub.scheme || (tlsConfig ? 'https' : 'http');
+    embeddedHub = { hub, port, host: bindHost, scheme, secret: settings.hubHostSecret };
+    console.log(`[hub] listening on ${bindHost}:${port} (${scheme})`);
     sendHubPush({ type: 'listening', info: getHubInfo() });
     return embeddedHub;
   } catch (error) {
@@ -3421,11 +3561,16 @@ function ownsUsageRuntime() {
 }
 
 async function deleteDeviceFromHub(deviceId) {
-  const { url: hubUrl, secret } = effectiveHubConfig();
+  const cfg = effectiveHubConfig();
+  const { url: hubUrl, secret } = cfg;
   if (!hubUrl) return;
   const base = hubUrl.replace(/\/$/, '');
-  const response = await fetch(`${base}/api/devices/${encodeURIComponent(deviceId)}`, {
+  const transportFetch = typeof hubClientFetchFor === 'function'
+    ? hubClientFetchFor(cfg, { timeoutMs: 15_000 })
+    : fetch;
+  const response = await transportFetch(`${base}/api/devices/${encodeURIComponent(deviceId)}`, {
     method: 'DELETE',
+    redirect: 'error',
     headers: secret ? { authorization: `Bearer ${secret}` } : {}
   });
   if (!response.ok && response.status !== 404) throw new Error(`DELETE ${response.status}`);
@@ -3484,21 +3629,28 @@ function stopSessionConversationClient() {
 
 function serveSessionConversations(summary) {
   if (settings?.sessionConversationsEnabled === false) { stopSessionConversationClient(); return; }
-  const { url: hubUrl, secret } = effectiveHubConfig();
+  const cfg = effectiveHubConfig();
+  const { url: hubUrl, secret } = cfg;
   if (!hubUrl || !secret) { stopSessionConversationClient(); return; }
-  const binding = JSON.stringify([hubUrl, secret, summary.deviceId, settings.wslScanEnabled === true]);
+  const binding = JSON.stringify([hubUrl, secret, cfg.caFingerprintSha256 || '', summary.deviceId, settings.wslScanEnabled === true]);
   if (binding !== sessionConversationBinding) {
     stopSessionConversationClient();
     sessionConversationBinding = binding;
-    sessionConversationClient = createSessionConversationClient({ hubUrl, secret, deviceId: summary.deviceId,
-      wslScanEnabled: settings.wslScanEnabled === true });
+    sessionConversationClient = createSessionConversationClient({
+      hubUrl,
+      secret,
+      deviceId: summary.deviceId,
+      wslScanEnabled: settings.wslScanEnabled === true,
+      ...(typeof hubClientFetchFor === 'function' ? { fetchFn: hubClientFetchFor(cfg, { timeoutMs: 0 }) } : {})
+    });
   }
   sessionConversationClient.update(summary);
   sessionConversationClient.start();
 }
 
 async function postToHub(summary) {
-  const { url: hubUrl, secret } = effectiveHubConfig();
+  const cfg = effectiveHubConfig();
+  const { url: hubUrl, secret } = cfg;
   const uploadIdentity = getSyncContentRuntime().status().identity;
   const uploadContext = syncContentContext();
   if (!hubUrl) throw new Error('hub not configured');
@@ -3514,7 +3666,10 @@ async function postToHub(summary) {
     || syncOptions.identity !== getSyncContentRuntime().status().identity
     || !sameDestination(uploadContext, syncContentContext())
     || summary.deviceId !== syncContentContext().deviceId) throw new Error('hub_changed');
-  const fetchForUpload = (target, options) => fetch(target, { ...options, redirect: 'error',
+  const transportFetch = typeof hubClientFetchFor === 'function'
+    ? hubClientFetchFor(cfg, { timeoutMs: 15_000 })
+    : fetch;
+  const fetchForUpload = (target, options) => transportFetch(target, { ...options, redirect: 'error',
     signal: AbortSignal.any([syncOptions.signal, AbortSignal.timeout(15_000)]) });
   const { response } = await postSyncPayload(fetchForUpload, url, {
     syncSessionTitles: syncOptions.syncSessionTitles,
@@ -3548,7 +3703,7 @@ async function requestSyncContent(context, pathname, method, body) {
   // The embedded Hub uses the same authenticated protocol in-process. Its
   // own usage must keep working when outbound loopback traffic is blocked.
   if (context.mode === 'host' && embeddedHub
-    && ((context.url === `http://127.0.0.1:${embeddedHub.port}` && context.secret === embeddedHub.secret)
+    && ((context.url === `${embeddedHub.scheme || 'http'}://127.0.0.1:${embeddedHub.port}` && context.secret === embeddedHub.secret)
       // Every embedded host generation shares this app's hubDataFile. Old
       // host journals may scrub that same store after port/secret rotation;
       // they cannot read or admit a new generation through this exception.
@@ -3568,7 +3723,10 @@ async function requestSyncContent(context, pathname, method, body) {
         body: error.current || null };
     }
   }
-  const response = await fetch(`${context.url.replace(/\/$/, '')}${pathname}`, {
+  const transportFetch = typeof hubClientFetchFor === 'function'
+    ? hubClientFetchFor(context, { timeoutMs: 15_000 })
+    : fetch;
+  const response = await transportFetch(`${context.url.replace(/\/$/, '')}${pathname}`, {
     method, redirect: 'error',
     headers: { 'content-type': 'application/json', ...(context.secret ? { authorization: `Bearer ${context.secret}` } : {}) },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -3805,11 +3963,12 @@ function hubChangedError() {
 }
 
 function subscriptionsEndpoint() {
-  const { url: hubUrl, secret } = effectiveHubConfig();
+  const { url: hubUrl, secret, caCertPem } = effectiveHubConfig();
   if (!hubUrl) return null;
   return {
     url: `${hubUrl.replace(/\/$/, '')}/api/subscriptions`,
-    headers: secret ? { authorization: `Bearer ${secret}` } : {}
+    headers: secret ? { authorization: `Bearer ${secret}` } : {},
+    caCertPem: caCertPem || ''
   };
 }
 
@@ -3823,7 +3982,14 @@ async function fetchSharedSubscriptions() {
   // lane open for the rest of the session, and every later read and save for that
   // hub behind it. fetch() has no deadline of its own, so it gets the same 15s
   // the other hub requests use.
-  const response = await fetch(endpoint.url, { headers: endpoint.headers, signal: AbortSignal.timeout(15_000) });
+  const transportFetch = typeof hubClientFetchFor === 'function'
+    ? hubClientFetchFor(endpoint, { timeoutMs: 15_000 })
+    : fetch;
+  const response = await transportFetch(endpoint.url, {
+    headers: endpoint.headers,
+    redirect: 'error',
+    signal: AbortSignal.timeout(15_000)
+  });
   if (!response.ok) throw new Error(`Hub ${response.status}: ${(await response.text()).slice(0, 200)}`);
   return response.json();
 }
@@ -3878,8 +4044,12 @@ async function writeSharedSubscriptionsNow(list, hub, baseUpdatedAt) {
   }
   const endpoint = subscriptionsEndpoint();
   if (!endpoint) throw new Error('hub not configured');
-  const response = await fetch(endpoint.url, {
+  const transportFetch = typeof hubClientFetchFor === 'function'
+    ? hubClientFetchFor(endpoint, { timeoutMs: 15_000 })
+    : fetch;
+  const response = await transportFetch(endpoint.url, {
     method: 'PUT',
+    redirect: 'error',
     headers: { 'content-type': 'application/json', ...endpoint.headers },
     body: JSON.stringify({ subscriptions: list, baseUpdatedAt }),
     signal: AbortSignal.timeout(15_000)
@@ -4707,9 +4877,10 @@ function macWidgetRuntimeSupported(
 }
 
 function historyResolverOptions() {
-  const { url: hubUrl, secret } = effectiveHubConfig();
+  const { url: hubUrl, secret, caCertPem } = effectiveHubConfig();
   return {
     aggregateHistory,
+    caCertPem: caCertPem || '',
     embeddedHub,
     historyEnabled: settings?.historyEnabled !== false,
     hubMode: settings?.hubMode,
@@ -5337,7 +5508,8 @@ async function startStatsStream(options = {}) {
   if (options.resetSnapshot) {
     clearLatestHubStatsCache();
   }
-  const { url: hubUrl, secret } = effectiveHubConfig();
+  const cfg = effectiveHubConfig();
+  const { url: hubUrl, secret } = cfg;
   if (!hubUrl) return;
   mode = 'sync';
   const url = `${hubUrl.replace(/\/$/, '')}/api/stats/stream`;
@@ -5358,7 +5530,11 @@ async function startStatsStream(options = {}) {
   controller.signal.addEventListener('abort', () => clearTimeout(activityTimer), { once: true });
   try {
     armActivityTimeout(15_000);
-    const response = await fetch(url, {
+    const transportFetch = typeof hubClientFetchFor === 'function'
+      ? hubClientFetchFor(cfg, { timeoutMs: 0 })
+      : fetch;
+    const response = await transportFetch(url, {
+      redirect: 'error',
       headers: {
         accept: 'text/event-stream',
         [HUB_STREAM_HEADER]: HUB_STREAM_VERSION,
@@ -5572,6 +5748,14 @@ function settingsForRenderer() {
   delete rendererSettings.limitAccountPresentationPending;
   delete rendererSettings.syncContentState;
   delete rendererSettings.pluginSkinRef;
+  delete rendererSettings.hubHostTlsCertPath;
+  delete rendererSettings.hubHostTlsKeyPath;
+  delete rendererSettings.hubHostTlsCaPath;
+  delete rendererSettings.hubHostTlsPfxPath;
+  delete rendererSettings.hubHostTlsPassphrase;
+  delete rendererSettings.caCertPem;
+  delete rendererSettings.caFingerprintSha256;
+  delete rendererSettings.caSummary;
   // Usage retained for untracked clients: only the collector transform reads
   // it, and it is most of the settings payload a renderer would clone and keep.
   delete rendererSettings.archivedClientUsage;
@@ -7092,7 +7276,8 @@ async function fetchStats(options = {}) {
       || withHistoryPreview(aggregateDevices([], 0), []);
     return injectLocalDeviceStatus(stats);
   }
-  const { url: hubUrl, secret } = effectiveHubConfig();
+  const cfg = effectiveHubConfig();
+  const { url: hubUrl, secret } = cfg;
   if (!hubUrl) return withHistoryPreview(aggregateDevices([], 0), []);
   // A connected stream keeps this cache current. The renderer's periodic
   // fallback only needs a full download once stream data has gone quiet. Other
@@ -7104,7 +7289,13 @@ async function fetchStats(options = {}) {
     }
   }
   const url = `${hubUrl.replace(/\/$/, '')}/api/stats`;
-  const response = await fetch(url, { headers: secret ? { authorization: `Bearer ${secret}` } : {} });
+  const transportFetch = typeof hubClientFetchFor === 'function'
+    ? hubClientFetchFor(cfg, { timeoutMs: 15_000 })
+    : fetch;
+  const response = await transportFetch(url, {
+    redirect: 'error',
+    headers: secret ? { authorization: `Bearer ${secret}` } : {}
+  });
   if (!response.ok) throw new Error(`Hub ${response.status}: ${(await response.text()).slice(0, 200)}`);
   const stats = await response.json();
   if (!hubModeRequestIsCurrent(requestGeneration, 'client', requestHubIdentity)) {
@@ -7706,7 +7897,8 @@ function createWindow(boundsOverride, options = {}) {
       preload: path.join(__dirname, 'preload.js'),
       zoomFactor: clampZoom(settings.zoomFactor),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: true
     }
   };
   const win = process.platform === 'win32'
@@ -7950,7 +8142,8 @@ function createDashboardWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: true
     }
   };
   const win = new BrowserWindow(windowOptions);
@@ -8014,7 +8207,10 @@ function ensureAntigravityManagerService() {
     safeStorage,
     fetch: electronLimitsFetch(),
     // Hub snapshot uploads bypass app proxy settings per docs/architecture.md.
-    hubFetch: fetch,
+    hubFetch: (url, init) => hubClientFetchFor(effectiveHubConfig(), { timeoutMs: 15_000 })(url, {
+      ...(init || {}),
+      redirect: 'error'
+    }),
     openExternal: (url) => shell.openExternal(url),
     getDeviceIdentity: () => ({
       deviceId: String(settings?.deviceId || '').trim() || defaultDeviceId(),
@@ -8081,7 +8277,8 @@ function createAntigravityManagerWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: true
     }
   };
   const managerWindow = new BrowserWindow(windowOptions);
@@ -8499,7 +8696,13 @@ app.whenReady().then(() => {
   // The settings:update body, named so a credential save persists through the
   // exact same normalization, runtime reconfigure and limit invalidation.
   function applySettingsPatch(patch, onDotsVisibilityRefresh = () => {}, limitContext = {}) {
-    patch = prepareHubProfilePatch(settings, patch);
+    const consumedCaDraftToken = typeof patch?.hubProfileAction?.caDraftToken === 'string'
+      && patch?.hubProfileAction?.caMode === 'replace'
+      ? patch.hubProfileAction.caDraftToken
+      : '';
+    patch = prepareHubProfilePatch(settings, patch, {
+      resolveCaDraft: (token) => resolveClientCaDraft(token)
+    });
     const skinSelection = preparePluginSkinSettings(patch, settings, pluginRuntime);
     patch = skinSelection.patch;
     const contentRuntime = getSyncContentRuntime();
@@ -8539,6 +8742,17 @@ app.whenReady().then(() => {
     delete normalizedPatch.pluginInitialSetup;
     delete normalizedPatch.pluginContentSelections;
     delete normalizedPatch.pluginContentOrder;
+    // Host TLS file paths, mode, metadata, passphrases and raw client CA PEMs
+    // are strictly main-owned via dedicated IPCs (hub:importHostTls, hub:pickClientCaCert).
+    delete normalizedPatch.hubHostTlsCertPath;
+    delete normalizedPatch.hubHostTlsKeyPath;
+    delete normalizedPatch.hubHostTlsCaPath;
+    delete normalizedPatch.hubHostTlsPfxPath;
+    delete normalizedPatch.hubHostTlsMode;
+    delete normalizedPatch.hubHostTlsCertMetadata;
+    delete normalizedPatch.hubHostTlsPassphrase;
+    delete normalizedPatch.caCertPem;
+    delete normalizedPatch.caSummary;
     // Account fields declared persist:'never' (managed account lists, profile
     // maps, workbuddy session fields) are stripped by the registry walk below.
     normalizeAccountPatch(patch, normalizedPatch);
@@ -8587,14 +8801,36 @@ app.whenReady().then(() => {
     if (patch.heatmapMetric !== undefined) normalizedPatch.heatmapMetric = normalizeHeatmapMetric(patch.heatmapMetric, settings.heatmapMetric);
     if (patch.homeActiveDaysWindow !== undefined) normalizedPatch.homeActiveDaysWindow = normalizeHomeActiveDaysWindow(patch.homeActiveDaysWindow, settings.homeActiveDaysWindow);
     if (patch.sessionContextMetric !== undefined) normalizedPatch.sessionContextMetric = normalizeSessionContextMetric(patch.sessionContextMetric, settings.sessionContextMetric);
+    if (patch.hubHostTlsEnabled === true
+      && !settings.hubHostTlsPfxPath
+      && !(settings.hubHostTlsCertPath && settings.hubHostTlsKeyPath)) {
+      throw new Error('tls_not_configured');
+    }
     settings = normalizeWindowBehaviorSettings({
       ...settings,
       ...normalizedPatch,
       hubMode: patch.hubMode !== undefined
         ? normalizeHubMode(patch.hubMode, settings.hubMode, process.platform)
         : normalizeHubMode(settings.hubMode, 'local', process.platform),
+      hubHostBind: patch.hubHostBind !== undefined
+        ? normalizeHubHostBind(patch.hubHostBind, settings.hubHostBind)
+        : normalizeHubHostBind(settings.hubHostBind),
       hubHostPort: patch.hubHostPort !== undefined ? normalizeHubPort(patch.hubHostPort, settings.hubHostPort) : settings.hubHostPort,
       hubHostSecret: patch.hubHostSecret !== undefined ? String(patch.hubHostSecret) : settings.hubHostSecret,
+      hubHostTlsEnabled: patch.hubHostTlsEnabled !== undefined
+        ? parseBoolean(patch.hubHostTlsEnabled, false)
+        : settings.hubHostTlsEnabled === true,
+      hubHostTlsMinVersion: patch.hubHostTlsMinVersion !== undefined
+        ? normalizeHubHostTlsMinVersion(patch.hubHostTlsMinVersion, settings.hubHostTlsMinVersion)
+        : normalizeHubHostTlsMinVersion(settings.hubHostTlsMinVersion),
+      // Re-source host-owned TLS paths/mode/metadata from main settings after spread
+      // so renderer patches can never smuggle arbitrary filesystem paths.
+      hubHostTlsMode: settings.hubHostTlsMode === 'path' ? 'path' : 'managed',
+      hubHostTlsCertPath: String(settings.hubHostTlsCertPath || ''),
+      hubHostTlsKeyPath: String(settings.hubHostTlsKeyPath || ''),
+      hubHostTlsCaPath: String(settings.hubHostTlsCaPath || ''),
+      hubHostTlsPfxPath: String(settings.hubHostTlsPfxPath || ''),
+      hubHostTlsCertMetadata: settings.hubHostTlsCertMetadata || null,
       hubSyncSessionTitles: parseBoolean(patch.hubSyncSessionTitles ?? settings.hubSyncSessionTitles, false),
       sessionConversationsEnabled: parseBoolean(patch.sessionConversationsEnabled ?? settings.sessionConversationsEnabled, true),
       approvalAlertsEnabled: parseBoolean(patch.approvalAlertsEnabled ?? settings.approvalAlertsEnabled, false),
@@ -8812,6 +9048,7 @@ app.whenReady().then(() => {
     }
     contentRuntime.invalidate();
     const receiverPermissionChanged = settings.hubSyncSessionTitles !== previousSettingsState.hubSyncSessionTitles;
+    if (consumedCaDraftToken) clearClientCaDraft(consumedCaDraftToken);
     if (receiverPermissionChanged) contentRuntime.receiverPermissionChanged(settings.hubSyncSessionTitles);
     const conversationPermissionChanged = (settings.sessionConversationsEnabled !== false) !== (previousSettingsState.sessionConversationsEnabled !== false);
     if (conversationPermissionChanged) {
@@ -9291,7 +9528,7 @@ app.whenReady().then(() => {
           }
           let nextConfig = mergeReportIntegrationsConfig(settings.reportIntegrations, patch);
           if (embeddedHub?.hub) {
-            const hubUpdated = embeddedHub.hub.updateIntegrationsConfig(patch);
+            const hubUpdated = embeddedHub.hub.updateIntegrationsConfig(patch, { allowQueryPermissionMutation: true });
             if (hubUpdated?.ok === false) return hubUpdated;
             nextConfig = mergeReportIntegrationsConfig(nextConfig, {
               ai: hubUpdated?.ai,
@@ -9319,7 +9556,7 @@ app.whenReady().then(() => {
       return { ok: false, error: 'hub_required' };
     }
     try {
-      const saved = ensureOpenClawBridge().saveLocalIntegrations(patch || {});
+      const saved = ensureOpenClawBridge().saveLocalIntegrations(patch || {}, { allowQueryPermissionMutation: true });
       if (saved?.ok === false) return saved;
       const nextConfig = mergeReportIntegrationsConfig(settings.reportIntegrations, {
         ai: saved?.ai,
@@ -9892,6 +10129,212 @@ app.whenReady().then(() => {
   ipcMain.handle('appearance:getNativeMaterial', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     return getNativeMaterialState(win);
+  });
+  ipcMain.handle('hub:importHostTls', async (event, options = {}) => {
+    const parentWin = BrowserWindow.fromWebContents(event.sender) || mainWindow || undefined;
+    const format = options?.format === 'pfx' ? 'pfx' : 'pem';
+    const tlsMode = options?.mode === 'path' ? 'path' : 'managed';
+    const passphrase = typeof options?.passphrase === 'string' ? options.passphrase : '';
+    const includeCaChain = options?.includeCaChain === true;
+    const minVersion = normalizeHubHostTlsMinVersion(options?.minVersion ?? settings.hubHostTlsMinVersion);
+    let certPath = '';
+    let keyPath = '';
+    let caPath = '';
+    let pfxPath = '';
+    try {
+      if (format === 'pfx') {
+        const picked = await dialog.showOpenDialog(parentWin, {
+          title: 'Select PKCS#12 Certificate Bundle (.p12 / .pfx)',
+          properties: ['openFile'],
+          filters: [{ name: 'PKCS#12 Certificate', extensions: ['p12', 'pfx'] }]
+        });
+        if (picked.canceled || !picked.filePaths?.[0]) return { ok: false, cancelled: true };
+        pfxPath = picked.filePaths[0];
+      } else {
+        const pickedCert = await dialog.showOpenDialog(parentWin, {
+          title: 'Select TLS Server Certificate (PEM)',
+          properties: ['openFile'],
+          filters: [{ name: 'PEM Certificate', extensions: ['pem', 'crt', 'cer'] }]
+        });
+        if (pickedCert.canceled || !pickedCert.filePaths?.[0]) return { ok: false, cancelled: true };
+        certPath = pickedCert.filePaths[0];
+
+        const pickedKey = await dialog.showOpenDialog(parentWin, {
+          title: 'Select TLS Private Key (PEM)',
+          properties: ['openFile'],
+          filters: [{ name: 'Private Key', extensions: ['key', 'pem'] }]
+        });
+        if (pickedKey.canceled || !pickedKey.filePaths?.[0]) return { ok: false, cancelled: true };
+        keyPath = pickedKey.filePaths[0];
+
+        if (includeCaChain) {
+          const pickedCa = await dialog.showOpenDialog(parentWin, {
+            title: 'Select Intermediate / CA Chain Certificate (Optional)',
+            properties: ['openFile'],
+            filters: [{ name: 'PEM Certificate', extensions: ['pem', 'crt', 'cer'] }]
+          });
+          if (!pickedCa.canceled && pickedCa.filePaths?.[0]) {
+            caPath = pickedCa.filePaths[0];
+          }
+        }
+      }
+
+      const materialResult = tlsMode === 'managed'
+        ? await importManagedTlsMaterials({
+            storageDir: app.getPath('userData'),
+            certPath,
+            keyPath,
+            caPath,
+            pfxPath,
+            passphrase,
+            minVersion,
+            logger: console
+          })
+        : await validateExternalTlsPaths({
+            certPath,
+            keyPath,
+            caPath,
+            pfxPath,
+            passphrase,
+            minVersion,
+            logger: console
+          });
+
+      ensureCredentialStore().writeHubTlsPassphrase(passphrase, { safeStorage });
+      const previous = settings;
+      try {
+        settings = {
+          ...settings,
+          hubHostTlsEnabled: true,
+          hubHostTlsMode: materialResult.mode,
+          hubHostTlsMinVersion: minVersion,
+          hubHostTlsCertPath: materialResult.certPath || '',
+          hubHostTlsKeyPath: materialResult.keyPath || '',
+          hubHostTlsCaPath: materialResult.caPath || '',
+          hubHostTlsPfxPath: materialResult.pfxPath || '',
+          hubHostTlsCertMetadata: materialResult.metadata || null
+        };
+        saveSettings({ throwOnError: true });
+      } catch (saveError) {
+        settings = previous;
+        throw saveError;
+      }
+
+      if (settings.hubMode === 'host') {
+        startMode();
+        await modeQueue;
+      }
+      pushSettingsToRenderer();
+      const info = getHubInfo();
+      sendHubPush({ type: 'tls-updated', info });
+      return { ok: true, info, warnings: materialResult.warnings || [] };
+    } catch (error) {
+      return {
+        ok: false,
+        error: classifyTlsError(error),
+        message: error?.message || 'TLS certificate import failed'
+      };
+    }
+  });
+  ipcMain.handle('hub:reloadHostTls', async () => {
+    if (!embeddedHub?.hub || typeof embeddedHub.hub.reloadTls !== 'function') {
+      return { ok: false, error: 'hub_not_running', info: getHubInfo() };
+    }
+    try {
+      const result = await embeddedHub.hub.reloadTls();
+      if (result?.ok && result.metadata) {
+        settings = { ...settings, hubHostTlsCertMetadata: result.metadata };
+        saveSettings();
+        pushSettingsToRenderer();
+      }
+      const info = getHubInfo();
+      sendHubPush({ type: 'tls-reloaded', info });
+      return { ...result, info };
+    } catch (error) {
+      return {
+        ok: false,
+        error: classifyTlsError(error),
+        message: error?.message || 'TLS certificate reload failed',
+        info: getHubInfo()
+      };
+    }
+  });
+  ipcMain.handle('hub:clearHostTls', async () => {
+    try {
+      clearManagedTlsMaterials(app.getPath('userData'));
+      ensureCredentialStore().writeHubTlsPassphrase('', { safeStorage });
+      settings = {
+        ...settings,
+        hubHostTlsEnabled: false,
+        hubHostTlsMode: 'managed',
+        hubHostTlsCertPath: '',
+        hubHostTlsKeyPath: '',
+        hubHostTlsCaPath: '',
+        hubHostTlsPfxPath: '',
+        hubHostTlsCertMetadata: null
+      };
+      saveSettings({ throwOnError: true });
+      if (settings.hubMode === 'host') {
+        startMode();
+        await modeQueue;
+      }
+      pushSettingsToRenderer();
+      const info = getHubInfo();
+      sendHubPush({ type: 'tls-cleared', info });
+      return { ok: true, info };
+    } catch (error) {
+      return { ok: false, error: classifyTlsError(error), message: error?.message || 'Failed to clear TLS configuration' };
+    }
+  });
+  ipcMain.handle('hub:exportHostPublicCert', async (event) => {
+    const parentWin = BrowserWindow.fromWebContents(event.sender) || mainWindow || undefined;
+    try {
+      let pem = '';
+      if (embeddedHub?.hub && typeof embeddedHub.hub.exportPublicCertPem === 'function') {
+        pem = embeddedHub.hub.exportPublicCertPem() || '';
+      }
+      if (!pem) {
+        const tlsConfig = buildHostTlsConfigFromSettings({ ...settings, hubHostTlsEnabled: true });
+        if (!tlsConfig) return { ok: false, error: 'tls_not_configured' };
+        const exported = await exportPublicCertPem(tlsConfig, { logger: console });
+        pem = exported.pem;
+      }
+      if (!pem) return { ok: false, error: 'tls_not_configured' };
+      const saved = await dialog.showSaveDialog(parentWin, {
+        title: 'Export Hub Public Certificate (PEM)',
+        defaultPath: 'token-monitor-hub-cert.pem',
+        filters: [{ name: 'PEM Certificate', extensions: ['pem', 'crt'] }]
+      });
+      if (saved.canceled || !saved.filePath) return { ok: false, cancelled: true };
+      fs.writeFileSync(saved.filePath, pem, { encoding: 'utf8', mode: 0o644 });
+      return { ok: true, exported: true };
+    } catch (error) {
+      return { ok: false, error: classifyTlsError(error), message: error?.message || 'Failed to export public certificate' };
+    }
+  });
+  ipcMain.handle('hub:pickClientCaCert', async (event) => {
+    const parentWin = BrowserWindow.fromWebContents(event.sender) || mainWindow || undefined;
+    try {
+      const picked = await dialog.showOpenDialog(parentWin, {
+        title: 'Select Custom CA Certificate (PEM / DER)',
+        properties: ['openFile'],
+        filters: [{ name: 'CA Certificate', extensions: ['pem', 'crt', 'cer', 'der'] }]
+      });
+      if (picked.canceled || !picked.filePaths?.[0]) return { ok: false, cancelled: true };
+      const parsed = readClientCaFile(picked.filePaths[0]);
+      const draftToken = storeClientCaDraft(parsed);
+      return { ok: true, draftToken, summary: parsed.summary };
+    } catch (error) {
+      return {
+        ok: false,
+        error: classifyTlsError(error),
+        message: error?.message || 'Invalid CA certificate file'
+      };
+    }
+  });
+  ipcMain.handle('hub:clearClientCaDraft', (_event, draftToken) => {
+    clearClientCaDraft(draftToken);
+    return { ok: true };
   });
   let repositoryStars = null;
   ipcMain.handle('app:repositoryStars', () => {
@@ -10486,6 +10929,8 @@ app.on('render-process-gone', (_event, contents, details) => {
 // taking the quit over would cancel an OS-initiated logout or restart on macOS.
 app.on('before-quit', () => {
   stopSessionConversationClient();
+  if (typeof clientCaDrafts !== 'undefined') clientCaDrafts.clear();
+  if (typeof resetHubClientFetchCache === 'function') void resetHubClientFetchCache();
   if (typeof approvalAlertRuntime !== 'undefined') void approvalAlertRuntime.stop();
   quitRequested = true;
   cancelMainWindowHibernate();

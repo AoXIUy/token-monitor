@@ -38,9 +38,15 @@ function request(method, body) {
   });
 }
 
-test('the Worker health response exposes its content-derived build identity', async () => {
+test('the Worker health response returns minimal status unauthenticated and exposes build identity when authenticated', async () => {
   const { hub } = await hubDO();
-  const response = await hub.fetch(new Request('https://hub.example/api/health'));
+  const unauth = await hub.fetch(new Request('https://hub.example/api/health'));
+  assert.equal(unauth.status, 200);
+  assert.deepEqual(await unauth.json(), { ok: true });
+
+  const response = await hub.fetch(new Request('https://hub.example/api/health', {
+    headers: { authorization: 'Bearer shh' }
+  }));
   const health = await response.json();
   assert.equal(response.status, 200);
   assert.equal(health.runtime, 'cloudflare-worker');

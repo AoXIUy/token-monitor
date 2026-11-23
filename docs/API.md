@@ -4,11 +4,11 @@ The hub exposes a small JSON HTTP API.
 
 ## Authentication
 
-Authentication requirements differ between the Node hub and the Cloudflare Worker. `/api/health` is always unauthenticated, and the Worker can also serve `GET /api/public/stats` without a secret when `PUBLIC_STATS_ENABLED=1` (see [the Worker README](../worker/README.md)); every other data endpoint requires the shared secret when the runtime has one configured.
+Authentication requirements apply across both the Node hub and the Cloudflare Worker. `GET /api/health` is always available without authentication (returning a minimal `{ "ok": true }` payload when unauthenticated and full deployment/build metadata when authenticated), and the Worker can also serve `GET /api/public/stats` without a secret when `PUBLIC_STATS_ENABLED=1` (see [the Worker README](../worker/README.md)); every other data endpoint requires authentication.
 
-A Node hub with no secret configured (neither `TOKEN_MONITOR_SECRET` nor the `secret` CLI argument) authorizes every request but binds to loopback only, so it is not reachable from other devices. A Worker without a secret refuses every other data route with `503`.
+Without a configured secret, both the Cloudflare Worker and the Node hub refuse protected routes with `503` (`{ "error": "secret_required" }`). On the Node hub, an unauthenticated loopback-only instance requires explicit opt-in via `--allow-insecure-local-no-auth` (`TOKEN_MONITOR_ALLOW_INSECURE_LOCAL_NO_AUTH=1`), and non-loopback binds require a secret of at least 24 characters. The Node hub also supports optional scoped tokens (`TOKEN_MONITOR_READ_SECRET`, `TOKEN_MONITOR_INGEST_SECRET`, `TOKEN_MONITOR_ADMIN_SECRET`), per-IP authentication failure rate limiting (`429` with `Retry-After`), `Host` header validation, and native HTTPS (`--tls-cert`/`--tls-key` or `--tls-pfx` with zero-downtime `SIGHUP`/file-watch reload and HSTS).
 
-Prefer a header (first-party clients already do this):
+Send the secret in a request header:
 
 ```http
 Authorization: Bearer <secret>
@@ -20,13 +20,13 @@ or:
 X-Token-Monitor-Secret: <secret>
 ```
 
-The Node hub is header-only. The Cloudflare Worker still accepts `?secret=` as a limited compatibility / migration path for iOS widget runtimes that cannot set `Authorization`. A secret in the URL can appear in proxy, platform, and history logs; new clients should send a header.
+The Node hub is header-only. On the Cloudflare Worker, `?secret=` is disabled by default and only accepted on `GET` / `HEAD /api/stats` when `ALLOW_QUERY_SECRET=1` is explicitly enabled for legacy widget runtimes that cannot set `Authorization`.
 
 During Node Hub shutdown, new requests are rejected with `503`, `{ "error": "hub_stopping" }` and `Connection: close`, including requests completed on previously connected sockets. A client still sending a request body may instead observe a closed or reset connection before it receives the response. Already-admitted uploads can finish during the drain period; remaining HTTP connections are force-closed after a five-second timer target. Pending usage is saved before and after draining. This lifecycle response does not apply to the Cloudflare Worker.
 
 ## `GET /api/health`
 
-Health check. Does not require authentication.
+Health check (`GET` or `HEAD`; other methods return `405`). Unauthenticated callers receive `{ "ok": true }`. Authenticated callers receive full deployment and build metadata (`role`, `runtime`, `deployment`, `version`, `hubBuild`, `deviceCount`, `secretRequired`, `tls`, `now`).
 
 Node Hubs may report a top-level `deployment` field. `app` identifies an instance started by Token Monitor's Host mode, and `standalone` identifies an instance started by the standalone command. Clients display the generic Node Hub label when the value is missing or unrecognized. The `runtime` and `hubBuild.runtime` values for both deployments are `node-hub`.
 

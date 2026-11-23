@@ -1182,7 +1182,7 @@ test('Hub HTTP API mode forwards all 9 query tools, push_to_openclaw, and preser
       openclaw: {
         enabled: true,
         mode: 'generic-webhook',
-        webhookUrl: 'http://127.0.0.1:18789/hooks/agent',
+        webhookUrl: 'https://oc.mock.local/hooks/agent',
         hookToken: 'mcp-oc-tok',
         queryPermissions: { allowSessionDetail: false, allowConversationText: false }
       }
@@ -1248,11 +1248,16 @@ test('Hub HTTP API mode forwards all 9 query tools, push_to_openclaw, and preser
   assert.equal(byId.get(11).result.structuredContent.ok, true);
   assert.ok(webhookPosts.some((p) => p.body.event === 'token_monitor.query_digest'));
 
+  // Remote HTTP PUT cannot escalate queryPermissions; host-side config update enables allowSessionDetail.
   await fetch(`${baseUrl}/api/reports/integrations`, {
     method: 'PUT',
     headers: auth,
-    body: JSON.stringify({ openclaw: { queryPermissions: { allowSessionDetail: true, allowConversationText: false } } })
+    body: JSON.stringify({ openclaw: { queryPermissions: { allowSessionDetail: true, allowConversationText: true } } })
   });
+  hub.updateIntegrationsConfig(
+    { openclaw: { queryPermissions: { allowSessionDetail: true, allowConversationText: false } } },
+    { allowQueryPermissionMutation: true }
+  );
   const waitConvDenied = collectNdjsonMessages(output, (m) => m.length >= 1);
   input.write(`${JSON.stringify({
     jsonrpc: '2.0',

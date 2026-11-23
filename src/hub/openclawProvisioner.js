@@ -12,6 +12,41 @@ const { normalizeWeixinAccountId } = require('../shared/openclawWeixinQr');
 const DEFAULT_OPENCLAW_GATEWAY_PORT = 18789;
 const DEFAULT_OPENCLAW_HOOKS_PATH = '/hooks';
 const DEFAULT_OPENCLAW_CHANNEL = 'openclaw-weixin';
+const AGENT_ID_RE = /^[a-zA-Z0-9._-]{1,64}$/;
+const UNSAFE_WIN_PATH_RE = /[&|<>^()%!\r\n"]/;
+
+/**
+ * Validate OpenClaw agentId strictly against a safe identifier allowlist.
+ * @param {any} value
+ * @returns {string | null}
+ */
+function normalizeAgentId(value) {
+  if (value === undefined || value === null || value === '') return 'main';
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return 'main';
+  return AGENT_ID_RE.test(trimmed) ? trimmed : null;
+}
+
+/**
+ * Scrub secret tokens or raw CLI details from provisioning warnings.
+ * @param {string} text
+ * @param {string[]} [secrets]
+ * @returns {string}
+ */
+function sanitizeProvisionWarning(text, secrets = []) {
+  let out = String(text || '').replace(/[\r\n]+/g, ' ').trim();
+  for (const secret of secrets) {
+    if (typeof secret === 'string' && secret.trim().length >= 4) {
+      out = out.split(secret.trim()).join('[REDACTED]');
+    }
+  }
+  out = out
+    .replace(/\bBearer\s+[^\s,'";]+/gi, 'Bearer [REDACTED]')
+    .replace(/\b(sk-[a-zA-Z0-9_-]{6,})\b/g, '[REDACTED]')
+    .replace(/("token"\s*:\s*")[^"]+(")/gi, '$1[REDACTED]$2');
+  return out.length > 200 ? `${out.slice(0, 197)}...` : out;
+}
 
 /**
  * @param {any} value
@@ -199,20 +234,36 @@ function parseOpenClawJson5(rawText) {
 function writePrivateJsonAtomic(filePath, value, fsApi = fs) {
   const dir = path.dirname(filePath);
   fsApi.mkdirSync(dir, { recursive: true, ...(process.platform === 'win32' ? {} : { mode: 0o700 }) });
-  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  const content = `${JSON.stringify(value, null, 2)}\n`;
-  if (process.platform === 'win32') {
-    fsApi.writeFileSync(tmpPath, content, 'utf8');
-  } else {
-    const fd = fsApi.openSync(tmpPath, fsApi.constants.O_WRONLY | fsApi.constants.O_CREAT | fsApi.constants.O_TRUNC, 0o600);
-    try {
-      fsApi.writeFileSync(fd, content, 'utf8');
-      fsApi.fchmodSync(fd, 0o600);
-    } finally {
-      fsApi.closeSync(fd);
-    }
+  if (process.platform !== 'win32' && typeof fsApi.chmodSync === 'function') {
+    try { fsApi.chmodSync(dir, 0o700); } catch {}
   }
-  fsApi.renameSync(tmpPath, filePath);
+  const tmpPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  const content = `${JSON.stringify(value, null, 2)}\n`;
+  let fd = -1;
+  try {
+    if (process.platform === 'win32') {
+      fsApi.writeFileSync(tmpPath, content, { encoding: 'utf8', flag: 'wx' });
+    } else {
+      const flags = (fsApi.constants?.O_WRONLY ?? 0) | (fsApi.constants?.O_CREAT ?? 0) | (fsApi.constants?.O_EXCL ?? 0);
+      fd = fsApi.openSync(tmpPath, flags || 'wx', 0o600);
+      fsApi.writeFileSync(fd, content, 'utf8');
+      if (typeof fsApi.fchmodSync === 'function') {
+        try { fsApi.fchmodSync(fd, 0o600); } catch {}
+      }
+      if (typeof fsApi.fsyncSync === 'function') {
+        try { fsApi.fsyncSync(fd); } catch {}
+      }
+      fsApi.closeSync(fd);
+      fd = -1;
+    }
+    fsApi.renameSync(tmpPath, filePath);
+  } catch (error) {
+    if (fd >= 0) {
+      try { fsApi.closeSync(fd); } catch {}
+    }
+    try { fsApi.unlinkSync(tmpPath); } catch {}
+    throw error;
+  }
 }
 
 /**
@@ -417,7 +468,8 @@ function sanitizeLocalBridgeDetection(info) {
 
 /**
  * Inspect local OpenClaw installation, plugin status, hooks, gateway reachability,
- * and bound WeChat accounts. Never returns raw tokens.
+ * and bound WeChat accounts. Never returns raw tokens. Absolute host paths
+ * (`stateDir`, `cliPath`) are omitted unless `includePaths: true` is explicitly passed.
  * @param {{
  *   env?: NodeJS.ProcessEnv,
  *   fsApi?: typeof import('node:fs'),
@@ -426,13 +478,15 @@ function sanitizeLocalBridgeDetection(info) {
  *   probePort?: (port: number) => Promise<boolean>,
  *   cliPath?: string | null,
  *   localBridge?: any,
- *   mcpEndpoint?: string | null
+ *   mcpEndpoint?: string | null,
+ *   includePaths?: boolean
  * }} [options]
  */
 async function detectOpenClawEnvironment(options = {}) {
   const env = options.env || process.env;
   const fsApi = options.fsApi || fs;
   const homeDir = options.homeDir || os.homedir();
+  const includePaths = options.includePaths === true;
   const stateDir = resolveOpenClawStateDir(env, homeDir);
   const stateDirExists = fsApi.existsSync(stateDir);
   const cfgInfo = readOpenClawConfigFile(stateDir, fsApi);
@@ -486,12 +540,12 @@ async function detectOpenClawEnvironment(options = {}) {
 
   return {
     ok: true,
-    stateDir,
+    ...(includePaths ? { stateDir } : {}),
     stateDirExists,
     configExists: cfgInfo.exists,
-    configParseError: cfgInfo.parseError,
+    configParseError: cfgInfo.parseError ? 'invalid_openclaw_config' : null,
     cliInstalled,
-    cliPath: resolvedCli || null,
+    ...(includePaths ? { cliPath: resolvedCli || null } : {}),
     pluginInstalled,
     pluginEnabled,
     hooksEnabled,
@@ -668,31 +722,31 @@ function persistWeixinBinding(binding, options = {}) {
 }
 
 /**
- * Quote a single argument safely for Windows cmd.exe when invoking `.cmd`/`.bat` shims.
- * @param {string} arg
- * @returns {string}
- */
-function quoteWinCmdArg(arg) {
-  const s = String(arg);
-  if (!/[\s"&|<>^()%!]/u.test(s)) return s;
-  return `"${s.replace(/"/g, '\\"')}"`;
-}
-
-/**
+ * Invoke the OpenClaw CLI strictly with fixed, non-user-controlled arguments
+ * (only `gateway restart` is supported). Never interpolates user strings or secrets.
  * @param {string} cliPath
  * @param {string[]} args
  * @param {{ env?: NodeJS.ProcessEnv, timeoutMs?: number }} [options]
  * @returns {Promise<{ stdout: string, stderr: string }>}
  */
 function defaultExecFile(cliPath, args, options = {}) {
+  const safeArgs = args.every((arg) => typeof arg === 'string' && /^[a-z0-9-]+$/i.test(arg));
+  if (!safeArgs) {
+    return Promise.reject(new Error('Refused to execute OpenClaw CLI with non-allowlisted arguments'));
+  }
   const isWinBatch = process.platform === 'win32' && /\.(cmd|bat)$/i.test(cliPath);
   return new Promise((resolve, reject) => {
     if (isWinBatch) {
-      const cmdLine = [quoteWinCmdArg(cliPath), ...args.map(quoteWinCmdArg)].join(' ');
-      execFile('cmd.exe', ['/d', '/s', '/c', cmdLine], {
+      if (UNSAFE_WIN_PATH_RE.test(cliPath)) {
+        reject(new Error('Refused to invoke Windows batch CLI path containing shell metacharacters'));
+        return;
+      }
+      const cmdLine = `"${cliPath}" ${args.join(' ')}`;
+      execFile(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', cmdLine], {
         env: options.env || process.env,
         timeout: options.timeoutMs || 15_000,
-        windowsHide: true
+        windowsHide: true,
+        windowsVerbatimArguments: true
       }, (error, stdout, stderr) => {
         if (error) {
           error.stderr = stderr;
@@ -721,8 +775,9 @@ function defaultExecFile(cliPath, args, options = {}) {
 }
 
 /**
- * Configure local OpenClaw `openclaw.json` (enable plugin + hooks + reload marker),
- * install the bundled `skills/openclaw-token-monitor/` skill, and optionally restart Gateway.
+ * Configure local OpenClaw `openclaw.json` directly via private atomic write
+ * (never passing secrets or user strings through CLI/shell arguments), install
+ * the bundled `skills/openclaw-token-monitor/` skill, and optionally restart Gateway.
  * @param {{
  *   ensureHooks?: boolean,
  *   installSkill?: boolean,
@@ -742,7 +797,8 @@ function defaultExecFile(cliPath, args, options = {}) {
  *   probePort?: (port: number) => Promise<boolean>,
  *   cliPath?: string | null,
  *   localBridge?: any,
- *   mcpEndpoint?: string | null
+ *   mcpEndpoint?: string | null,
+ *   includePaths?: boolean
  * }} [runtimeOptions]
  */
 async function configureOpenClawHost(configOptions = {}, runtimeOptions = {}) {
@@ -757,7 +813,25 @@ async function configureOpenClawHost(configOptions = {}, runtimeOptions = {}) {
   const installSkill = configOptions.installSkill !== false;
   const restartGateway = configOptions.restartGateway === true;
   const bumpChannelReload = configOptions.bumpChannelReload !== false;
-  const targetAgentId = String(configOptions.agentId || 'main').trim() || 'main';
+  const targetAgentId = normalizeAgentId(configOptions.agentId);
+  if (!targetAgentId) {
+    return {
+      ok: false,
+      error: 'invalid_agent_id',
+      message: 'Invalid agentId: expected 1-64 alphanumeric, dot, underscore, or hyphen characters.',
+      env: null,
+      resolvedHookToken: '',
+      webhookUrl: '',
+      steps: {
+        hooksConfigured: false,
+        pluginEnabled: false,
+        channelReloadBumped: false,
+        skillInstalled: false,
+        gatewayRestarted: false
+      },
+      warnings: []
+    };
+  }
 
   /** @type {string[]} */
   const warnings = [];
@@ -779,9 +853,12 @@ async function configureOpenClawHost(configOptions = {}, runtimeOptions = {}) {
   const existingToken = typeof existingHooks.token === 'string' ? existingHooks.token.trim() : '';
   const requestedToken = typeof configOptions.hookToken === 'string' ? configOptions.hookToken.trim() : '';
   const resolvedHookToken = requestedToken || existingToken || crypto.randomBytes(24).toString('hex');
+  const secretsToScrub = [requestedToken, existingToken, resolvedHookToken].filter(Boolean);
   const hooksPath = normalizeHooksPath(existingHooks.path);
   const existingAllowed = Array.isArray(existingHooks.allowedAgentIds)
-    ? existingHooks.allowedAgentIds.filter((/** @type {any} */ id) => typeof id === 'string' && id.trim())
+    ? existingHooks.allowedAgentIds
+      .filter((/** @type {any} */ id) => typeof id === 'string' && AGENT_ID_RE.test(id.trim()))
+      .map((/** @type {string} */ id) => id.trim())
     : [];
   const mergedAllowed = existingAllowed.includes(targetAgentId)
     ? existingAllowed
@@ -789,73 +866,38 @@ async function configureOpenClawHost(configOptions = {}, runtimeOptions = {}) {
 
   if (ensureHooks || bumpChannelReload) {
     const updatedTimestamp = now().toISOString();
-    let updatedViaCli = false;
-
-    if (resolvedCli) {
-      try {
-        /** @type {Array<[string, any]>} */
-        const pairs = [];
-        if (bumpChannelReload) {
-          pairs.push([`channels["${DEFAULT_OPENCLAW_CHANNEL}"].channelConfigUpdatedAt`, updatedTimestamp]);
-        }
-        if (ensureHooks) {
-          pairs.push([`plugins.entries["${DEFAULT_OPENCLAW_CHANNEL}"].enabled`, true]);
-          pairs.push(['hooks.enabled', true]);
-          pairs.push(['hooks.path', hooksPath]);
-          pairs.push(['hooks.token', resolvedHookToken]);
-          pairs.push(['hooks.allowedAgentIds', mergedAllowed]);
-        }
-        for (const [keyPath, value] of pairs) {
-          await execImpl(resolvedCli, ['config', 'set', keyPath, JSON.stringify(value), '--strict-json'], {
-            env,
-            timeoutMs: 10_000
-          });
-        }
-        updatedViaCli = true;
-        if (bumpChannelReload) steps.channelReloadBumped = true;
-        if (ensureHooks) {
-          steps.hooksConfigured = true;
-          steps.pluginEnabled = true;
-        }
-      } catch (error) {
-        warnings.push(`openclaw config set failed: ${error instanceof Error ? error.message : String(error)}`);
+    if (cfgInfo.exists && cfgInfo.parseError) {
+      warnings.push('Could not parse existing openclaw.json; left untouched.');
+    } else {
+      const nextCfg = isPlainObject(cfgInfo.parsed) ? JSON.parse(JSON.stringify(cfgInfo.parsed)) : {};
+      if (bumpChannelReload) {
+        nextCfg.channels = isPlainObject(nextCfg.channels) ? nextCfg.channels : {};
+        const ch = isPlainObject(nextCfg.channels[DEFAULT_OPENCLAW_CHANNEL])
+          ? nextCfg.channels[DEFAULT_OPENCLAW_CHANNEL]
+          : {};
+        ch.channelConfigUpdatedAt = updatedTimestamp;
+        nextCfg.channels[DEFAULT_OPENCLAW_CHANNEL] = ch;
+        steps.channelReloadBumped = true;
       }
-    }
+      if (ensureHooks) {
+        nextCfg.plugins = isPlainObject(nextCfg.plugins) ? nextCfg.plugins : {};
+        nextCfg.plugins.entries = isPlainObject(nextCfg.plugins.entries) ? nextCfg.plugins.entries : {};
+        const entry = isPlainObject(nextCfg.plugins.entries[DEFAULT_OPENCLAW_CHANNEL])
+          ? nextCfg.plugins.entries[DEFAULT_OPENCLAW_CHANNEL]
+          : {};
+        entry.enabled = true;
+        nextCfg.plugins.entries[DEFAULT_OPENCLAW_CHANNEL] = entry;
 
-    if (!updatedViaCli) {
-      if (cfgInfo.exists && cfgInfo.parseError) {
-        warnings.push(`Could not parse existing openclaw.json (${cfgInfo.parseError}); left untouched.`);
-      } else {
-        const nextCfg = isPlainObject(cfgInfo.parsed) ? JSON.parse(JSON.stringify(cfgInfo.parsed)) : {};
-        if (bumpChannelReload) {
-          nextCfg.channels = isPlainObject(nextCfg.channels) ? nextCfg.channels : {};
-          const ch = isPlainObject(nextCfg.channels[DEFAULT_OPENCLAW_CHANNEL])
-            ? nextCfg.channels[DEFAULT_OPENCLAW_CHANNEL]
-            : {};
-          ch.channelConfigUpdatedAt = updatedTimestamp;
-          nextCfg.channels[DEFAULT_OPENCLAW_CHANNEL] = ch;
-          steps.channelReloadBumped = true;
-        }
-        if (ensureHooks) {
-          nextCfg.plugins = isPlainObject(nextCfg.plugins) ? nextCfg.plugins : {};
-          nextCfg.plugins.entries = isPlainObject(nextCfg.plugins.entries) ? nextCfg.plugins.entries : {};
-          const entry = isPlainObject(nextCfg.plugins.entries[DEFAULT_OPENCLAW_CHANNEL])
-            ? nextCfg.plugins.entries[DEFAULT_OPENCLAW_CHANNEL]
-            : {};
-          entry.enabled = true;
-          nextCfg.plugins.entries[DEFAULT_OPENCLAW_CHANNEL] = entry;
+        nextCfg.hooks = isPlainObject(nextCfg.hooks) ? nextCfg.hooks : {};
+        nextCfg.hooks.enabled = true;
+        nextCfg.hooks.path = hooksPath;
+        nextCfg.hooks.token = resolvedHookToken;
+        nextCfg.hooks.allowedAgentIds = mergedAllowed;
 
-          nextCfg.hooks = isPlainObject(nextCfg.hooks) ? nextCfg.hooks : {};
-          nextCfg.hooks.enabled = true;
-          nextCfg.hooks.path = hooksPath;
-          nextCfg.hooks.token = resolvedHookToken;
-          nextCfg.hooks.allowedAgentIds = mergedAllowed;
-
-          steps.hooksConfigured = true;
-          steps.pluginEnabled = true;
-        }
-        writePrivateJsonAtomic(cfgInfo.path, nextCfg, fsApi);
+        steps.hooksConfigured = true;
+        steps.pluginEnabled = true;
       }
+      writePrivateJsonAtomic(cfgInfo.path, nextCfg, fsApi);
     }
   }
 
@@ -870,7 +912,7 @@ async function configureOpenClawHost(configOptions = {}, runtimeOptions = {}) {
     if (skillRes.skillInstalled) {
       steps.skillInstalled = true;
     } else if (skillRes.warning) {
-      warnings.push(skillRes.warning);
+      warnings.push(sanitizeProvisionWarning(skillRes.warning, secretsToScrub));
     }
   }
 
@@ -880,7 +922,11 @@ async function configureOpenClawHost(configOptions = {}, runtimeOptions = {}) {
         await execImpl(resolvedCli, ['gateway', 'restart'], { env, timeoutMs: 15_000 });
         steps.gatewayRestarted = true;
       } catch (error) {
-        warnings.push(`openclaw gateway restart failed: ${error instanceof Error ? error.message : String(error)}`);
+        const code = typeof (/** @type {any} */ (error)?.code) === 'string' ? /** @type {any} */ (error).code : '';
+        warnings.push(sanitizeProvisionWarning(
+          code ? `openclaw gateway restart failed (${code})` : 'openclaw gateway restart failed',
+          secretsToScrub
+        ));
       }
     } else {
       warnings.push('openclaw CLI was not found on PATH; cannot restart OpenClaw Gateway automatically.');
@@ -895,7 +941,8 @@ async function configureOpenClawHost(configOptions = {}, runtimeOptions = {}) {
     probePort: runtimeOptions.probePort,
     cliPath: resolvedCli,
     localBridge: runtimeOptions.localBridge,
-    mcpEndpoint: runtimeOptions.mcpEndpoint
+    mcpEndpoint: runtimeOptions.mcpEndpoint,
+    includePaths: runtimeOptions.includePaths === true
   });
 
   return {
@@ -908,7 +955,10 @@ async function configureOpenClawHost(configOptions = {}, runtimeOptions = {}) {
   };
 }
 
+const inspectOpenClawEnvironment = detectOpenClawEnvironment;
+
 module.exports = {
+  AGENT_ID_RE,
   DEFAULT_OPENCLAW_CHANNEL,
   DEFAULT_OPENCLAW_GATEWAY_PORT,
   DEFAULT_OPENCLAW_HOOKS_PATH,
@@ -916,13 +966,16 @@ module.exports = {
   deriveRawAccountId,
   detectOpenClawEnvironment,
   findOpenClawCli,
+  inspectOpenClawEnvironment,
   installOpenClawSkill,
   listBoundWeixinAccounts,
+  normalizeAgentId,
   normalizeJson5ToJson,
   parseOpenClawJson5,
   persistWeixinBinding,
   probeGatewayPort,
   readLocalWeixinTokens,
   readOpenClawHookSecrets,
-  resolveOpenClawStateDir
+  resolveOpenClawStateDir,
+  sanitizeProvisionWarning
 };

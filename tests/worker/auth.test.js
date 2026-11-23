@@ -80,30 +80,36 @@ test('Worker accepts Bearer and x-token-monitor-secret on stats and ingest', asy
   assert.equal((await ingest({ authorization: 'Bearer nope' })).status, 401);
 });
 
-test('Worker keeps query secret as a compatibility path and prefers a header', async () => {
-  const hub = await hubDO();
+test('Worker disables query secret by default and scopes ALLOW_QUERY_SECRET=1 strictly to GET/HEAD /api/stats', async () => {
+  const defaultHub = await hubDO();
+  assert.equal((await defaultHub.fetch(request('https://hub.example/api/stats?secret=shh'))).status, 401);
+  assert.equal((await defaultHub.fetch(request('https://hub.example/api/devices?secret=shh'))).status, 401);
+  assert.equal((await defaultHub.fetch(request('https://hub.example/api/history?secret=shh'))).status, 401);
+  assert.equal((await defaultHub.fetch(request('https://hub.example/api/ingest?secret=shh', {
+    'content-type': 'application/json'
+  }, { method: 'POST', body: JSON.stringify({ deviceId: 'dev-q', today: { totalTokens: 2 } }) }))).status, 401);
 
-  assert.equal((await hub.fetch(request('https://hub.example/api/stats?secret=shh'))).status, 200);
-  assert.equal((await hub.fetch(request('https://hub.example/api/devices?secret=shh'))).status, 200);
-  assert.equal((await hub.fetch(request('https://hub.example/api/history?secret=shh'))).status, 200);
-  assert.equal((await hub.fetch(request('https://hub.example/api/stats?secret=nope'))).status, 401);
-  assert.equal((await hub.fetch(request('https://hub.example/api/stats?secret='))).status, 401);
+  const optInHub = await hubDO({ TOKEN_MONITOR_SECRET: 'shh', ALLOW_QUERY_SECRET: '1' });
+  assert.equal((await optInHub.fetch(request('https://hub.example/api/stats?secret=shh'))).status, 200);
+  assert.equal((await optInHub.fetch(request('https://hub.example/api/stats?secret=shh', {}, { method: 'HEAD' }))).status, 200);
+  assert.equal((await optInHub.fetch(request('https://hub.example/api/stats?secret=nope'))).status, 401);
+  assert.equal((await optInHub.fetch(request('https://hub.example/api/stats?secret='))).status, 401);
 
-  const ingest = await hub.fetch(request('https://hub.example/api/ingest?secret=shh', {
+  // Even with ALLOW_QUERY_SECRET=1, other routes and mutating methods stay header-only.
+  assert.equal((await optInHub.fetch(request('https://hub.example/api/devices?secret=shh'))).status, 401);
+  assert.equal((await optInHub.fetch(request('https://hub.example/api/history?secret=shh'))).status, 401);
+  const ingest = await optInHub.fetch(request('https://hub.example/api/ingest?secret=shh', {
     'content-type': 'application/json'
   }, { method: 'POST', body: JSON.stringify({ deviceId: 'dev-q', today: { totalTokens: 2 } }) }));
-  assert.equal(ingest.status, 200);
+  assert.equal(ingest.status, 401);
 
-  assert.equal((await hub.fetch(request('https://hub.example/api/stats?secret=shh', {
+  // Header always takes precedence over query secret.
+  assert.equal((await optInHub.fetch(request('https://hub.example/api/stats?secret=shh', {
     authorization: 'Bearer nope'
   }))).status, 401);
-  assert.equal((await hub.fetch(request('https://hub.example/api/stats?secret=shh', {
+  assert.equal((await optInHub.fetch(request('https://hub.example/api/stats?secret=shh', {
     'x-token-monitor-secret': 'nope'
   }))).status, 401);
-  assert.equal((await hub.fetch(request('https://hub.example/api/ingest?secret=shh', {
-    'content-type': 'application/json',
-    authorization: 'Bearer nope'
-  }, { method: 'POST', body: JSON.stringify({ deviceId: 'dev-x' }) }))).status, 401);
 });
 
 test('Worker rejects a wrong, empty, or length-mismatched header secret', async () => {

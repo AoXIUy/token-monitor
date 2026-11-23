@@ -274,12 +274,24 @@ test('Worker rejects a merged record above its storage budget without writing th
   assert.equal(Object.keys((await hub.device()).periods.month.sessions).length, 15000);
 });
 
-test('Worker counts the storage key against the Durable Object budget', async t => {
+test('Worker validates deviceId length and enforces the Durable Object storage budget across merges', async t => {
   const hub = await backend('Worker', t);
-  const deviceId = 'd'.repeat(1200000);
+  const send = body => hub.send('https://hub.invalid/api/ingest', {
+    method: 'POST', headers: hub.headers, body
+  });
+
+  // Oversized deviceId is rejected immediately as invalid_device_id.
+  const oversizedId = await send(JSON.stringify({
+    ...summaryForUpload({ sessions: 0 }),
+    deviceId: 'd'.repeat(1200000)
+  }));
+  assert.equal(oversizedId.status, 400);
+  assert.equal((await oversizedId.json()).error, 'invalid_device_id');
+
+  const deviceId = 'd'.repeat(128);
   const payload = client => {
     const base = summaryForUpload({ sessions: 0 });
-    const sessions = Object.fromEntries(Array.from({ length: 4500 }, (_, index) => [
+    const sessions = Object.fromEntries(Array.from({ length: 8000 }, (_, index) => [
       `${client}:s${index}`,
       { client, sessionId: `s${index}`, totalTokens: 1 }
     ]));
@@ -287,19 +299,16 @@ test('Worker counts the storage key against the Durable Object budget', async t 
       ...base,
       deviceId,
       trackedClients: [client],
-      month: { ...base.month, sessions, totalTokens: 4500, clients: { [client]: 4500 } }
+      month: { ...base.month, sessions, totalTokens: 8000, clients: { [client]: 8000 } }
     };
   };
-  const send = body => hub.send('https://hub.invalid/api/ingest', {
-    method: 'POST', headers: hub.headers, body
-  });
 
   for (const client of ['claude', 'codex']) {
     const accepted = await send(JSON.stringify(payload(client)));
     assert.equal(accepted.status, 200);
   }
   const before = await hub.device();
-  assert.equal(Object.keys(before.periods.month.sessions).length, 9000);
+  assert.equal(Object.keys(before.periods.month.sessions).length, 16000);
 
   const rejected = await send(JSON.stringify(payload('gemini')));
   assert.equal(rejected.status, 413);

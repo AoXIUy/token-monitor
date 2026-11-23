@@ -8,6 +8,12 @@ const { URLSearchParams } = require('node:url');
 
 const { parseArgs, projectRoot, readJson } = require('../shared/config');
 const {
+  createHubClientFetch,
+  isInsecureRemoteHttpUrl,
+  readClientCaFile,
+  readPrivateSecretFile
+} = require('../shared/hubClientFetch');
+const {
   createMcpReportServer,
   JSON_RPC_ERRORS,
   sanitizeLimitsHistoryPayload,
@@ -90,6 +96,10 @@ function unwrapReportObject(result) {
  *   mode: 'hub' | 'local',
  *   hubUrl: string,
  *   secret: string,
+ *   secretFile: string,
+ *   secretFromArgv: boolean,
+ *   caCertPath: string,
+ *   requireHttps: boolean,
  *   dataFile: string,
  *   reportsDir: string,
  *   timeZone: string,
@@ -110,10 +120,23 @@ function resolveMcpServerOptions(options = {}) {
   const cliReportsDir = nonEmptyString(args['reports-dir'] ?? args.reportsDir);
   const envReportsDir = nonEmptyString(env.TOKEN_MONITOR_REPORTS_DIR);
   const cliSecret = nonEmptyString(args.secret);
+  const cliSecretFile = nonEmptyString(args['secret-file'] ?? args.secretFile);
   const envSecret = nonEmptyString(env.TOKEN_MONITOR_SECRET);
+  const envSecretFile = nonEmptyString(env.TOKEN_MONITOR_SECRET_FILE);
+  const cliCaCertPath = nonEmptyString(args['ca-cert'] ?? args.caCert);
+  const envCaCertPath = nonEmptyString(env.TOKEN_MONITOR_CA_CERT);
+  const rawRequireHttps = args['require-https'] ?? args.requireHttps ?? env.TOKEN_MONITOR_REQUIRE_HTTPS;
+  const requireHttps = rawRequireHttps === true
+    || /^(?:1|true|yes|on)$/i.test(String(rawRequireHttps ?? '').trim());
   const cliTimeZone = nonEmptyString(args['time-zone'] ?? args.timeZone);
   const envTimeZone = nonEmptyString(env.TOKEN_MONITOR_TIME_ZONE);
   const cliLocal = args.local === true || String(args.local || '').toLowerCase() === 'true';
+
+  const secretFile = cliSecretFile || envSecretFile;
+  const secret = cliSecret
+    || (cliSecretFile ? readPrivateSecretFile(cliSecretFile) : '')
+    || envSecret
+    || (envSecretFile ? readPrivateSecretFile(envSecretFile) : '');
 
   /** @type {'hub' | 'local'} */
   let mode;
@@ -141,7 +164,11 @@ function resolveMcpServerOptions(options = {}) {
     help,
     mode,
     hubUrl: (cliHubUrl || envHubUrl || DEFAULT_HUB_URL).replace(/\/+$/, ''),
-    secret: cliSecret || envSecret,
+    secret,
+    secretFile,
+    secretFromArgv: Boolean(cliSecret),
+    caCertPath: cliCaCertPath || envCaCertPath,
+    requireHttps,
     dataFile: resolvedDataFile,
     reportsDir: resolvedReportsDir,
     timeZone: cliTimeZone || envTimeZone,
@@ -154,16 +181,31 @@ function resolveMcpServerOptions(options = {}) {
  * @param {object} [options]
  * @param {string} [options.hubUrl]
  * @param {string} [options.secret]
+ * @param {string} [options.caCertPem]
+ * @param {string} [options.caCertPath]
+ * @param {boolean} [options.requireHttps]
  * @param {number} [options.requestTimeoutMs]
  * @param {typeof globalThis.fetch} [options.fetchImpl]
  */
 function createHubBackendAdapter(options = {}) {
   const baseUrl = (nonEmptyString(options.hubUrl) || DEFAULT_HUB_URL).replace(/\/+$/, '');
   const secret = nonEmptyString(options.secret);
+  const requireHttps = options.requireHttps === true;
+  if (requireHttps && isInsecureRemoteHttpUrl(baseUrl)) {
+    throw Object.assign(
+      new Error('Refusing plain HTTP connection to non-loopback Hub because --require-https / TOKEN_MONITOR_REQUIRE_HTTPS is enabled.'),
+      { code: 'insecure_http_blocked' }
+    );
+  }
   const timeoutMs = Number.isFinite(Number(options.requestTimeoutMs)) && Number(options.requestTimeoutMs) > 0
     ? Number(options.requestTimeoutMs)
     : DEFAULT_REQUEST_TIMEOUT_MS;
-  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  const caCertPem = nonEmptyString(options.caCertPem)
+    || (nonEmptyString(options.caCertPath) ? readClientCaFile(nonEmptyString(options.caCertPath)).caCertPem : '');
+  const ownedFetch = options.fetchImpl
+    ? null
+    : createHubClientFetch({ caCertPem, requireHttps, defaultTimeoutMs: timeoutMs });
+  const fetchImpl = options.fetchImpl || /** @type {any} */ (ownedFetch);
 
   if (typeof fetchImpl !== 'function') {
     throw new Error('Global fetch is unavailable; Node 22+ is required.');
@@ -192,6 +234,7 @@ function createHubBackendAdapter(options = {}) {
       response = await fetchImpl(url, {
         method,
         headers,
+        redirect: 'error',
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         signal: AbortSignal.timeout(timeoutMs)
       });
@@ -246,6 +289,11 @@ function createHubBackendAdapter(options = {}) {
 
   return {
     mode: /** @type {const} */ ('hub'),
+    destroy: async () => {
+      if (ownedFetch && typeof ownedFetch.destroy === 'function') {
+        await ownedFetch.destroy();
+      }
+    },
 
     /**
      * @param {{ granularity?: string, limit?: number }} [args]
@@ -1324,6 +1372,9 @@ function createLocalBackendAdapter(options = {}) {
  * @param {'hub' | 'local'} [options.mode]
  * @param {string} [options.hubUrl]
  * @param {string} [options.secret]
+ * @param {string} [options.caCertPem]
+ * @param {string} [options.caCertPath]
+ * @param {boolean} [options.requireHttps]
  * @param {number} [options.requestTimeoutMs]
  * @param {typeof globalThis.fetch} [options.fetchImpl]
  * @param {string} [options.dataFile]
@@ -1373,6 +1424,9 @@ function createBackendAdapter(options = {}) {
   return createHubBackendAdapter({
     hubUrl: options.hubUrl,
     secret: options.secret,
+    caCertPem: /** @type {any} */ (options).caCertPem,
+    caCertPath: /** @type {any} */ (options).caCertPath,
+    requireHttps: /** @type {any} */ (options).requireHttps,
     requestTimeoutMs: options.requestTimeoutMs,
     fetchImpl: options.fetchImpl
   });
@@ -1681,6 +1735,9 @@ function createStdioMcpTransport({
  * @param {'hub' | 'local'} [options.mode]
  * @param {string} [options.hubUrl]
  * @param {string} [options.secret]
+ * @param {string} [options.caCertPem]
+ * @param {string} [options.caCertPath]
+ * @param {boolean} [options.requireHttps]
  * @param {number} [options.requestTimeoutMs]
  * @param {typeof globalThis.fetch} [options.fetchImpl]
  * @param {string} [options.dataFile]
@@ -1699,11 +1756,24 @@ function startMcpServer(options = {}) {
     env: options.env
   });
 
+  const stderr = options.stderr || process.stderr;
   const mode = options.mode || resolved.mode;
+  const effectiveHubUrl = options.hubUrl ?? resolved.hubUrl;
+  const effectiveRequireHttps = options.requireHttps ?? resolved.requireHttps;
+  if (resolved.secretFromArgv) {
+    stderr.write('[mcp] Warning: passing --secret on the command line exposes it in process listings. Prefer TOKEN_MONITOR_SECRET or --secret-file.\n');
+  }
+  if (mode === 'hub' && isInsecureRemoteHttpUrl(effectiveHubUrl) && !effectiveRequireHttps) {
+    stderr.write(`[mcp] Warning: Hub URL (${effectiveHubUrl}) uses plain HTTP on a non-loopback host. Use https:// (and --ca-cert if self-signed) or --require-https.\n`);
+  }
+
   const backend = createBackendAdapter({
     mode,
-    hubUrl: options.hubUrl ?? resolved.hubUrl,
+    hubUrl: effectiveHubUrl,
     secret: options.secret ?? resolved.secret,
+    caCertPem: options.caCertPem,
+    caCertPath: options.caCertPath ?? resolved.caCertPath,
+    requireHttps: effectiveRequireHttps,
     requestTimeoutMs: options.requestTimeoutMs,
     fetchImpl: options.fetchImpl,
     dataFile: options.dataFile ?? resolved.dataFile,
@@ -1767,6 +1837,9 @@ function startMcpServer(options = {}) {
       process.off(signal, handler);
     }
     signalListeners.length = 0;
+    try {
+      await /** @type {any} */ (backend).destroy?.();
+    } catch (_) {}
     return transport.stop();
   }
 
@@ -1803,8 +1876,11 @@ function printUsage(stderr = process.stderr) {
     '  node src/mcp/server.js [options]',
     '',
     'Hub HTTP mode (default):',
-    '  --hub-url <url>      Hub base URL (default: TOKEN_MONITOR_HUB_URL or http://127.0.0.1:17321)',
-    '  --secret <token>     Bearer secret (default: TOKEN_MONITOR_SECRET)',
+    '  --hub-url <url>        Hub base URL (default: TOKEN_MONITOR_HUB_URL or http://127.0.0.1:17321)',
+    '  --secret <token>       Bearer secret (default: TOKEN_MONITOR_SECRET)',
+    '  --secret-file <path>   Read bearer secret from a 0600 file (default: TOKEN_MONITOR_SECRET_FILE)',
+    '  --ca-cert <path>       Custom CA certificate PEM/DER for HTTPS Hub (default: TOKEN_MONITOR_CA_CERT)',
+    '  --require-https        Refuse plain HTTP to non-loopback Hub (default: TOKEN_MONITOR_REQUIRE_HTTPS)',
     '',
     'Local store direct mode:',
     '  --local              Read local devices.json and reports directory directly',

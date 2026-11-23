@@ -379,11 +379,21 @@ test('Hub /api/query/*, privacy gates, OpenClaw push/history, approval alerts, a
   assert.equal(detailBlocked.status, 403);
   assert.equal((await detailBlocked.json()).error, 'session_detail_disabled');
 
+  // Remote HTTP PUT /api/reports/integrations cannot mutate queryPermissions (V-10)
   await fetch(`${baseUrl}/api/reports/integrations`, {
     method: 'PUT',
     headers: { ...auth, 'content-type': 'application/json' },
-    body: JSON.stringify({ openclaw: { queryPermissions: { allowSessionDetail: true, allowConversationText: false } } })
+    body: JSON.stringify({ openclaw: { queryPermissions: { allowSessionDetail: true, allowConversationText: true } } })
   });
+  const stillBlocked = await fetch(`${baseUrl}/api/query/session-detail?client=codex&sessionId=sess-main`, { headers: auth });
+  assert.equal(stillBlocked.status, 403);
+  assert.equal((await stillBlocked.json()).error, 'session_detail_disabled');
+
+  // Trusted host-side call updates queryPermissions explicitly
+  hub.updateIntegrationsConfig(
+    { openclaw: { queryPermissions: { allowSessionDetail: true, allowConversationText: false } } },
+    { allowQueryPermissionMutation: true }
+  );
 
   const convBlocked = await fetch(`${baseUrl}/api/query/session-detail?client=codex&sessionId=sess-main&includeConversation=true`, { headers: auth });
   assert.equal(convBlocked.status, 403);
@@ -414,11 +424,10 @@ test('Hub /api/query/*, privacy gates, OpenClaw push/history, approval alerts, a
   assert.equal(detailOk.conversation, undefined);
   assert.equal(detailOk.exchanges.length, 1);
 
-  await fetch(`${baseUrl}/api/reports/integrations`, {
-    method: 'PUT',
-    headers: { ...auth, 'content-type': 'application/json' },
-    body: JSON.stringify({ openclaw: { queryPermissions: { allowConversationText: true } } })
-  });
+  hub.updateIntegrationsConfig(
+    { openclaw: { queryPermissions: { allowConversationText: true } } },
+    { allowQueryPermissionMutation: true }
+  );
   contextTitlesEnabled = true;
   const detailWithConv = await (await fetch(`${baseUrl}/api/query/session-detail?client=codex&sessionId=sess-main&includeConversation=true`, { headers: auth })).json();
   assert.equal(detailWithConv.title, 'Private Detail Title');

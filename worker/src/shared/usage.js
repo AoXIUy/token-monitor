@@ -55,6 +55,15 @@ const SESSION_TEXT_KEYS = [
   'customTitle', 'custom_title', 'aiTitle', 'ai_title'
 ];
 const GUI_SECRET_LIMIT_PROVIDERS = new Set(['copilot', 'deepseek', 'factory', 'minimax']);
+const PROTOTYPE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function isSafeKey(key) {
+  return typeof key === 'string' && key.length > 0 && !PROTOTYPE_KEYS.has(key) && !PROTOTYPE_KEYS.has(key.toLowerCase());
+}
+
+function safeMapGet(map, key, fallback = 0) {
+  return map && hasOwn(map, key) ? map[key] : fallback;
+}
 
 function asNumber(value, fallback = 0) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -199,6 +208,7 @@ function stripSessionTextFromPeriod(period, { preserveSessionTitles = false } = 
   }
   const sessions = {};
   for (const [key, value] of Object.entries(period.sessions)) {
+    if (!isSafeKey(key)) continue;
     if (!value || typeof value !== 'object') {
       sessions[key] = value;
       continue;
@@ -346,7 +356,8 @@ function normalizeClientName(value) {
   let end = slug.length;
   while (start < end && slug[start] === '-') start += 1;
   while (end > start && slug[end - 1] === '-') end -= 1;
-  return slug.slice(start, end) || null;
+  const result = slug.slice(start, end);
+  return isSafeKey(result) ? result : null;
 }
 
 function detectClient(obj) {
@@ -356,7 +367,7 @@ function detectClient(obj) {
 
 function normalizeModelName(value) {
   const raw = String(value || '').trim().toLowerCase();
-  return raw || null;
+  return isSafeKey(raw) ? raw : null;
 }
 
 function normalizeModelNameForClient(value, client) {
@@ -373,12 +384,13 @@ function normalizeLatestModel(value, client) {
 
 function normalizeSessionId(value) {
   const raw = String(value || '').trim();
-  return raw || null;
+  return isSafeKey(raw) ? raw : null;
 }
 
 function normalizeProviderName(value) {
   const raw = String(value || '').trim().toLowerCase();
-  return raw.replace(/[^a-z0-9_-]+/g, '-') || null;
+  const slug = raw.replace(/[^a-z0-9_-]+/g, '-');
+  return isSafeKey(slug) ? slug : null;
 }
 
 function hasOwn(object, key) {
@@ -399,7 +411,7 @@ function addProjectModels(project, models, tokenLimit) {
   let remaining = Math.max(0, Math.round(asNumber(tokenLimit)));
   const entries = Object.entries(models).sort(([left], [right]) => left.localeCompare(right));
   for (const [rawModel, value] of entries) {
-    const model = normalizeModelName(rawModel);
+    const model = String(rawModel || '').trim().toLowerCase() || null;
     if (!model || remaining <= 0) continue;
     const tokens = Math.min(remaining, Math.max(0, Math.round(asNumber(value))));
     if (tokens <= 0) continue;
@@ -478,7 +490,8 @@ function addProjectInto(projects, rawKey, source) {
   addUnpricedTokens(target, source, tokens);
   addProjectModels(target, source.models, tokens);
   for (const [client, tokens] of Object.entries(source.clients || {})) {
-    const clientKey = normalizeClientName(client);
+    const rawClient = String(client || '').trim().toLowerCase();
+    const clientKey = normalizeClientName(client) || (PROTOTYPE_KEYS.has(rawClient) ? rawClient : null);
     if (!clientKey) continue;
     target.clients[clientKey] = (hasOwn(target.clients, clientKey) ? target.clients[clientKey] : 0)
       + Math.max(0, Math.round(asNumber(tokens)));
@@ -835,15 +848,15 @@ function mergeSession(target, source, now) {
   }
   for (const [model, tokens] of Object.entries(source.models || {})) {
     const key = normalizeModelNameForClient(model, target.client);
-    if (key) target.models[key] = (target.models[key] || 0) + Math.max(0, Math.round(asNumber(tokens)));
+    if (key) target.models[key] = safeMapGet(target.models, key) + Math.max(0, Math.round(asNumber(tokens)));
   }
   for (const [model, cost] of Object.entries(source.modelCosts || {})) {
     const key = normalizeModelNameForClient(model, target.client);
-    if (key) target.modelCosts[key] = (target.modelCosts[key] || 0) + asNumber(cost);
+    if (key) target.modelCosts[key] = safeMapGet(target.modelCosts, key) + asNumber(cost);
   }
   for (const [provider, tokens] of Object.entries(source.providers || {})) {
     const key = normalizeProviderName(provider);
-    if (key) target.providers[key] = (target.providers[key] || 0) + Math.max(0, Math.round(asNumber(tokens)));
+    if (key) target.providers[key] = safeMapGet(target.providers, key) + Math.max(0, Math.round(asNumber(tokens)));
   }
   const sourceArchived = source.archived === true || source.deleted === true || source.sourceDeleted === true;
   if (!sourceArchived) {
@@ -858,8 +871,8 @@ function mergeSession(target, source, now) {
 function addSession(period, session, now) {
   if (!session?.client || !session?.sessionId || isReasonixSyntheticSession(session)) return;
   const key = sessionKey(session.client, session.sessionId);
-  if (isReasonixSyntheticSession(session, key)) return;
-  if (!period.sessions[key]) period.sessions[key] = emptySession(session.client, session.sessionId);
+  if (!isSafeKey(key) || isReasonixSyntheticSession(session, key)) return;
+  if (!hasOwn(period.sessions, key)) period.sessions[key] = emptySession(session.client, session.sessionId);
   mergeSession(period.sessions[key], session, now);
 }
 
@@ -956,13 +969,13 @@ function normalizeSession(input, fallbackKey) {
   if (input.models && typeof input.models === 'object') {
     for (const [model, value] of Object.entries(input.models)) {
       const key = normalizeModelNameForClient(model, client);
-      if (key) session.models[key] = (session.models[key] || 0) + Math.max(0, Math.round(asNumber(value)));
+      if (key) session.models[key] = safeMapGet(session.models, key) + Math.max(0, Math.round(asNumber(value)));
     }
   }
   if (input.modelCosts && typeof input.modelCosts === 'object') {
     for (const [model, value] of Object.entries(input.modelCosts)) {
       const key = normalizeModelNameForClient(model, client);
-      if (key) session.modelCosts[key] = (session.modelCosts[key] || 0) + asNumber(value);
+      if (key) session.modelCosts[key] = safeMapGet(session.modelCosts, key) + asNumber(value);
     }
   }
   const modelComponents = normalizeSessionModelComponents(input.modelTokenComponents, session,
@@ -971,7 +984,7 @@ function normalizeSession(input, fallbackKey) {
   if (input.providers && typeof input.providers === 'object') {
     for (const [provider, value] of Object.entries(input.providers)) {
       const key = normalizeProviderName(provider);
-      if (key) session.providers[key] = (session.providers[key] || 0) + Math.max(0, Math.round(asNumber(value)));
+      if (key) session.providers[key] = safeMapGet(session.providers, key) + Math.max(0, Math.round(asNumber(value)));
     }
   }
   if (input.archived === true || input.deleted === true || input.sourceDeleted === true) session.archived = true;
@@ -1105,21 +1118,21 @@ function normalizePeriod(input, options = {}) {
     for (const [client, value] of Object.entries(input.clients)) {
       const key = normalizeClientName(client);
       if (key) {
-        period.clients[key] = (period.clients[key] || 0) + Math.max(0, Math.round(asNumber(value)));
-        if (input.clientCacheReads?.[client]) period.clientCacheReads[key] = (period.clientCacheReads[key] || 0) + Math.max(0, Math.round(asNumber(input.clientCacheReads[client])));
-        if (input.clientCacheWrites?.[client]) period.clientCacheWrites[key] = (period.clientCacheWrites[key] || 0) + Math.max(0, Math.round(asNumber(input.clientCacheWrites[client])));
-        if (input.clientOutputs?.[client]) period.clientOutputs[key] = (period.clientOutputs[key] || 0) + Math.max(0, Math.round(asNumber(input.clientOutputs[client])));
+        period.clients[key] = safeMapGet(period.clients, key) + Math.max(0, Math.round(asNumber(value)));
+        if (hasOwn(input.clientCacheReads, client) && input.clientCacheReads[client]) period.clientCacheReads[key] = safeMapGet(period.clientCacheReads, key) + Math.max(0, Math.round(asNumber(input.clientCacheReads[client])));
+        if (hasOwn(input.clientCacheWrites, client) && input.clientCacheWrites[client]) period.clientCacheWrites[key] = safeMapGet(period.clientCacheWrites, key) + Math.max(0, Math.round(asNumber(input.clientCacheWrites[client])));
+        if (hasOwn(input.clientOutputs, client) && input.clientOutputs[client]) period.clientOutputs[key] = safeMapGet(period.clientOutputs, key) + Math.max(0, Math.round(asNumber(input.clientOutputs[client])));
         const known = Math.min(
           period.clients[key],
-          asNumber(period.clientCacheReads[key])
-            + asNumber(period.clientCacheWrites[key])
-            + asNumber(period.clientOutputs[key])
+          asNumber(safeMapGet(period.clientCacheReads, key))
+            + asNumber(safeMapGet(period.clientCacheWrites, key))
+            + asNumber(safeMapGet(period.clientOutputs, key))
         );
         const hasExplicitUnclassified = hasOwn(input, 'clientUnclassifiedTokens');
         const unclassified = Math.min(
           period.clients[key] - known,
           Math.max(0, Math.round(asNumber(hasExplicitUnclassified
-            ? input.clientUnclassifiedTokens?.[client]
+            ? (hasOwn(input.clientUnclassifiedTokens, client) ? input.clientUnclassifiedTokens[client] : undefined)
             : (period.capabilities.tokenComponents ? 0 : period.clients[key] - known))))
         );
         if (unclassified > 0) period.clientUnclassifiedTokens[key] = unclassified;
@@ -1129,28 +1142,28 @@ function normalizePeriod(input, options = {}) {
   if (input.clientCosts && typeof input.clientCosts === 'object') {
     for (const [client, value] of Object.entries(input.clientCosts)) {
       const key = normalizeClientName(client);
-      if (key) period.clientCosts[key] = (period.clientCosts[key] || 0) + asNumber(value);
+      if (key) period.clientCosts[key] = safeMapGet(period.clientCosts, key) + asNumber(value);
     }
   }
   if (input.models && typeof input.models === 'object') {
     for (const [model, value] of Object.entries(input.models)) {
       const key = normalizeModelName(model);
       if (key) {
-        period.models[key] = (period.models[key] || 0) + Math.max(0, Math.round(asNumber(value)));
-        if (input.modelCacheReads?.[model]) period.modelCacheReads[key] = (period.modelCacheReads[key] || 0) + Math.max(0, Math.round(asNumber(input.modelCacheReads[model])));
-        if (input.modelCacheWrites?.[model]) period.modelCacheWrites[key] = (period.modelCacheWrites[key] || 0) + Math.max(0, Math.round(asNumber(input.modelCacheWrites[model])));
-        if (input.modelOutputs?.[model]) period.modelOutputs[key] = (period.modelOutputs[key] || 0) + Math.max(0, Math.round(asNumber(input.modelOutputs[model])));
+        period.models[key] = safeMapGet(period.models, key) + Math.max(0, Math.round(asNumber(value)));
+        if (hasOwn(input.modelCacheReads, model) && input.modelCacheReads[model]) period.modelCacheReads[key] = safeMapGet(period.modelCacheReads, key) + Math.max(0, Math.round(asNumber(input.modelCacheReads[model])));
+        if (hasOwn(input.modelCacheWrites, model) && input.modelCacheWrites[model]) period.modelCacheWrites[key] = safeMapGet(period.modelCacheWrites, key) + Math.max(0, Math.round(asNumber(input.modelCacheWrites[model])));
+        if (hasOwn(input.modelOutputs, model) && input.modelOutputs[model]) period.modelOutputs[key] = safeMapGet(period.modelOutputs, key) + Math.max(0, Math.round(asNumber(input.modelOutputs[model])));
         const known = Math.min(
           period.models[key],
-          asNumber(period.modelCacheReads[key])
-            + asNumber(period.modelCacheWrites[key])
-            + asNumber(period.modelOutputs[key])
+          asNumber(safeMapGet(period.modelCacheReads, key))
+            + asNumber(safeMapGet(period.modelCacheWrites, key))
+            + asNumber(safeMapGet(period.modelOutputs, key))
         );
         const hasExplicitUnclassified = hasOwn(input, 'modelUnclassifiedTokens');
         const unclassified = Math.min(
           period.models[key] - known,
           Math.max(0, Math.round(asNumber(hasExplicitUnclassified
-            ? input.modelUnclassifiedTokens?.[model]
+            ? (hasOwn(input.modelUnclassifiedTokens, model) ? input.modelUnclassifiedTokens[model] : undefined)
             : (period.capabilities.tokenComponents ? 0 : period.models[key] - known))))
         );
         if (unclassified > 0) period.modelUnclassifiedTokens[key] = unclassified;
@@ -1162,30 +1175,30 @@ function normalizePeriod(input, options = {}) {
   if (input.modelCosts && typeof input.modelCosts === 'object') {
     for (const [model, value] of Object.entries(input.modelCosts)) {
       const key = normalizeModelName(model);
-      if (key) period.modelCosts[key] = (period.modelCosts[key] || 0) + asNumber(value);
+      if (key) period.modelCosts[key] = safeMapGet(period.modelCosts, key) + asNumber(value);
     }
   }
   if (input.clientModels && typeof input.clientModels === 'object') {
     for (const [client, models] of Object.entries(input.clientModels)) {
       const clientKey = normalizeClientName(client);
-      if (!clientKey || !models || typeof models !== 'object') continue;
+      if (!clientKey || !models || typeof models !== 'object' || Array.isArray(models)) continue;
       for (const [model, value] of Object.entries(models)) {
         const modelKey = normalizeModelNameForClient(model, clientKey);
         if (!modelKey) continue;
-        if (!period.clientModels[clientKey]) period.clientModels[clientKey] = {};
-        period.clientModels[clientKey][modelKey] = (period.clientModels[clientKey][modelKey] || 0) + Math.max(0, Math.round(asNumber(value)));
+        if (!hasOwn(period.clientModels, clientKey)) period.clientModels[clientKey] = {};
+        period.clientModels[clientKey][modelKey] = safeMapGet(period.clientModels[clientKey], modelKey) + Math.max(0, Math.round(asNumber(value)));
       }
     }
   }
   if (input.clientModelCosts && typeof input.clientModelCosts === 'object') {
     for (const [client, models] of Object.entries(input.clientModelCosts)) {
       const clientKey = normalizeClientName(client);
-      if (!clientKey || !models || typeof models !== 'object') continue;
+      if (!clientKey || !models || typeof models !== 'object' || Array.isArray(models)) continue;
       for (const [model, value] of Object.entries(models)) {
         const modelKey = normalizeModelNameForClient(model, clientKey);
         if (!modelKey) continue;
-        if (!period.clientModelCosts[clientKey]) period.clientModelCosts[clientKey] = {};
-        period.clientModelCosts[clientKey][modelKey] = (period.clientModelCosts[clientKey][modelKey] || 0) + asNumber(value);
+        if (!hasOwn(period.clientModelCosts, clientKey)) period.clientModelCosts[clientKey] = {};
+        period.clientModelCosts[clientKey][modelKey] = safeMapGet(period.clientModelCosts[clientKey], modelKey) + asNumber(value);
       }
     }
   }
@@ -1224,7 +1237,7 @@ function normalizeModelThroughput(value, period) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const result = Object.create(null);
   for (const [model, counters] of Object.entries(value)) {
-    const key = normalizeModelName(model);
+    const key = String(model || '').trim().toLowerCase() || null;
     if (!key || !counters || typeof counters !== 'object' || Array.isArray(counters)
       || !['timedTokens', 'timedOutputTokens', 'timedDurationMs'].every((field) => hasOwn(counters, field))) continue;
     const durationMs = Math.max(0, Math.round(asNumber(counters.timedDurationMs)));
@@ -1297,26 +1310,26 @@ function addUsageRowToPeriod(period, row, detectedClient = detectClient(row)) {
     counters.timedDurationMs += timedDurationMs;
   }
   if (client && tokens > 0) {
-    period.clients[client] = (period.clients[client] || 0) + Math.round(tokens);
-    if (cacheRead > 0) period.clientCacheReads[client] = (period.clientCacheReads[client] || 0) + cacheRead;
-    if (cacheWrite > 0) period.clientCacheWrites[client] = (period.clientCacheWrites[client] || 0) + cacheWrite;
-    if (output > 0) period.clientOutputs[client] = (period.clientOutputs[client] || 0) + output;
+    period.clients[client] = safeMapGet(period.clients, client) + Math.round(tokens);
+    if (cacheRead > 0) period.clientCacheReads[client] = safeMapGet(period.clientCacheReads, client) + cacheRead;
+    if (cacheWrite > 0) period.clientCacheWrites[client] = safeMapGet(period.clientCacheWrites, client) + cacheWrite;
+    if (output > 0) period.clientOutputs[client] = safeMapGet(period.clientOutputs, client) + output;
   }
-  if (client && cost > 0) period.clientCosts[client] = (period.clientCosts[client] || 0) + cost;
+  if (client && cost > 0) period.clientCosts[client] = safeMapGet(period.clientCosts, client) + cost;
   if (model && tokens > 0) {
-    period.models[model] = (period.models[model] || 0) + Math.round(tokens);
-    if (cacheRead > 0) period.modelCacheReads[model] = (period.modelCacheReads[model] || 0) + cacheRead;
-    if (cacheWrite > 0) period.modelCacheWrites[model] = (period.modelCacheWrites[model] || 0) + cacheWrite;
-    if (output > 0) period.modelOutputs[model] = (period.modelOutputs[model] || 0) + output;
+    period.models[model] = safeMapGet(period.models, model) + Math.round(tokens);
+    if (cacheRead > 0) period.modelCacheReads[model] = safeMapGet(period.modelCacheReads, model) + cacheRead;
+    if (cacheWrite > 0) period.modelCacheWrites[model] = safeMapGet(period.modelCacheWrites, model) + cacheWrite;
+    if (output > 0) period.modelOutputs[model] = safeMapGet(period.modelOutputs, model) + output;
   }
-  if (model && cost > 0) period.modelCosts[model] = (period.modelCosts[model] || 0) + cost;
+  if (model && cost > 0) period.modelCosts[model] = safeMapGet(period.modelCosts, model) + cost;
   if (client && model && tokens > 0) {
-    if (!period.clientModels[client]) period.clientModels[client] = {};
-    period.clientModels[client][model] = (period.clientModels[client][model] || 0) + Math.round(tokens);
+    if (!hasOwn(period.clientModels, client)) period.clientModels[client] = {};
+    period.clientModels[client][model] = safeMapGet(period.clientModels[client], model) + Math.round(tokens);
   }
   if (client && model && cost > 0) {
-    if (!period.clientModelCosts[client]) period.clientModelCosts[client] = {};
-    period.clientModelCosts[client][model] = (period.clientModelCosts[client][model] || 0) + cost;
+    if (!hasOwn(period.clientModelCosts, client)) period.clientModelCosts[client] = {};
+    period.clientModelCosts[client][model] = safeMapGet(period.clientModelCosts[client], model) + cost;
   }
   const session = sessionFromRow(row);
   if (session) addSession(period, session);
@@ -1477,38 +1490,41 @@ function normalizeDeviceRecord(record, options = {}) {
 }
 
 function addClientModelUsage(target, source, client) {
-  const models = source.clientModels?.[client];
-  const costs = source.clientModelCosts?.[client];
+  if (!isSafeKey(client)) return;
+  const models = hasOwn(source.clientModels, client) ? source.clientModels[client] : null;
+  const costs = hasOwn(source.clientModelCosts, client) ? source.clientModelCosts[client] : null;
   for (const [model, tokens] of Object.entries(models || {})) {
-    target.models[model] = (target.models[model] || 0) + tokens;
-    if (!target.clientModels[client]) target.clientModels[client] = {};
-    target.clientModels[client][model] = (target.clientModels[client][model] || 0) + tokens;
+    if (!isSafeKey(model)) continue;
+    target.models[model] = safeMapGet(target.models, model) + tokens;
+    if (!hasOwn(target.clientModels, client)) target.clientModels[client] = {};
+    target.clientModels[client][model] = safeMapGet(target.clientModels[client], model) + tokens;
 
     // Model component maps are not client×model maps. They can be carried only
     // when this preserved client owns the whole source model bucket; otherwise
     // retain the model total and mark just that contribution unknown.
-    if (asNumber(source.models?.[model]) === asNumber(tokens)) {
-      const cacheRead = Math.min(tokens, asNumber(source.modelCacheReads?.[model]));
-      const cacheWrite = Math.min(tokens - cacheRead, asNumber(source.modelCacheWrites?.[model]));
-      const output = Math.min(tokens - cacheRead - cacheWrite, asNumber(source.modelOutputs?.[model]));
+    if (asNumber(safeMapGet(source.models, model)) === asNumber(tokens)) {
+      const cacheRead = Math.min(tokens, asNumber(safeMapGet(source.modelCacheReads, model)));
+      const cacheWrite = Math.min(tokens - cacheRead, asNumber(safeMapGet(source.modelCacheWrites, model)));
+      const output = Math.min(tokens - cacheRead - cacheWrite, asNumber(safeMapGet(source.modelOutputs, model)));
       const unclassified = Math.min(
         tokens - cacheRead - cacheWrite - output,
-        asNumber(source.modelUnclassifiedTokens?.[model])
+        asNumber(safeMapGet(source.modelUnclassifiedTokens, model))
       );
-      if (cacheRead > 0) target.modelCacheReads[model] = (target.modelCacheReads[model] || 0) + cacheRead;
-      if (cacheWrite > 0) target.modelCacheWrites[model] = (target.modelCacheWrites[model] || 0) + cacheWrite;
-      if (output > 0) target.modelOutputs[model] = (target.modelOutputs[model] || 0) + output;
-      if (unclassified > 0) target.modelUnclassifiedTokens[model] = (target.modelUnclassifiedTokens[model] || 0) + unclassified;
+      if (cacheRead > 0) target.modelCacheReads[model] = safeMapGet(target.modelCacheReads, model) + cacheRead;
+      if (cacheWrite > 0) target.modelCacheWrites[model] = safeMapGet(target.modelCacheWrites, model) + cacheWrite;
+      if (output > 0) target.modelOutputs[model] = safeMapGet(target.modelOutputs, model) + output;
+      if (unclassified > 0) target.modelUnclassifiedTokens[model] = safeMapGet(target.modelUnclassifiedTokens, model) + unclassified;
       if (unclassified > 0) target.capabilities.tokenComponents = false;
     } else if (tokens > 0) {
-      target.modelUnclassifiedTokens[model] = (target.modelUnclassifiedTokens[model] || 0) + tokens;
+      target.modelUnclassifiedTokens[model] = safeMapGet(target.modelUnclassifiedTokens, model) + tokens;
       target.capabilities.tokenComponents = false;
     }
   }
   for (const [model, cost] of Object.entries(costs || {})) {
-    target.modelCosts[model] = (target.modelCosts[model] || 0) + cost;
-    if (!target.clientModelCosts[client]) target.clientModelCosts[client] = {};
-    target.clientModelCosts[client][model] = (target.clientModelCosts[client][model] || 0) + cost;
+    if (!isSafeKey(model)) continue;
+    target.modelCosts[model] = safeMapGet(target.modelCosts, model) + cost;
+    if (!hasOwn(target.clientModelCosts, client)) target.clientModelCosts[client] = {};
+    target.clientModelCosts[client][model] = safeMapGet(target.clientModelCosts[client], model) + cost;
   }
 }
 
@@ -1907,32 +1923,44 @@ function addPeriodInto(target, source, copyNormalizedSessions = false) {
       for (const field of ['timedTokens', 'timedOutputTokens', 'timedDurationMs']) merged[field] += counters[field];
     }
   }
-  for (const [client, tokens] of Object.entries(source.clients)) {
-    target.clients[client] = (target.clients[client] || 0) + tokens;
-    if (source.clientCacheReads?.[client]) target.clientCacheReads[client] = (target.clientCacheReads[client] || 0) + source.clientCacheReads[client];
-    if (source.clientCacheWrites?.[client]) target.clientCacheWrites[client] = (target.clientCacheWrites[client] || 0) + source.clientCacheWrites[client];
-    if (source.clientOutputs?.[client]) target.clientOutputs[client] = (target.clientOutputs[client] || 0) + source.clientOutputs[client];
-    if (source.clientUnclassifiedTokens?.[client]) target.clientUnclassifiedTokens[client] = (target.clientUnclassifiedTokens[client] || 0) + source.clientUnclassifiedTokens[client];
+  for (const [client, tokens] of Object.entries(source.clients || {})) {
+    if (!isSafeKey(client)) continue;
+    target.clients[client] = safeMapGet(target.clients, client) + tokens;
+    if (hasOwn(source.clientCacheReads, client) && source.clientCacheReads[client]) target.clientCacheReads[client] = safeMapGet(target.clientCacheReads, client) + source.clientCacheReads[client];
+    if (hasOwn(source.clientCacheWrites, client) && source.clientCacheWrites[client]) target.clientCacheWrites[client] = safeMapGet(target.clientCacheWrites, client) + source.clientCacheWrites[client];
+    if (hasOwn(source.clientOutputs, client) && source.clientOutputs[client]) target.clientOutputs[client] = safeMapGet(target.clientOutputs, client) + source.clientOutputs[client];
+    if (hasOwn(source.clientUnclassifiedTokens, client) && source.clientUnclassifiedTokens[client]) target.clientUnclassifiedTokens[client] = safeMapGet(target.clientUnclassifiedTokens, client) + source.clientUnclassifiedTokens[client];
   }
-  for (const [client, cost] of Object.entries(source.clientCosts)) target.clientCosts[client] = (target.clientCosts[client] || 0) + cost;
-  for (const [model, tokens] of Object.entries(source.models)) {
-    target.models[model] = (target.models[model] || 0) + tokens;
-    if (source.modelCacheReads?.[model]) target.modelCacheReads[model] = (target.modelCacheReads[model] || 0) + source.modelCacheReads[model];
-    if (source.modelCacheWrites?.[model]) target.modelCacheWrites[model] = (target.modelCacheWrites[model] || 0) + source.modelCacheWrites[model];
-    if (source.modelOutputs?.[model]) target.modelOutputs[model] = (target.modelOutputs[model] || 0) + source.modelOutputs[model];
-    if (source.modelUnclassifiedTokens?.[model]) target.modelUnclassifiedTokens[model] = (target.modelUnclassifiedTokens[model] || 0) + source.modelUnclassifiedTokens[model];
+  for (const [client, cost] of Object.entries(source.clientCosts || {})) {
+    if (!isSafeKey(client)) continue;
+    target.clientCosts[client] = safeMapGet(target.clientCosts, client) + cost;
   }
-  for (const [model, cost] of Object.entries(source.modelCosts)) target.modelCosts[model] = (target.modelCosts[model] || 0) + cost;
-  for (const [client, models] of Object.entries(source.clientModels)) {
-    if (!target.clientModels[client]) target.clientModels[client] = {};
+  for (const [model, tokens] of Object.entries(source.models || {})) {
+    if (!isSafeKey(model)) continue;
+    target.models[model] = safeMapGet(target.models, model) + tokens;
+    if (hasOwn(source.modelCacheReads, model) && source.modelCacheReads[model]) target.modelCacheReads[model] = safeMapGet(target.modelCacheReads, model) + source.modelCacheReads[model];
+    if (hasOwn(source.modelCacheWrites, model) && source.modelCacheWrites[model]) target.modelCacheWrites[model] = safeMapGet(target.modelCacheWrites, model) + source.modelCacheWrites[model];
+    if (hasOwn(source.modelOutputs, model) && source.modelOutputs[model]) target.modelOutputs[model] = safeMapGet(target.modelOutputs, model) + source.modelOutputs[model];
+    if (hasOwn(source.modelUnclassifiedTokens, model) && source.modelUnclassifiedTokens[model]) target.modelUnclassifiedTokens[model] = safeMapGet(target.modelUnclassifiedTokens, model) + source.modelUnclassifiedTokens[model];
+  }
+  for (const [model, cost] of Object.entries(source.modelCosts || {})) {
+    if (!isSafeKey(model)) continue;
+    target.modelCosts[model] = safeMapGet(target.modelCosts, model) + cost;
+  }
+  for (const [client, models] of Object.entries(source.clientModels || {})) {
+    if (!isSafeKey(client) || !models || typeof models !== 'object' || Array.isArray(models)) continue;
+    if (!hasOwn(target.clientModels, client)) target.clientModels[client] = {};
     for (const [model, tokens] of Object.entries(models)) {
-      target.clientModels[client][model] = (target.clientModels[client][model] || 0) + tokens;
+      if (!isSafeKey(model)) continue;
+      target.clientModels[client][model] = safeMapGet(target.clientModels[client], model) + tokens;
     }
   }
-  for (const [client, models] of Object.entries(source.clientModelCosts)) {
-    if (!target.clientModelCosts[client]) target.clientModelCosts[client] = {};
+  for (const [client, models] of Object.entries(source.clientModelCosts || {})) {
+    if (!isSafeKey(client) || !models || typeof models !== 'object' || Array.isArray(models)) continue;
+    if (!hasOwn(target.clientModelCosts, client)) target.clientModelCosts[client] = {};
     for (const [model, cost] of Object.entries(models)) {
-      target.clientModelCosts[client][model] = (target.clientModelCosts[client][model] || 0) + cost;
+      if (!isSafeKey(model)) continue;
+      target.clientModelCosts[client][model] = safeMapGet(target.clientModelCosts[client], model) + cost;
     }
   }
   for (const [key, project] of Object.entries(source.projects || {})) addProjectInto(target.projects, key, project);
@@ -2116,20 +2144,29 @@ function reuseUnchangedSession(session) {
 }
 
 function copyStringMap(map) {
-  return map && typeof map === 'object' ? { ...map } : map;
+  if (!map || typeof map !== 'object') return map;
+  const copy = {};
+  for (const [key, value] of Object.entries(map)) {
+    if (isSafeKey(key)) copy[key] = value;
+  }
+  return copy;
 }
 
 function copyNullMap(map) {
   if (!map || typeof map !== 'object') return map;
   const copy = Object.create(null);
-  return Object.assign(copy, map);
+  for (const [key, value] of Object.entries(map)) {
+    copy[key] = value;
+  }
+  return copy;
 }
 
 function copyNestedMap(map) {
   if (!map || typeof map !== 'object') return map;
   const copy = {};
   for (const [key, value] of Object.entries(map)) {
-    copy[key] = value && typeof value === 'object' ? { ...value } : value;
+    if (!isSafeKey(key)) continue;
+    copy[key] = value && typeof value === 'object' ? copyStringMap(value) : value;
   }
   return copy;
 }
@@ -2362,10 +2399,11 @@ function deltaValue(base, fresh, anchor, key) {
       : new Set([...Object.keys(base || {}), ...Object.keys(fresh || {}), ...Object.keys(anchor || {})]);
     const result = Object.getPrototypeOf(sample) === null ? Object.create(null) : {};
     for (const childKey of keys) {
+      if (!isSafeKey(childKey)) continue;
       result[childKey] = deltaValue(
-        base ? base[childKey] : undefined,
-        fresh ? fresh[childKey] : undefined,
-        anchor ? anchor[childKey] : undefined,
+        base && hasOwn(base, childKey) ? base[childKey] : undefined,
+        fresh && hasOwn(fresh, childKey) ? fresh[childKey] : undefined,
+        anchor && hasOwn(anchor, childKey) ? anchor[childKey] : undefined,
         childKey
       );
     }

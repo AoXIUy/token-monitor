@@ -44,6 +44,7 @@ function fixture(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'tm-sse-backpressure-'));
   const hub = createHub({
     dataFile: path.join(directory, 'devices.json'),
+    allowInsecureLocalNoAuth: true,
     broadcastDelayMs: 10,
     persistIntervalMs: 300000,
     logger: { error() {} }

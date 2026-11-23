@@ -22,8 +22,13 @@ const MODE_STRUCTURAL_KEYS = Object.freeze([
   'hubMode',
   'hubUrl',
   'secret',
+  'hubHostBind',
   'hubHostPort',
   'hubHostSecret',
+  'hubHostTlsEnabled',
+  'hubHostTlsMode',
+  'hubHostTlsMinVersion',
+  'caFingerprintSha256',
   'deviceId'
 ]);
 const USAGE_STRUCTURAL_KEYS = Object.freeze([

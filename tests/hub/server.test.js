@@ -150,13 +150,19 @@ test('ingest, devices, and history share the same header gate', async () => {
   }
 });
 
-test('health exposes the Node Hub build identity and App deployment without authentication', async () => {
+test('health returns minimal status unauthenticated and exposes build identity when authenticated', async () => {
   const dataFile = tempDataFile();
   const hub = createHub({ port: 0, host: '127.0.0.1', deployment: 'app', secret: 'shh', dataFile, logger: { error() {}, warn() {} } });
   await hub.start();
   try {
     const { port } = hub.server.address();
-    const response = await fetch(`http://127.0.0.1:${port}/api/health`);
+    const unauth = await fetch(`http://127.0.0.1:${port}/api/health`);
+    assert.equal(unauth.status, 200);
+    assert.deepEqual(await unauth.json(), { ok: true });
+
+    const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
+      headers: { authorization: 'Bearer shh' }
+    });
     const health = await response.json();
     assert.equal(response.status, 200);
     assert.equal(health.runtime, 'node-hub');
@@ -164,6 +170,7 @@ test('health exposes the Node Hub build identity and App deployment without auth
     assert.equal(health.hubBuild.runtime, 'node-hub');
     assert.match(health.hubBuild.coreBuildId, /^sha256:[a-f0-9]{64}$/);
     assert.match(health.hubBuild.runtimeBuildId, /^sha256:[a-f0-9]{64}$/);
+    assert.deepEqual(health.tls, { enabled: false });
   } finally {
     await hub.stop();
     fs.rmSync(dataFile, { force: true });
@@ -337,7 +344,9 @@ test('a subscription write is announced on the stats stream, carrying the new ve
 
 test('oversized ingest returns 413 without storing the device', async () => {
   const dataFile = tempDataFile();
-  const hub = createHub({ port: 0, host: '127.0.0.1', secret: '', dataFile, logger: { error() {} } });
+  const hub = createHub({
+    port: 0, host: '127.0.0.1', secret: '', allowInsecureLocalNoAuth: true, dataFile, logger: { error() {} }
+  });
   await hub.start();
   try {
     const { port } = hub.server.address();
@@ -362,7 +371,9 @@ test('oversized ingest returns 413 without storing the device', async () => {
 
 test('ingest accepts payloads above the legacy 256 KiB limit', async () => {
   const dataFile = tempDataFile();
-  const hub = createHub({ port: 0, host: '127.0.0.1', secret: '', dataFile, logger: { error() {} } });
+  const hub = createHub({
+    port: 0, host: '127.0.0.1', secret: '', allowInsecureLocalNoAuth: true, dataFile, logger: { error() {} }
+  });
   await hub.start();
   try {
     const { port } = hub.server.address();
@@ -493,16 +504,18 @@ test('a malformed subscription write is refused instead of emptying the ledger',
   }
 });
 
-test('the hub advertises PUT so a browser preflight does not block the write', async () => {
+test('the hub does not advertise wildcard CORS headers on preflight requests', async () => {
   const dataFile = tempDataFile();
   const hub = createHub({ port: 0, host: '127.0.0.1', secret: 'shh', dataFile, logger: { error() {}, warn() {} } });
   await hub.start();
   try {
     const { port } = hub.server.address();
-    // The endpoint existing is not enough: a browser-origin client is stopped at
-    // the preflight if the method is not advertised.
     const preflight = await fetch(`http://127.0.0.1:${port}/api/subscriptions`, { method: 'OPTIONS' });
-    assert.match(preflight.headers.get('access-control-allow-methods') || '', /\bPUT\b/);
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('access-control-allow-origin'), null);
+    assert.equal(preflight.headers.get('access-control-allow-methods'), null);
+    assert.equal(preflight.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(preflight.headers.get('x-frame-options'), 'DENY');
   } finally {
     await hub.stop();
     fs.rmSync(dataFile, { force: true });
@@ -525,21 +538,22 @@ test('back-to-back writes each get their own concurrency token', () => {
   }
 });
 
-test('a subscription write that cannot reach disk does not take effect in memory', async () => {
+test('a subscription write that cannot reach disk does not take effect in memory', async (t) => {
   const dataFile = tempDataFile();
   const hub = createHub({ port: 0, host: '127.0.0.1', secret: 'shh', dataFile, logger: { error() {}, warn() {} } });
   try {
     const record = (id) => ({ id, provider: 'codex', startDate: '2026-05-31', currency: 'USD' });
     const written = hub.setSubscriptions([record('a')], '');
 
-    // A directory where the temp file belongs makes the atomic write fail. If
-    // memory moved anyway, this process would serve a record the file does not
-    // have and a restart would silently revert it.
-    fs.mkdirSync(`${dataFile}.tmp`, { recursive: true });
+    const realRename = fs.renameSync;
+    const blocked = t.mock.method(fs, 'renameSync', (src, dst) => {
+      if (dst === dataFile) throw new Error('synthetic disk write failure');
+      return realRename(src, dst);
+    });
     try {
       assert.throws(() => hub.setSubscriptions([record('a'), record('b')], written.updatedAt));
     } finally {
-      fs.rmSync(`${dataFile}.tmp`, { recursive: true, force: true });
+      blocked.mock.restore();
     }
     assert.deepEqual(hub.getSubscriptions().subscriptions.map((entry) => entry.id), ['a']);
     assert.equal(hub.getSubscriptions().updatedAt, written.updatedAt);
@@ -868,7 +882,7 @@ test('SSE subscribers receive identical frames and delete/subscription writes st
 test('SSE skips empty fan-out and isolates a throwing response from later clients', async () => {
   const { EventEmitter } = require('node:events');
   const dataFile = tempDataFile();
-  const hub = createHub({ dataFile, logger: { error() {} } });
+  const hub = createHub({ dataFile, allowInsecureLocalNoAuth: true, logger: { error() {} } });
   const responses = [];
   const spy = spyTypedStringify();
   try {
@@ -890,10 +904,12 @@ test('SSE skips empty fan-out and isolates a throwing response from later client
       assert.equal(res.frames.length, 1);
       res.frames.length = 0;
     }
+    hub.ingest({ deviceId: 'dev-1', today: { totalTokens: 1 } });
+    hub.ingest({ deviceId: 'dev-2', today: { totalTokens: 1 } });
     let failedWrites = 0;
     responses[0].write = () => { failedWrites += 1; throw new Error('closed response'); };
     for (let count = 1; count <= 2; count += 1) {
-      hub.deleteDevice('missing');
+      hub.deleteDevice(`dev-${count}`);
       assert.equal(failedWrites, 1);
       for (const res of responses.slice(1)) {
         assert.equal(res.frames.length, count);

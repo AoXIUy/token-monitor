@@ -1494,6 +1494,16 @@
                       <button id="secretPasteButton" type="button" class="icon-button" aria-label="Paste secret" data-i18n-aria-label="settings.sync.pasteSecret">⎘</button>
                     </div>
                   </div>
+                  <div id="hubClientHttpWarning" class="hub-status hub-warning" role="status" hidden data-i18n="settings.sync.clientHttpWarning">Plain HTTP to a non-loopback Hub transmits secrets and usage data unencrypted. Prefer https://.</div>
+                  <div id="hubClientCaField" class="settings-field hub-ca-field">
+                    <label data-i18n="settings.sync.clientCaTitle">Custom CA Certificate</label>
+                    <div id="hubClientCaSummary" class="settings-note" data-i18n="settings.sync.clientCaSystem">Using system trust store</div>
+                    <div class="settings-actions">
+                      <button id="hubClientCaImportButton" type="button" data-i18n="settings.sync.clientCaImport">Import CA…</button>
+                      <button id="hubClientCaClearButton" type="button" data-i18n="settings.sync.clientCaClear" hidden>Clear CA</button>
+                    </div>
+                    <div id="hubClientCaError" class="hub-status error" role="alert" hidden></div>
+                  </div>
                 </div>
                 <div id="hubBuildStatus" class="hub-status hub-build-status sync-map-notice" role="status" hidden></div>
               </div>
@@ -1516,6 +1526,38 @@
                     </div>
                   </div>
                   <label class="sync-port-field"><span data-i18n="settings.sync.port">Port</span><input id="hubPortInput" type="number" min="1" max="65535" spellcheck="false" /></label>
+                  <label class="sync-bind-field"><span data-i18n="settings.sync.bindHost">Bind address</span>
+                    <select id="hubHostBindInput">
+                      <option value="0.0.0.0" data-i18n="settings.sync.bindAll">All interfaces (0.0.0.0)</option>
+                      <option value="127.0.0.1" data-i18n="settings.sync.bindLoopback">This machine only (127.0.0.1)</option>
+                    </select>
+                  </label>
+                  <div id="hubHostHttpWarning" class="hub-status hub-warning" role="status" hidden data-i18n="settings.sync.hostHttpWarning">Hub is listening on all network interfaces over plain HTTP. Enable HTTPS/TLS or restrict bind address to 127.0.0.1 behind a TLS reverse proxy.</div>
+                  <div id="hubHostTlsSection" class="settings-field hub-tls-section">
+                    <label class="checkbox-label settings-item">
+                      <span class="settings-item-text">
+                        <span class="settings-item-title" data-i18n="settings.sync.hostTlsTitle">HTTPS / TLS</span>
+                        <span id="hubHostTlsStatus" class="settings-item-desc" data-i18n="settings.sync.hostTlsDisabled">Disabled (plain HTTP)</span>
+                      </span>
+                      <input id="hubHostTlsEnabledInput" type="checkbox" />
+                    </label>
+                    <div id="hubHostTlsCertInfo" class="settings-note" hidden></div>
+                    <div class="hub-secret-row">
+                      <select id="hubHostTlsModeSelect" aria-label="TLS certificate storage mode">
+                        <option value="managed" data-i18n="settings.sync.hostTlsModeManaged">Managed copy</option>
+                        <option value="path" data-i18n="settings.sync.hostTlsModePath">External file path (ACME)</option>
+                      </select>
+                      <input id="hubHostTlsPassphraseInput" type="password" spellcheck="false" placeholder="Optional key / PKCS#12 passphrase" data-i18n-placeholder="settings.sync.hostTlsPassphrasePlaceholder" />
+                    </div>
+                    <div class="settings-actions">
+                      <button id="hubHostTlsImportPemButton" type="button" data-i18n="settings.sync.hostTlsImportPem">Import PEM…</button>
+                      <button id="hubHostTlsImportPfxButton" type="button" data-i18n="settings.sync.hostTlsImportPfx">Import PKCS#12…</button>
+                      <button id="hubHostTlsReloadButton" type="button" data-i18n="settings.sync.hostTlsReload" hidden>Reload cert</button>
+                      <button id="hubHostTlsExportCertButton" type="button" data-i18n="settings.sync.hostTlsExportCert" hidden>Export public cert</button>
+                      <button id="hubHostTlsClearButton" type="button" data-i18n="settings.sync.hostTlsClear" hidden>Clear TLS</button>
+                    </div>
+                    <div id="hubHostTlsMessage" class="hub-status" role="status" hidden></div>
+                  </div>
                   <p class="settings-note" data-i18n="settings.sync.hostNote">Other devices connect using one of the URLs above with the shared secret. For cross-network use, run Tailscale or ZeroTier on both sides - the virtual IP works the same.</p>
                 </div>
               </div>

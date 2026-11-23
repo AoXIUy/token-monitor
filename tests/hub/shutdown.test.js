@@ -14,7 +14,14 @@ const { createHub } = require('../../src/hub/server');
 function fixture(t, options = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'tm-shutdown-'));
   const dataFile = path.join(directory, 'devices.json');
-  const hub = createHub({ port: 0, host: '127.0.0.1', dataFile, persistIntervalMs: 300000, ...options });
+  const hub = createHub({
+    port: 0,
+    host: '127.0.0.1',
+    allowInsecureLocalNoAuth: true,
+    dataFile,
+    persistIntervalMs: 300000,
+    ...options
+  });
   const sockets = [];
   t.after(async () => {
     for (const socket of sockets) socket.destroy();
@@ -225,11 +232,11 @@ test('a failed pre-drain save is retried at final flush', async (t) => {
   const errors = [];
   const { hub, dataFile, read } = fixture(t, { logger: { error: (...args) => errors.push(args) } });
   hub.ingest({ deviceId: 'accepted', today: { totalTokens: 42 } });
-  const write = fs.writeFileSync;
+  const rename = fs.renameSync;
   let attempts = 0;
-  const mocked = t.mock.method(fs, 'writeFileSync', (file, ...args) => {
-    if (file === `${dataFile}.tmp` && ++attempts === 1) throw new Error('synthetic transient write failure');
-    return write(file, ...args);
+  const mocked = t.mock.method(fs, 'renameSync', (src, dst) => {
+    if (dst === dataFile && ++attempts === 1) throw new Error('synthetic transient write failure');
+    return rename(src, dst);
   });
   try {
     await hub.stop();
@@ -244,10 +251,10 @@ test('a failed pre-drain save is retried at final flush', async (t) => {
 test('a final save failure rejects stop and a later stop can retry without losing pending data', async (t) => {
   const { hub, dataFile, read } = fixture(t, { logger: { error() {} } });
   hub.ingest({ deviceId: 'accepted', today: { totalTokens: 42 } });
-  const write = fs.writeFileSync;
-  const mocked = t.mock.method(fs, 'writeFileSync', (file, ...args) => {
-    if (file === `${dataFile}.tmp`) throw new Error('synthetic persistent write failure');
-    return write(file, ...args);
+  const rename = fs.renameSync;
+  const mocked = t.mock.method(fs, 'renameSync', (src, dst) => {
+    if (dst === dataFile) throw new Error('synthetic persistent write failure');
+    return rename(src, dst);
   });
   try {
     await assert.rejects(hub.stop(), /synthetic persistent write failure/);
@@ -261,10 +268,10 @@ test('a final save failure rejects stop and a later stop can retry without losin
 test('restarting after a failed stop schedules retained pending data without another ingest', async (t) => {
   const { hub, dataFile, read } = fixture(t, { logger: { error() {} } });
   hub.ingest({ deviceId: 'accepted', today: { totalTokens: 42 } });
-  const write = fs.writeFileSync;
-  const mocked = t.mock.method(fs, 'writeFileSync', (file, ...args) => {
-    if (file === `${dataFile}.tmp`) throw new Error('synthetic persistent write failure');
-    return write(file, ...args);
+  const rename = fs.renameSync;
+  const mocked = t.mock.method(fs, 'renameSync', (src, dst) => {
+    if (dst === dataFile) throw new Error('synthetic persistent write failure');
+    return rename(src, dst);
   });
   try {
     await assert.rejects(hub.stop(), /synthetic persistent write failure/);

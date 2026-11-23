@@ -575,6 +575,7 @@ test('Hub OpenClaw QR login & provisioning endpoints bind WeChat, persist creden
     port: 0,
     host: '127.0.0.1',
     secret: 'hub-qr-secret',
+    allowRemoteAdmin: true,
     dataFile: path.join(dir, 'devices.json'),
     reportsDir: path.join(dir, 'reports'),
     integrationFetch,
@@ -837,7 +838,19 @@ test('createIntegrationManager supports deep config merge, idempotency retry/ded
   assert.equal(deniedDetail.ok, false);
   assert.equal(deniedDetail.error, 'session_detail_disabled');
 
-  manager.updateConfig({ openclaw: { queryPermissions: { allowSessionDetail: true, allowConversationText: false } } });
+  // Unprivileged updateConfig must ignore queryPermissions mutations (V-10)
+  manager.updateConfig({ openclaw: { queryPermissions: { allowSessionDetail: true, allowConversationText: true } } });
+  const stillDeniedDetail = await manager.pushQueryToOpenClaw({
+    type: 'session_detail',
+    params: { client: 'codex', sessionId: 's1' }
+  });
+  assert.equal(stillDeniedDetail.ok, false);
+  assert.equal(stillDeniedDetail.error, 'session_detail_disabled');
+
+  manager.updateConfig(
+    { openclaw: { queryPermissions: { allowSessionDetail: true, allowConversationText: false } } },
+    { allowQueryPermissionMutation: true }
+  );
   const deniedConv = await manager.pushQueryToOpenClaw({
     type: 'session_detail',
     params: { client: 'codex', sessionId: 's1', includeConversation: true }

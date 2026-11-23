@@ -22,6 +22,8 @@ const LIMIT_FAILURE_KINDS = new Set([
   'http', 'challenge', 'timeout', 'network', 'response', 'error', 'not-returned', 'stale-windows'
 ]);
 const NETWORK_PROXY_SOURCES = new Set(['setting', 'environment', 'system', 'invalid']);
+const HUB_TLS_MODES = new Set(['none', 'managed', 'path']);
+const HUB_TLS_CERT_STATES = new Set(['none', 'valid', 'expiring-soon', 'expired', 'error']);
 
 const CLIENT_STATES = new Set(['healthy', 'waiting', 'attention', 'unavailable', 'unknown']);
 const COLLECTION_STATES = new Set(['direct', 'idle', 'pending', 'ok', 'failed', 'unknown']);
@@ -824,7 +826,16 @@ function sanitizeDiagnosticSnapshot(input = {}) {
         streamState: text(input.hub?.runtime?.streamState),
         hubStatsCacheAgeSeconds: input.hub?.runtime?.hubStatsCacheAgeSeconds === 'not-applicable'
           ? 'not-applicable'
-          : integer(input.hub?.runtime?.hubStatsCacheAgeSeconds, null)
+          : integer(input.hub?.runtime?.hubStatsCacheAgeSeconds, null),
+        hubHostTlsEnabled: input.hub?.runtime?.hubHostTlsEnabled === true,
+        hubHostTlsMode: safeChoice(input.hub?.runtime?.hubHostTlsMode, HUB_TLS_MODES, 'none'),
+        hubHostTlsMinVersion: input.hub?.runtime?.hubHostTlsMinVersion === 'TLSv1.3'
+          ? 'TLSv1.3'
+          : input.hub?.runtime?.hubHostTlsMinVersion === 'TLSv1.2'
+            ? 'TLSv1.2'
+            : 'none',
+        hubHostTlsCertState: safeChoice(input.hub?.runtime?.hubHostTlsCertState, HUB_TLS_CERT_STATES, 'none'),
+        hubClientCustomCaConfigured: input.hub?.runtime?.hubClientCustomCaConfigured === true
       },
       devices: sanitizeHubDevices(input.hub?.devices || {})
     },

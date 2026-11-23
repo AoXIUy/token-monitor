@@ -28,14 +28,14 @@ test('createWeixinQrLoginManager handles iLink headers, redirect, verify_code, r
   let statusQueue = [
     { status: 'wait' },
     { status: 'scaned' },
-    { status: 'scaned_but_redirect', redirect_host: 'idc2.weixin.local' },
+    { status: 'scaned_but_redirect', redirect_host: 'idc2.weixin.qq.com' },
     { status: 'need_verifycode' },
     { status: 'need_verifycode' },
     {
       status: 'confirmed',
       bot_token: 'bot-tok-secret-999',
       ilink_bot_id: 'B0F5860FDECB@im.bot',
-      baseurl: 'https://idc2.weixin.local',
+      baseurl: 'https://idc2.weixin.qq.com',
       ilink_user_id: 'user_abc123@im.wechat'
     }
   ];
@@ -87,7 +87,7 @@ test('createWeixinQrLoginManager handles iLink headers, redirect, verify_code, r
   assert.equal(needCode.status, 'need_verifycode');
   assert.equal(needCode.verifyCodeIncorrect, false);
   // Previous poll targeted redirected IDC host.
-  assert.ok(requests.at(-1).url.startsWith('https://idc2.weixin.local/ilink/bot/get_qrcode_status?qrcode=qrc-1'));
+  assert.ok(requests.at(-1).url.startsWith('https://idc2.weixin.qq.com/ilink/bot/get_qrcode_status?qrcode=qrc-1'));
 
   assert.equal(manager.submitVerifyCode(started.sessionId, '1111').ok, true);
   const wrongCode = await manager.pollStatus(started.sessionId);
@@ -104,7 +104,7 @@ test('createWeixinQrLoginManager handles iLink headers, redirect, verify_code, r
   assert.equal(confirmed.rawAccountId, 'B0F5860FDECB@im.bot');
   assert.equal(confirmed.userId, 'user_abc123@im.wechat');
   assert.equal(confirmed.botToken, 'bot-tok-secret-999');
-  assert.equal(confirmed.baseUrl, 'https://idc2.weixin.local');
+  assert.equal(confirmed.baseUrl, 'https://idc2.weixin.qq.com');
 });
 
 test('createWeixinQrLoginManager handles AbortError/524 timeouts, bounded QR refresh, binded_redirect, and cancel', async () => {
@@ -189,7 +189,10 @@ test('openclawProvisioner parses JSON5, persists WeChat bindings with stale-user
   const env = { OPENCLAW_STATE_DIR: dir };
 
   try {
-    const emptyEnv = await detectOpenClawEnvironment({ env, probeGateway: false, cliPath: null });
+    const emptyEnvDefault = await detectOpenClawEnvironment({ env, probeGateway: false, cliPath: null });
+    assert.equal(emptyEnvDefault.stateDir, undefined);
+    assert.equal(emptyEnvDefault.cliPath, undefined);
+    const emptyEnv = await detectOpenClawEnvironment({ env, probeGateway: false, cliPath: null, includePaths: true });
     assert.equal(emptyEnv.stateDir, dir);
     assert.equal(emptyEnv.stateDirExists, false);
     assert.equal(emptyEnv.gatewayPort, 18789);
@@ -255,7 +258,7 @@ test('openclawProvisioner parses JSON5, persists WeChat bindings with stale-user
     assert.equal(JSON.stringify(detected).includes('secret-hook-123'), false);
     assert.equal(readOpenClawHookSecrets({ env }).hookToken, 'secret-hook-123');
 
-    // Provision with mock CLI invokes `openclaw config set` & `gateway restart`.
+    // Provision writes openclaw.json directly (never passing secrets via `config set` CLI argv) & invokes `gateway restart`.
     const cliCalls = [];
     const provWithCli = await configureOpenClawHost(
       { ensureHooks: true, installSkill: false, restartGateway: true },
@@ -270,8 +273,9 @@ test('openclawProvisioner parses JSON5, persists WeChat bindings with stale-user
       }
     );
     assert.equal(provWithCli.steps.gatewayRestarted, true);
-    assert.ok(cliCalls.some((a) => a[0] === 'config' && a[1] === 'set' && a[2] === 'hooks.enabled'));
-    assert.ok(cliCalls.some((a) => a[0] === 'gateway' && a[1] === 'restart'));
+    assert.equal(provWithCli.steps.hooksConfigured, true);
+    assert.equal(cliCalls.some((a) => a[0] === 'config' && a[1] === 'set'), false);
+    assert.deepEqual(cliCalls, [['gateway', 'restart']]);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
   }

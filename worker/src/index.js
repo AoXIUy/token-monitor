@@ -14,15 +14,49 @@ import { deviceHistoryRevision, historyPreview, historyRevision } from './shared
 import hubBuildIdentity from './shared/hubBuildIdentity.js';
 import hubProtocol from './shared/hubProtocol.js';
 
-const CORS_HEADERS = {
-  'access-control-allow-origin': '*',
-  'access-control-allow-methods': 'GET,POST,PUT,DELETE,OPTIONS',
-  'access-control-allow-headers': 'authorization,content-type,x-token-monitor-secret,x-token-monitor-response,x-token-monitor-stream,x-token-monitor-upload'
+const SECURITY_HEADERS = {
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+  'content-security-policy': "default-src 'none'; frame-ancestors 'none'",
+  'referrer-policy': 'no-referrer',
+  'cross-origin-resource-policy': 'same-origin',
+  'strict-transport-security': 'max-age=31536000'
 };
+
+const PUBLIC_CORS_HEADERS = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'GET,HEAD,OPTIONS',
+  'access-control-allow-headers': 'content-type',
+  'cross-origin-resource-policy': 'cross-origin'
+};
+
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const MAX_DEVICE_ID_LENGTH = 128;
+const MAX_DEVICES = 256;
+const MAX_CONTROL_BODY_BYTES = 64 * 1024;
 
 // SQLite Durable Object storage allows 8 MB for the key and its value. Keep
 // headroom for the serializer's per-value overhead.
 const MAX_DEVICE_STORAGE_BYTES = 7 * 1024 * 1024;
+
+function validateDeviceId(raw) {
+  if (typeof raw !== 'string') {
+    throw Object.assign(new Error('invalid_device_id'), { status: 400, code: 'invalid_device_id' });
+  }
+  const value = raw.trim();
+  if (!value || value.length > MAX_DEVICE_ID_LENGTH || /[\x00-\x1f\x7f]/.test(value) || FORBIDDEN_KEYS.has(value)) {
+    throw Object.assign(new Error('invalid_device_id'), { status: 400, code: 'invalid_device_id' });
+  }
+  return value;
+}
+
+function safeDecodeUriComponent(raw) {
+  try {
+    return decodeURIComponent(raw);
+  } catch (_) {
+    throw Object.assign(new Error('Malformed URI path parameter'), { status: 400, code: 'invalid_request' });
+  }
+}
 
 function jsonResponse(status, payload, extra = {}, request = null) {
   const body = JSON.stringify(payload);
@@ -31,22 +65,27 @@ function jsonResponse(status, payload, extra = {}, request = null) {
   const responseBody = shouldCompress
     ? new Blob([body]).stream().pipeThrough(new CompressionStream('gzip'))
     : body;
-  return new Response(responseBody, {
+  const isHead = request?.method === 'HEAD';
+  return new Response(isHead ? null : responseBody, {
     status,
     headers: {
+      ...SECURITY_HEADERS,
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store',
       ...(shouldCompress ? { 'content-encoding': 'gzip', vary: 'accept-encoding' } : {}),
-      ...CORS_HEADERS,
       ...extra
     },
-    ...(shouldCompress ? { encodeBody: 'manual' } : {})
+    ...(shouldCompress && !isHead ? { encodeBody: 'manual' } : {})
   });
 }
 
-// Bound full and delta ingest bytes before JSON materialization, including
-// requests without Content-Length.
-async function readIngestJson(request) {
+// Bound JSON request bytes before JSON materialization, including requests
+// without Content-Length.
+async function readBoundedJson(request, maxBytes = uploadDelta.MAX_UPLOAD_BYTES) {
+  const declared = request.headers.get('content-length');
+  if (declared && /^\d+$/.test(declared.trim()) && Number(declared.trim()) > maxBytes) {
+    throw Object.assign(new Error('payload_too_large'), { status: 413, code: 'payload_too_large' });
+  }
   const reader = request.body?.getReader();
   if (!reader) return JSON.parse('');
   const chunks = [];
@@ -56,9 +95,9 @@ async function readIngestJson(request) {
       const { value, done } = await reader.read();
       if (done) break;
       bytes += value.byteLength;
-      if (bytes > uploadDelta.MAX_UPLOAD_BYTES) {
+      if (bytes > maxBytes) {
         await reader.cancel();
-        throw Object.assign(new Error('payload_too_large'), { status: 413 });
+        throw Object.assign(new Error('payload_too_large'), { status: 413, code: 'payload_too_large' });
       }
       chunks.push(value);
     }
@@ -69,17 +108,26 @@ async function readIngestJson(request) {
   return JSON.parse(new TextDecoder().decode(body));
 }
 
-function textResponse(status, body, contentType = 'text/plain; charset=utf-8') {
-  return new Response(body, { status, headers: { 'content-type': contentType, ...CORS_HEADERS } });
+function textResponse(status, body, contentType = 'text/plain; charset=utf-8', extra = {}) {
+  return new Response(body, {
+    status,
+    headers: {
+      ...SECURITY_HEADERS,
+      'content-type': contentType,
+      'cache-control': 'no-store',
+      ...extra
+    }
+  });
 }
 
-function requestSecret(request) {
+function requestSecret(request, { allowQuerySecret = false } = {}) {
   const auth = request.headers.get('authorization') || '';
   if (auth.toLowerCase().startsWith('bearer ')) return auth.slice(7).trim();
-  const headerSecret = String(request.headers.get('x-token-monitor-secret') || '').trim();
-  if (headerSecret) return headerSecret;
-  // Compatibility path for iOS widget runtimes that cannot set Authorization.
-  // Prefer a header; do not add this fallback to new first-party clients.
+  const hdrSecret = String(request.headers.get('x-token-monitor-secret') || '').trim();
+  if (hdrSecret) return hdrSecret;
+  if (!allowQuerySecret) return '';
+  // Opt-in compatibility path for iOS widget runtimes that cannot set Authorization;
+  // restricted strictly to GET/HEAD /api/stats when ALLOW_QUERY_SECRET=1.
   try {
     const url = new URL(request.url);
     return String(url.searchParams.get('secret') || '').trim();
@@ -101,9 +149,9 @@ async function timingSafeEqualText(actual, expected) {
   return mismatch === 0;
 }
 
-async function isAuthorized(request, expectedSecret) {
+async function isAuthorized(request, expectedSecret, options = {}) {
   if (!expectedSecret) return true;
-  return timingSafeEqualText(requestSecret(request), expectedSecret);
+  return timingSafeEqualText(requestSecret(request, options), expectedSecret);
 }
 
 const SUBSCRIPTIONS_KEY = 'subscriptions';
@@ -112,7 +160,11 @@ const TITLE_POLICY_PREFIX = 'title-policy:';
 
 export default {
   async fetch(request, env) {
-    if (request.method === 'OPTIONS') return textResponse(204, '');
+    if (request.method === 'OPTIONS') {
+      let pathname = '';
+      try { pathname = new URL(request.url).pathname; } catch (_) {}
+      return textResponse(204, '', 'text/plain; charset=utf-8', pathname === '/api/public/stats' ? PUBLIC_CORS_HEADERS : {});
+    }
     const id = env.HUB.idFromName('hub');
     const stub = env.HUB.get(id);
     return stub.fetch(request);
@@ -224,7 +276,8 @@ export class HubDO {
     });
   }
 
-  async setSyncTitlePolicy(deviceId, enabled) {
+  async setSyncTitlePolicy(rawDeviceId, enabled) {
+    const deviceId = validateDeviceId(rawDeviceId);
     let changed = false;
     const policy = await this.mutate(() => this.withStorageTransaction(async (storage) => {
       if (enabled === true && !this.syncSessionTitles) {
@@ -234,6 +287,12 @@ export class HubDO {
       }
       const key = `${TITLE_POLICY_PREFIX}${deviceId}`;
       const previous = await storage.get(key);
+      if (!previous && !(await storage.get(`dev:${deviceId}`)) && typeof storage.list === 'function') {
+        const policies = await storage.list({ prefix: TITLE_POLICY_PREFIX });
+        if (policies.size >= MAX_DEVICES * 2) {
+          throw Object.assign(new Error('device_limit_reached'), { status: 429, code: 'device_limit_reached' });
+        }
+      }
       const next = syncContent.nextTitlePolicy(previous, enabled);
       if (enabled && syncContent.normalizeTitlePolicy(previous).enabled) return next;
       this.uploadBaselines.forget(deviceId);
@@ -261,6 +320,10 @@ export class HubDO {
 
   get publicStatsEnabled() {
     return ['1', 'true', 'yes', 'on'].includes(String(this.env.PUBLIC_STATS_ENABLED || '').trim().toLowerCase());
+  }
+
+  get allowQuerySecret() {
+    return ['1', 'true', 'yes', 'on'].includes(String(this.env.ALLOW_QUERY_SECRET || '').trim().toLowerCase());
   }
 
   // Devices live under the `dev:` prefix; the shared subscription document is a
@@ -461,9 +524,15 @@ export class HubDO {
 
   async fetch(request) {
     const url = new URL(request.url);
-    await this.ensureTitlePrivacy();
 
     if (url.pathname === '/api/health') {
+      if (request.method !== 'GET' && request.method !== 'HEAD') {
+        return jsonResponse(405, { error: 'method_not_allowed' }, { allow: 'GET, HEAD' }, request);
+      }
+      const authorized = Boolean(this.secret) && await isAuthorized(request, this.secret, { allowQuerySecret: false });
+      if (!authorized) {
+        return jsonResponse(200, { ok: true }, {}, request);
+      }
       const devices = await this.listDevices();
       return jsonResponse(200, {
         ok: true,
@@ -478,7 +547,7 @@ export class HubDO {
     }
 
     if ((request.method === 'GET' || request.method === 'HEAD') && url.pathname === '/api/public/stats') {
-      if (!this.publicStatsEnabled) return jsonResponse(404, { error: 'not_found' });
+      if (!this.publicStatsEnabled) return jsonResponse(404, { error: 'not_found' }, {}, request);
       const stats = await this.getStats();
       const { devices, limits, periods, ...rest } = stats;
       delete rest.deviceHistoryRevision;
@@ -489,7 +558,7 @@ export class HubDO {
         limits: publicLimits(limits),
         periods: publicPeriods(periods),
         ...rest
-      }, { 'cache-control': 'public, max-age=15, s-maxage=15' }, request);
+      }, { 'cache-control': 'public, max-age=15, s-maxage=15', ...PUBLIC_CORS_HEADERS }, request);
     }
 
     // A Worker is an internet-facing URL with no trusted-LAN fallback, so it must
@@ -498,19 +567,26 @@ export class HubDO {
     if (!this.secret) {
       return jsonResponse(503, { error: 'secret_required', message: 'TOKEN_MONITOR_SECRET must be set on the worker; unauthenticated access is refused.' });
     }
-    if (!(await isAuthorized(request, this.secret))) return jsonResponse(401, { error: 'unauthorized' });
+    const allowQuerySecretForRoute = this.allowQuerySecret
+      && (request.method === 'GET' || request.method === 'HEAD')
+      && url.pathname === '/api/stats';
+    if (!(await isAuthorized(request, this.secret, { allowQuerySecret: allowQuerySecretForRoute }))) {
+      return jsonResponse(401, { error: 'unauthorized' });
+    }
+
+    await this.ensureTitlePrivacy();
 
     if ((request.method === 'GET' || request.method === 'HEAD') && url.pathname === '/api/sync/content') {
-      return jsonResponse(200, syncContent.syncContentCapability(this.syncSessionTitles));
+      return jsonResponse(200, syncContent.syncContentCapability(this.syncSessionTitles), {}, request);
     }
     const settingsMatch = url.pathname.match(/^\/api\/sync\/settings\/(modelAliases|customPricing|limitAccountPresentation)$/);
     if (settingsMatch && (request.method === 'GET' || request.method === 'HEAD')) {
-      return jsonResponse(200, { ok: true, ...(await this.getSyncSettings(settingsMatch[1])) });
+      return jsonResponse(200, { ok: true, ...(await this.getSyncSettings(settingsMatch[1])) }, {}, request);
     }
     const titlesMatch = url.pathname.match(/^\/api\/sync\/titles\/([^/]+)$/);
     if (request.method === 'PUT' && (settingsMatch || titlesMatch)) {
       try {
-        const payload = await request.json();
+        const payload = await readBoundedJson(request, MAX_CONTROL_BODY_BYTES);
         if (settingsMatch) {
           const next = await this.setSyncSettings(settingsMatch[1], payload);
           this.broadcast('sync-settings').catch(() => {});
@@ -520,12 +596,14 @@ export class HubDO {
           || Object.keys(payload).some((key) => key !== 'enabled') || typeof payload.enabled !== 'boolean') {
           return jsonResponse(400, { error: 'bad_request', message: 'enabled must be a boolean' });
         }
-        const policy = await this.setSyncTitlePolicy(decodeURIComponent(titlesMatch[1]), payload.enabled);
+        const policy = await this.setSyncTitlePolicy(safeDecodeUriComponent(titlesMatch[1]), payload.enabled);
         return jsonResponse(200, { ok: true, ...policy });
       } catch (error) {
+        if (error.status === 413) return jsonResponse(413, { error: 'payload_too_large', message: error.message });
+        if (error.status === 429) return jsonResponse(429, { error: error.code || 'too_many_requests', message: error.message });
         if (error.code === 'stale_write') return jsonResponse(409, { error: 'stale_write', ...error.current });
         if (error.code === 'forbidden') return jsonResponse(403, { error: 'forbidden', message: error.message });
-        return jsonResponse(400, { error: 'bad_request', message: error.message });
+        return jsonResponse(error.status || 400, { error: error.code || 'bad_request', message: error.message });
       }
     }
 
@@ -544,6 +622,9 @@ export class HubDO {
     }
 
     if (request.method === 'GET' && url.pathname === '/api/stats/stream') {
+      if (this.sseClients.size >= 32) {
+        return jsonResponse(503, { error: 'too_many_streams', message: 'Maximum concurrent SSE streams reached' });
+      }
       const stats = await this.statsWithSubscriptionVersion();
       const { readable, writable } = new TransformStream();
       const writer = writable.getWriter();
@@ -573,7 +654,7 @@ export class HubDO {
           'cache-control': 'no-cache, no-transform',
           'connection': 'keep-alive',
           'x-accel-buffering': 'no',
-          ...CORS_HEADERS
+          ...SECURITY_HEADERS
         }
       });
     }
@@ -581,7 +662,7 @@ export class HubDO {
     if (request.method === 'POST' && ['/api/ingest', '/api/ingest/delta'].includes(url.pathname)) {
       const delta = url.pathname === '/api/ingest/delta';
       let payload;
-      try { payload = await readIngestJson(request); }
+      try { payload = await readBoundedJson(request, uploadDelta.MAX_UPLOAD_BYTES); }
       catch (error) {
         return jsonResponse(error.status === 413 ? 413 : 400, {
           error: error.status === 413 ? 'payload_too_large' : 'bad_request', message: error.message
@@ -592,11 +673,17 @@ export class HubDO {
         record = await this.mutate(async () => {
           const incoming = delta ? this.uploadBaselines.prepare(payload) : payload;
           if (!incoming || (!incoming.deviceId && !incoming.id)) throw Object.assign(new Error('deviceId_required'), { status: 400, code: 'deviceId_required' });
-          const deviceId = String(incoming.deviceId || incoming.id);
+          const deviceId = validateDeviceId(String(incoming.deviceId || incoming.id));
           const policy = await this.state.storage.get(`${TITLE_POLICY_PREFIX}${deviceId}`);
           const existing = await this.state.storage.get(`dev:${deviceId}`);
+          if (!existing && typeof this.state.storage.list === 'function') {
+            const currentDevices = await this.state.storage.list({ prefix: 'dev:' });
+            if (currentDevices.size >= MAX_DEVICES) {
+              throw Object.assign(new Error('device_limit_reached'), { status: 429, code: 'device_limit_reached' });
+            }
+          }
           const preserveSessionTitles = syncContent.acceptsSessionTitles(this.syncSessionTitles, policy, incoming.sessionTitleSyncGeneration);
-          const next = mergeSyncDeviceRecord(existing, { ...incoming, receivedAt: new Date().toISOString() }, { preserveSessionTitles });
+          const next = mergeSyncDeviceRecord(existing, { ...incoming, deviceId, receivedAt: new Date().toISOString() }, { preserveSessionTitles });
           const storageKey = `dev:${next.deviceId}`;
           const encoder = new TextEncoder();
           const storageBytes = encoder.encode(storageKey).byteLength
@@ -632,13 +719,17 @@ export class HubDO {
     // place the user records money. It is never part of /api/public/stats, which
     // is built from device records alone.
     if ((request.method === 'GET' || request.method === 'HEAD') && url.pathname === '/api/subscriptions') {
-      return jsonResponse(200, { ok: true, ...(await this.getSubscriptions()) });
+      return jsonResponse(200, { ok: true, ...(await this.getSubscriptions()) }, {}, request);
     }
 
     if (request.method === 'PUT' && url.pathname === '/api/subscriptions') {
       let payload;
-      try { payload = await request.json(); }
-      catch (error) { return jsonResponse(400, { error: 'bad_request', message: error.message }); }
+      try { payload = await readBoundedJson(request, uploadDelta.MAX_UPLOAD_BYTES); }
+      catch (error) {
+        return jsonResponse(error.status === 413 ? 413 : 400, {
+          error: error.status === 413 ? 'payload_too_large' : 'bad_request', message: error.message
+        });
+      }
       // A non-array would normalize to an empty list and store as a perfectly
       // successful replacement, wiping records that exist nowhere else. An
       // intentional clear still sends [].
@@ -681,12 +772,21 @@ export class HubDO {
     }
 
     if (request.method === 'DELETE' && url.pathname.startsWith('/api/devices/')) {
-      const deviceId = decodeURIComponent(url.pathname.slice('/api/devices/'.length));
+      let deviceId;
+      try {
+        deviceId = validateDeviceId(safeDecodeUriComponent(url.pathname.slice('/api/devices/'.length)));
+      } catch (error) {
+        return jsonResponse(error.status || 400, { error: error.code || 'bad_request', message: error.message });
+      }
       await this.mutate(() => this.withStorageTransaction(async (storage) => {
         this.uploadBaselines.forget(deviceId);
         const key = `${TITLE_POLICY_PREFIX}${deviceId}`;
-        await storage.put(key, syncContent.nextTitlePolicy(await storage.get(key), false));
-        await storage.delete(`dev:${deviceId}`);
+        const existingDevice = await storage.get(`dev:${deviceId}`);
+        const existingPolicy = await storage.get(key);
+        if (existingDevice || existingPolicy) {
+          await storage.put(key, syncContent.nextTitlePolicy(existingPolicy, false));
+        }
+        if (existingDevice) await storage.delete(`dev:${deviceId}`);
       }));
       this.broadcast('delete').catch(() => {});
       return jsonResponse(200, { ok: true, deviceId });

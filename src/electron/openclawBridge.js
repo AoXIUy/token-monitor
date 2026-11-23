@@ -539,7 +539,7 @@ function createOpenClawBridge({
         listApprovalAlerts,
         getOpenClawConfig: () => resolveEffectiveConfigs().openclaw,
         getIntegrationsStatus: () => getLocalManager().getStatus(),
-        updateIntegrationsConfig: (/** @type {any} */ patch) => saveLocalIntegrations(patch),
+        updateIntegrationsConfig: (/** @type {any} */ patch) => saveLocalIntegrations(patch, { allowQueryPermissionMutation: false }),
         analyzeReportWithAi: (/** @type {any} */ opts) => getLocalManager().analyzeReport(opts),
         pushReportToOpenClaw: (/** @type {any} */ opts) => getLocalManager().pushToOpenClaw(opts),
         pushQueryToOpenClaw: (/** @type {any} */ opts) => getLocalManager().pushQueryToOpenClaw(opts),
@@ -1208,7 +1208,7 @@ function createOpenClawBridge({
         JSON.stringify(nextAi) !== JSON.stringify(current.ai)
         || JSON.stringify(nextOpenClaw) !== JSON.stringify(current.openclaw)
       ) {
-        localManager.updateConfig({ ai: nextAi, openclaw: nextOpenClaw });
+        localManager.updateConfig({ ai: nextAi, openclaw: nextOpenClaw }, { allowQueryPermissionMutation: true });
       }
     }
     if (localManager) {
@@ -1223,8 +1223,23 @@ function createOpenClawBridge({
    * Handle saving AI/OpenClaw settings + secrets in `local` mode cleanly.
    *
    * @param {any} patch
+   * @param {{ allowQueryPermissionMutation?: boolean }} [options]
    */
-  function saveLocalIntegrations(patch = {}) {
+  function saveLocalIntegrations(patch = {}, options = {}) {
+    const allowQueryPermissionMutation = options?.allowQueryPermissionMutation !== false;
+    if (
+      !allowQueryPermissionMutation
+      && isPlainObject(patch?.openclaw)
+      && Object.prototype.hasOwnProperty.call(patch.openclaw, 'queryPermissions')
+    ) {
+      return {
+        ok: false,
+        error: 'query_permissions_locked',
+        statusCode: 403,
+        message: 'OpenClaw queryPermissions can only be changed from local desktop settings'
+      };
+    }
+
     const store = getCredentialStore?.();
     const secretPatch = {};
     if (patch?.ai?.clearApiKey === true) secretPatch.aiApiKey = '';
@@ -1254,14 +1269,19 @@ function createOpenClawBridge({
       delete sanitizedPatch.openclaw.weixinBotToken;
       delete sanitizedPatch.openclaw.clearWeixinBotToken;
       delete sanitizedPatch.openclaw.weixinBotConfigured;
+      if (!allowQueryPermissionMutation) {
+        delete sanitizedPatch.openclaw.queryPermissions;
+      }
     }
 
     const mgr = getLocalManager();
+    const updated = mgr.updateConfig(sanitizedPatch, { allowQueryPermissionMutation });
+    if (updated?.ok === false) return updated;
     if (Object.keys(secretPatch).length > 0) {
       mgr.setSecrets(readStoredSecrets());
+    } else if (store && typeof store.writeIntegrationSecrets === 'function') {
+      store.writeIntegrationSecrets(mgr.getSecrets());
     }
-    const updated = mgr.updateConfig(sanitizedPatch);
-    if (updated?.ok === false) return updated;
     syncTrackerConfig();
     reconcileServicePolling();
     void reconcileLocalBridge();

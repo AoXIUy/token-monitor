@@ -52,6 +52,12 @@ const JSON_RPC_ERRORS = Object.freeze({
   INTERNAL_ERROR: -32603
 });
 
+const MAX_BATCH_SIZE = 20;
+const MAX_BATCH_CONCURRENCY = 4;
+const MAX_PROMPT_ARG_LENGTH = 1024;
+const MAX_REPORT_LIST_LIMIT = 200;
+const ABSOLUTE_PATH_RE = /^(?:\/|[a-zA-Z]:[\\/]|\\\\)/;
+
 /**
  * @typedef {string | number | null} JsonRpcId
  * @typedef {{ jsonrpc: '2.0', id: JsonRpcId, result: any }} JsonRpcSuccess
@@ -843,13 +849,61 @@ function extractBackendError(result) {
 }
 
 /**
+ * Convert an absolute report file path into a host-path-free relative identifier.
+ * @param {string} value
+ * @returns {string}
+ */
+function toRelativeReportFile(value) {
+  const normalized = value.replace(/\\/g, '/');
+  if (!ABSOLUTE_PATH_RE.test(value)) return normalized;
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.length >= 2 && REPORT_GRANULARITIES.includes(parts[parts.length - 2])) {
+    return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+  }
+  return parts[parts.length - 1] || '';
+}
+
+/**
+ * Strip host filesystem paths (`reportsDir`, `stateDir`, `cliPath`, absolute `files.*`)
+ * from MCP tool responses so remote callers cannot enumerate host directories.
+ * @param {any} payload
+ * @param {number} [depth]
+ * @returns {any}
+ */
+function stripHostPathsFromPayload(payload, depth = 0) {
+  if (depth > 8 || payload === null || payload === undefined || typeof payload !== 'object') {
+    return payload;
+  }
+  if (Array.isArray(payload)) {
+    return payload.map((item) => stripHostPathsFromPayload(item, depth + 1));
+  }
+  /** @type {Record<string, any>} */
+  const copy = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (key === 'reportsDir' || key === 'stateDir' || key === 'cliPath') continue;
+    if (key === 'files' && value && typeof value === 'object' && !Array.isArray(value)) {
+      /** @type {Record<string, any>} */
+      const cleanFiles = {};
+      for (const [fk, fv] of Object.entries(value)) {
+        cleanFiles[fk] = typeof fv === 'string' ? toRelativeReportFile(fv) : fv;
+      }
+      copy.files = cleanFiles;
+      continue;
+    }
+    copy[key] = stripHostPathsFromPayload(value, depth + 1);
+  }
+  return copy;
+}
+
+/**
  * Format a JSON-capable tool result cleanly.
  * @param {any} payload
  */
 function jsonToolResult(payload) {
+  const safePayload = stripHostPathsFromPayload(payload);
   return {
-    content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
-    ...(payload && typeof payload === 'object' && !Array.isArray(payload) ? { structuredContent: payload } : {})
+    content: [{ type: 'text', text: JSON.stringify(safePayload, null, 2) }],
+    ...(safePayload && typeof safePayload === 'object' && !Array.isArray(safePayload) ? { structuredContent: safePayload } : {})
   };
 }
 
@@ -876,11 +930,17 @@ function parseReportUri(uriString) {
     return null;
   }
   if (parsed.protocol !== 'report:') return null;
-  const host = decodeURIComponent(parsed.hostname || '');
-  const segments = parsed.pathname
-    .split('/')
-    .filter(Boolean)
-    .map((part) => decodeURIComponent(part));
+  let host;
+  let segments;
+  try {
+    host = decodeURIComponent(parsed.hostname || '');
+    segments = parsed.pathname
+      .split('/')
+      .filter(Boolean)
+      .map((part) => decodeURIComponent(part));
+  } catch {
+    return null;
+  }
   if (segments.length !== 1) return null;
 
   let granularity;
@@ -975,15 +1035,17 @@ function createMcpReportServer({
       if (args.limit !== undefined && (!Number.isInteger(args.limit) || args.limit < 1)) {
         return toolErrorResult('limit must be a positive integer.');
       }
+      const clampedLimit = args.limit !== undefined ? Math.min(MAX_REPORT_LIST_LIMIT, args.limit) : undefined;
       const result = await listReports({
         ...(args.granularity !== undefined ? { granularity: String(args.granularity) } : {}),
-        ...(args.limit !== undefined ? { limit: args.limit } : {})
+        ...(clampedLimit !== undefined ? { limit: clampedLimit } : {})
       });
       const backendErr = extractBackendError(result);
       if (backendErr) return toolErrorResult(backendErr);
+      const safeResult = stripHostPathsFromPayload(result);
       return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-        ...(result && typeof result === 'object' && !Array.isArray(result) ? { structuredContent: result } : {})
+        content: [{ type: 'text', text: JSON.stringify(safeResult, null, 2) }],
+        ...(safeResult && typeof safeResult === 'object' && !Array.isArray(safeResult) ? { structuredContent: safeResult } : {})
       };
     }
 
@@ -1019,9 +1081,10 @@ function createMcpReportServer({
       }
 
       const reportObj = unwrapReportObject(result) || result;
-      const payloadObj = reportObj && typeof reportObj === 'object' && !Array.isArray(reportObj) && result.aiAnalysis && !reportObj.aiAnalysis
+      const rawPayloadObj = reportObj && typeof reportObj === 'object' && !Array.isArray(reportObj) && result.aiAnalysis && !reportObj.aiAnalysis
         ? { ...reportObj, aiAnalysis: result.aiAnalysis }
         : reportObj;
+      const payloadObj = stripHostPathsFromPayload(rawPayloadObj);
       return {
         content: [{
           type: 'text',
@@ -1047,9 +1110,10 @@ function createMcpReportServer({
       });
       const backendErr = extractBackendError(result);
       if (backendErr) return toolErrorResult(backendErr);
+      const safeResult = stripHostPathsFromPayload(result);
       return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-        ...(result && typeof result === 'object' && !Array.isArray(result) ? { structuredContent: result } : {})
+        content: [{ type: 'text', text: JSON.stringify(safeResult, null, 2) }],
+        ...(safeResult && typeof safeResult === 'object' && !Array.isArray(safeResult) ? { structuredContent: safeResult } : {})
       };
     }
 
@@ -1063,7 +1127,7 @@ function createMcpReportServer({
       if (args.limit !== undefined && (!Number.isInteger(args.limit) || args.limit < 1)) {
         return toolErrorResult('limit must be a positive integer.');
       }
-      const limit = args.limit;
+      const limit = args.limit !== undefined ? Math.min(MAX_REPORT_LIST_LIMIT, args.limit) : undefined;
 
       let analysis;
       if (typeof analyzeProjects === 'function') {
@@ -1758,6 +1822,15 @@ function createMcpReportServer({
           return jsonRpcErr(id, JSON_RPC_ERRORS.INVALID_PARAMS, 'Invalid params: prompt arguments must be an object');
         }
         const args = rawArgs || {};
+        for (const [argKey, argVal] of Object.entries(args)) {
+          if (typeof argVal === 'string' && argVal.length > MAX_PROMPT_ARG_LENGTH) {
+            return jsonRpcErr(
+              id,
+              JSON_RPC_ERRORS.INVALID_PARAMS,
+              `Invalid params: prompt argument "${argKey}" exceeds maximum length of ${MAX_PROMPT_ARG_LENGTH} characters`
+            );
+          }
+        }
 
         if (promptName === 'project-deep-dive') {
           const project = typeof args.project === 'string' ? args.project.trim() : '';
@@ -1907,7 +1980,25 @@ function createMcpReportServer({
       if (parsed.length === 0) {
         return jsonRpcErr(null, JSON_RPC_ERRORS.INVALID_REQUEST, 'Invalid Request');
       }
-      const results = await Promise.all(parsed.map((item) => handleMessage(item)));
+      if (parsed.length > MAX_BATCH_SIZE) {
+        return jsonRpcErr(
+          null,
+          JSON_RPC_ERRORS.INVALID_REQUEST,
+          `Invalid Request: batch size exceeds maximum of ${MAX_BATCH_SIZE}`
+        );
+      }
+      /** @type {Array<JsonRpcResponse | null>} */
+      const results = new Array(parsed.length);
+      let cursor = 0;
+      const workerCount = Math.min(MAX_BATCH_CONCURRENCY, parsed.length);
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (cursor < parsed.length) {
+          const idx = cursor;
+          cursor += 1;
+          results[idx] = await handleMessage(parsed[idx]);
+        }
+      });
+      await Promise.all(workers);
       const responses = results.filter(/** @returns {r is JsonRpcResponse} */ (r) => r !== null);
       return responses.length > 0 ? responses : null;
     }

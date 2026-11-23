@@ -14,7 +14,14 @@ const { createHub } = require('../../src/hub/server');
 function fixture(t, persistIntervalMs = 300000, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tm-persistence-'));
   const dataFile = path.join(dir, 'devices.json');
-  const hub = createHub({ port: 0, host: '127.0.0.1', dataFile, persistIntervalMs, ...options });
+  const hub = createHub({
+    port: 0,
+    host: '127.0.0.1',
+    allowInsecureLocalNoAuth: true,
+    dataFile,
+    persistIntervalMs,
+    ...options
+  });
   t.after(async () => {
     await hub.stop();
     fs.rmSync(dir, { recursive: true });
@@ -90,16 +97,22 @@ for (const recovery of ['next upload', 'shutdown']) {
       logger: { error: (_message, error) => errors.push(error) }
     });
     hub.ingest({ deviceId: 'a', today: { totalTokens: 7 } });
-    const blockedTempFile = `${dataFile}.tmp`;
-    fs.mkdirSync(blockedTempFile);
-    t.mock.timers.tick(300000);
-    assert.equal(errors.length, 1);
-    assert.ok(errors[0] instanceof Error);
-    assert.equal(fs.existsSync(dataFile), false);
-    assert.equal(hub.getStats().periods.today.totalTokens, 7);
-    t.mock.timers.tick(600000);
-    assert.equal(errors.length, 1);
-    fs.rmdirSync(blockedTempFile);
+    const realRename = fs.renameSync;
+    const blocked = t.mock.method(fs, 'renameSync', (src, dst) => {
+      if (dst === dataFile) throw new Error('synthetic write failure');
+      return realRename(src, dst);
+    });
+    try {
+      t.mock.timers.tick(300000);
+      assert.equal(errors.length, 1);
+      assert.ok(errors[0] instanceof Error);
+      assert.equal(fs.existsSync(dataFile), false);
+      assert.equal(hub.getStats().periods.today.totalTokens, 7);
+      t.mock.timers.tick(600000);
+      assert.equal(errors.length, 1);
+    } finally {
+      blocked.mock.restore();
+    }
 
     if (recovery === 'next upload') {
       hub.ingest({ deviceId: 'b', today: { totalTokens: 3 } });
@@ -126,8 +139,11 @@ for (const mutation of ['subscription', 'deletion']) {
       const previousSubscriptions = hub.getSubscriptions();
       hub.ingest({ deviceId: 'existing', today: { totalTokens: 9 } });
       hub.ingest({ deviceId: 'pending', today: { totalTokens: 4 } });
-      const blockedTempFile = `${dataFile}.tmp`;
-      fs.mkdirSync(blockedTempFile);
+      const realRename = fs.renameSync;
+      const blocked = t.mock.method(fs, 'renameSync', (src, dst) => {
+        if (dst === dataFile) throw new Error('synthetic write failure');
+        return realRename(src, dst);
+      });
       try {
         assert.throws(() => {
           if (mutation === 'subscription') {
@@ -141,7 +157,7 @@ for (const mutation of ['subscription', 'deletion']) {
         assert.equal(hub.getStats().periods.today.totalTokens, 13);
         assert.deepEqual(readStore(dataFile), before);
       } finally {
-        fs.rmdirSync(blockedTempFile);
+        blocked.mock.restore();
       }
       if (recovery === 'timer') t.mock.timers.tick(300000);
       else await hub.stop();

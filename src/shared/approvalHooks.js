@@ -66,8 +66,8 @@ function buildUnixLauncher({ scriptPath, execPath }) {
 }
 
 function buildWindowsLauncher({ scriptPath, execPath }) {
-  const safeScript = String(scriptPath).replace(/"/g, '');
-  const safeExec = String(execPath).replace(/"/g, '');
+  const safeScript = String(scriptPath).replace(/["%!\r\n&|<>^]/g, '');
+  const safeExec = String(execPath).replace(/["%!\r\n&|<>^]/g, '');
   return [
     '@echo off',
     'setlocal',
@@ -83,11 +83,20 @@ function buildWindowsLauncher({ scriptPath, execPath }) {
     '  "%APP_EXEC%" "%SCRIPT%" %*',
     '  exit /b %ERRORLEVEL%',
     ')',
-    'echo %* | findstr /C:"antigravity" >nul',
-    'if %ERRORLEVEL%==0 (',
+    ':check_args',
+    'if "%~1"=="" exit /b 0',
+    'if /i "%~1"=="--client=antigravity" (',
     '  echo {"decision":"ask"}',
+    '  exit /b 0',
     ')',
-    'exit /b 0',
+    'if /i "%~1"=="--client" (',
+    '  if /i "%~2"=="antigravity" (',
+    '    echo {"decision":"ask"}',
+    '    exit /b 0',
+    '  )',
+    ')',
+    'shift',
+    'goto :check_args',
     ''
   ].join('\r\n');
 }
@@ -358,6 +367,7 @@ module.exports = {
   ANTIGRAVITY_HOOK_NAME,
   DEFAULT_ANTIGRAVITY_MATCHER,
   HOOK_TIMEOUT_SECONDS,
+  buildWindowsLauncher,
   ensureApprovalHookLauncher,
   hookCommandString,
   inspectAntigravityHook,

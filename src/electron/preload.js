@@ -14,8 +14,22 @@ async function pluginSettingsResult(promise) {
 contextBridge.exposeInMainWorld('tokenMonitor', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   updateSettings: (patch) => {
-    // Membership is owned by the dedicated account commands, never generic settings.
-    const { workbuddyManagedAccounts: _managedAccounts, ...safePatch } = patch || {};
+    // Membership and TLS/CA file paths are owned by dedicated main-process
+    // commands, never generic renderer settings patches.
+    const {
+      workbuddyManagedAccounts: _managedAccounts,
+      hubHostTlsCertPath: _hubHostTlsCertPath,
+      hubHostTlsKeyPath: _hubHostTlsKeyPath,
+      hubHostTlsCaPath: _hubHostTlsCaPath,
+      hubHostTlsPfxPath: _hubHostTlsPfxPath,
+      hubHostTlsMode: _hubHostTlsMode,
+      hubHostTlsCertMetadata: _hubHostTlsCertMetadata,
+      hubHostTlsPassphrase: _hubHostTlsPassphrase,
+      caCertPem: _caCertPem,
+      caFingerprintSha256: _caFingerprintSha256,
+      caSummary: _caSummary,
+      ...safePatch
+    } = patch || {};
     return ipcRenderer.invoke('settings:update', safePatch);
   },
   // Subscriptions are shared across devices when a hub is configured, so they
@@ -72,6 +86,12 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
   getHubInfo: () => ipcRenderer.invoke('hub:getInfo'),
   getHubBuildStatus: () => ipcRenderer.invoke('hub:getBuildStatus'),
   regenerateHubSecret: () => ipcRenderer.invoke('hub:regenerateSecret'),
+  importHostTls: (options) => ipcRenderer.invoke('hub:importHostTls', options),
+  reloadHostTls: () => ipcRenderer.invoke('hub:reloadHostTls'),
+  clearHostTls: () => ipcRenderer.invoke('hub:clearHostTls'),
+  exportHostPublicCert: () => ipcRenderer.invoke('hub:exportHostPublicCert'),
+  pickClientCaCert: () => ipcRenderer.invoke('hub:pickClientCaCert'),
+  clearClientCaDraft: (draftToken) => ipcRenderer.invoke('hub:clearClientCaDraft', draftToken),
   onHubPush: (callback) => {
     const listener = (_event, payload) => { try { callback(payload); } catch (_) {} };
     ipcRenderer.on('hub:push', listener);
