@@ -13,7 +13,8 @@ function controls() {
   const field = () => ({ classList: { toggle() {} } });
   const els = {
     sessionConversationsRow: {}, sessionConversationsInput: {}, hubModeOptions: {},
-    hubClientFields: field(), hubHostFields: field(), hubSecretInput: {}
+    hubClientFields: field(), hubHostFields: field(), hubSecretInput: {},
+    syncMap: { querySelectorAll: () => [] }
   };
   const state = { settings: { hubMode: 'host' } };
   const noop = () => {};

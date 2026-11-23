@@ -1401,6 +1401,7 @@ function createOpenClawEndpointSurface({
 
 function createHub({
   port = 17321,
+  deployment,
   host = '0.0.0.0',
   secret = '',
   syncSessionTitles = false,
@@ -1820,6 +1821,7 @@ function createHub({
         ok: true,
         role: 'hub',
         runtime: 'node-hub',
+        ...(deployment ? { deployment } : {}),
         version: store.version || 1,
         hubBuild: currentHubBuild('node-hub'),
         deviceCount: Object.keys(store.devices).length,
@@ -2144,7 +2146,7 @@ if (require.main === module) {
   const reportsArg = args.reports ?? process.env.TOKEN_MONITOR_REPORTS;
   const reportsDir = String(args.reportsDir ?? args['reports-dir'] ?? process.env.TOKEN_MONITOR_REPORTS_DIR ?? '').trim();
   const hub = createHub({
-    port, host, secret, staleAfterMs, dataFile, syncSessionTitles, sessionConversations, approvalAlerts,
+    port, deployment: 'standalone', host, secret, staleAfterMs, dataFile, syncSessionTitles, sessionConversations, approvalAlerts,
     persistIntervalMs, reportsDir, ...(reportsArg !== undefined ? { reports: reportsArg } : {})
   });
   for (const signal of ['SIGINT', 'SIGTERM']) {

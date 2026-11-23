@@ -671,7 +671,7 @@ test('index.html exposes all required report control IDs and localized keys', ()
   const appScriptPos = htmlSource.indexOf('<script src="app.js"></script>');
   assert.ok(qrScriptPos >= 0 && appScriptPos > qrScriptPos, 'qrSvg.js must load before app.js');
 
-  const section = htmlSource.split('id="reportsSettingsGroup"')[1].split('id="syncDevicePanel"')[0];
+  const section = htmlSource.split('id="reportsSettingsGroup"')[1].split('settings-plugins-group')[0];
   assert.match(section, /:18789\/hooks\/agent/);
   assert.doesNotMatch(section, /:19001\/hooks\/agent/);
 
