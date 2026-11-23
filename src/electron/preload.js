@@ -147,6 +147,50 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
       return () => ipcRenderer.removeListener('antigravity:accounts', handler);
     }
   },
+  antigravityManager: {
+    openWindow: () => ipcRenderer.invoke('antigravityManager:open'),
+    windowReady: () => ipcRenderer.send('antigravityManager:ready'),
+    minimize: () => ipcRenderer.send('antigravityManager:minimize'),
+    close: () => ipcRenderer.send('antigravityManager:close'),
+    getState: () => ipcRenderer.invoke('antigravityManager:getState'),
+    updateConfig: (patch) => ipcRenderer.invoke('antigravityManager:updateConfig', patch),
+    refreshAccount: (id) => ipcRenderer.invoke('antigravityManager:refreshAccount', id),
+    refreshAccounts: (ids) => ipcRenderer.invoke('antigravityManager:refreshAccounts', ids),
+    refreshAll: () => ipcRenderer.invoke('antigravityManager:refreshAll'),
+    cancelRefresh: () => ipcRenderer.invoke('antigravityManager:cancelRefresh'),
+    switchAccount: (id, targetClient) => ipcRenderer.invoke('antigravityManager:switchAccount', id, targetClient),
+    switchBestAccount: (targetClient) => ipcRenderer.invoke('antigravityManager:switchBestAccount', targetClient),
+    detectActiveClients: () => ipcRenderer.invoke('antigravityManager:detectActiveClients'),
+    startOAuthLogin: (clientKey) => ipcRenderer.invoke('antigravityManager:startOAuthLogin', clientKey),
+    cancelOAuthLogin: () => ipcRenderer.invoke('antigravityManager:cancelOAuthLogin'),
+    importFromString: (content, options) => ipcRenderer.invoke('antigravityManager:importFromString', content, options),
+    pickAndImportJson: (options) => ipcRenderer.invoke('antigravityManager:pickAndImportJson', options),
+    importDefaultDataDir: () => ipcRenderer.invoke('antigravityManager:importDefaultDataDir'),
+    pickAndImportDataDir: () => ipcRenderer.invoke('antigravityManager:pickAndImportDataDir'),
+    pickAndImportStateDb: () => ipcRenderer.invoke('antigravityManager:pickAndImportStateDb'),
+    scanLocalAccounts: () => ipcRenderer.invoke('antigravityManager:scanLocalAccounts'),
+    pickAndImportV1Dir: () => ipcRenderer.invoke('antigravityManager:pickAndImportV1Dir'),
+    exportAccounts: (ids) => ipcRenderer.invoke('antigravityManager:exportAccounts', ids),
+    deleteAccounts: (ids) => ipcRenderer.invoke('antigravityManager:deleteAccounts', ids),
+    setAccountDisabled: (id, disabled) => ipcRenderer.invoke('antigravityManager:setAccountDisabled', id, disabled),
+    bindDeviceProfile: (id, mode) => ipcRenderer.invoke('antigravityManager:bindDeviceProfile', id, mode),
+    restoreOriginalDevice: () => ipcRenderer.invoke('antigravityManager:restoreOriginalDevice'),
+    onState: (callback) => {
+      const listener = (_event, state) => { try { callback(state); } catch (_) {} };
+      ipcRenderer.on('antigravityManager:state', listener);
+      return () => ipcRenderer.removeListener('antigravityManager:state', listener);
+    },
+    onRefreshProgress: (callback) => {
+      const listener = (_event, progress) => { try { callback(progress); } catch (_) {} };
+      ipcRenderer.on('antigravityManager:refreshProgress', listener);
+      return () => ipcRenderer.removeListener('antigravityManager:refreshProgress', listener);
+    },
+    onImportProgress: (callback) => {
+      const listener = (_event, progress) => { try { callback(progress); } catch (_) {} };
+      ipcRenderer.on('antigravityManager:importProgress', listener);
+      return () => ipcRenderer.removeListener('antigravityManager:importProgress', listener);
+    }
+  },
   workbuddy: {
     accounts: () => ipcRenderer.invoke('workbuddy:accounts'),
     addAccount: (realm) => ipcRenderer.invoke('workbuddy:addAccount', realm),

@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { contentSecurityPolicyForRequest } = require('./contentSecurityPolicy');
 const { initializeHubProfiles, hubProfilesForRenderer, prepareHubProfilePatch } = require('./hubProfiles');
-const { app, BaseWindow, BrowserWindow, WebContentsView, clipboard, dialog, globalShortcut, ipcMain, nativeImage, nativeTheme, net, Notification, powerMonitor, protocol, screen, session, shell, systemPreferences, webContents } = require('electron');
+const { app, BaseWindow, BrowserWindow, WebContentsView, clipboard, dialog, globalShortcut, ipcMain, nativeImage, nativeTheme, net, Notification, powerMonitor, protocol, safeStorage, screen, session, shell, systemPreferences, webContents } = require('electron');
 // The renderer's 8 MiB semi-space keeps the long-lived widget lean.
 const RENDERER_JS_FLAGS = '--max-semi-space-size=8 --expose-gc';
 const existingJsFlags = app.commandLine.getSwitchValue('js-flags').trim();
@@ -49,10 +49,8 @@ const { createMimoExchangeFetch } = require('./providers/mimo/exchangeFetch');
 
 const workbuddyOAuth = require('../shared/providers/workbuddy/oauth');
 const { createWorkbuddyManagedAccounts } = require('./providers/workbuddy/managedAccounts');
-const {
-  createWorkbuddyLocalAuth,
-  isSupportedWorkbuddyLocalAppPlatform
-} = require('./providers/workbuddy/localAuth');
+const { createWorkbuddyLocalAuth, isSupportedWorkbuddyLocalAppPlatform } = require('./providers/workbuddy/localAuth');
+const { createAntigravityManagerService } = require('./antigravityManager');
 const { createElectronLimitsFetch } = require('./limits/fetch');
 const { createLimitsHistoryStore } = require('./limits/historyStore');
 const { historyRowKey } = require('./limits/historyIdentity');
@@ -569,6 +567,9 @@ const TRAY_OPEN_VIEW_IDS = new Set(['home', 'project', 'session', 'limits', 'tre
 let mainWindow = null;
 let dashboardWindow = null;
 let dashboardWindowReady = false;
+let antigravityManagerWindow = null;
+let antigravityManagerWindowReady = false;
+let antigravityManagerService = null;
 let settingsPath = null;
 let settings = null;
 let initialLimitProvidersPending = false;
@@ -2615,8 +2616,10 @@ function nativeMaterialOptions(source = settings, dashboard = false) {
 function applyNativeMaterial(source = settings) {
   syncNativeMaterialVisibility(mainWindow, nativeMaterialOptions(source));
   syncNativeMaterialVisibility(dashboardWindow, nativeMaterialOptions(source, true));
+  syncNativeMaterialVisibility(antigravityManagerWindow, nativeMaterialOptions(source, true));
   syncWindowsBackdrop(mainWindow, { enabled: nativeBlurEnabled(source), mode: source.windowsBackdrop });
   syncWindowsBackdrop(dashboardWindow, { enabled: nativeBlurEnabled(source) });
+  syncWindowsBackdrop(antigravityManagerWindow, { enabled: nativeBlurEnabled(source) });
   limitsHistoryController?.syncMaterial();
 }
 
@@ -5709,6 +5712,9 @@ function pushSettingsToRenderer() {
   if (dashboardWindow && !dashboardWindow.isDestroyed()) {
     try { dashboardWindow.webContents.send('settings:push', payload); } catch (_) {}
   }
+  if (antigravityManagerWindow && !antigravityManagerWindow.isDestroyed()) {
+    try { antigravityManagerWindow.webContents.send('settings:push', payload); } catch (_) {}
+  }
 }
 
 let edgeDockController = null;
@@ -6627,6 +6633,7 @@ function ensureTray() {
         activeCodexAccountId: codex.activeAccountId,
         codexSwitching: codex.switching,
         maskAccountEmails: Boolean(settings?.maskLimitAccountEmails),
+        antigravityManagerAvailable: true,
         edgeDockSupported: edgeDockSupported(process.platform),
         notchSupported: process.platform === 'darwin',
         notchEnabled: settings?.notchEnabled === true,
@@ -6655,6 +6662,7 @@ function ensureTray() {
     },
     onCancelMouseDown: () => { recentPopoverBlur = null; },
     onOpenView: openViewFromTray,
+    onOpenAntigravityManager: () => { if (!screenUiSuspended) createAntigravityManagerWindow(); },
     onRefresh: () => { void refreshFromTray(); },
     onSetTrayContent: setTrayContentFromMenu,
     onSetWindowPresentation: setWindowPresentationFromMenu,
@@ -6769,6 +6777,7 @@ function startMode() {
       void getSyncContentRuntime().refresh();
       void getAccountPresentationSync().refresh();
       reconcileSharedSubscriptions();
+      void antigravityManagerService?.pushSnapshotToHubNow?.();
       return;
     }
     await stopEmbeddedHub();
@@ -6783,6 +6792,7 @@ function startMode() {
       void getSyncContentRuntime().refresh();
       void getAccountPresentationSync().refresh();
       reconcileSharedSubscriptions();
+      void antigravityManagerService?.pushSnapshotToHubNow?.();
     } else {
       startLocalCollector();
       reconcileSharedSubscriptions();
@@ -7997,6 +8007,115 @@ async function getDashboardHistory(options = {}) {
   }, settings?.modelAliases, { grouping: settings?.modelAliasGrouping });
 }
 
+function ensureAntigravityManagerService() {
+  if (antigravityManagerService) return antigravityManagerService;
+  antigravityManagerService = createAntigravityManagerService({
+    baseDir: path.join(app.getPath('userData'), 'antigravity-manager'),
+    safeStorage,
+    fetch: electronLimitsFetch(),
+    openExternal: (url) => shell.openExternal(url),
+    getDeviceIdentity: () => ({
+      deviceId: String(settings?.deviceId || '').trim() || defaultDeviceId(),
+      hostname: os.hostname() || 'desktop'
+    }),
+    getHubSyncTarget: () => {
+      if (settings?.hubMode === 'host' && embeddedHub) {
+        return { mode: 'host', embeddedHub };
+      }
+      if (settings?.hubMode === 'client') {
+        const cfg = effectiveHubConfig();
+        if (cfg.url) return { mode: 'client', hubUrl: cfg.url, secret: cfg.secret };
+      }
+      return null;
+    },
+    onStateChanged: (nextState) => {
+      if (antigravityManagerWindow && !antigravityManagerWindow.isDestroyed()) {
+        try { antigravityManagerWindow.webContents.send('antigravityManager:state', nextState); } catch (_) {}
+      }
+    },
+    onRefreshProgress: (progress) => {
+      if (antigravityManagerWindow && !antigravityManagerWindow.isDestroyed()) {
+        try { antigravityManagerWindow.webContents.send('antigravityManager:refreshProgress', progress); } catch (_) {}
+      }
+    },
+    onImportProgress: (progress) => {
+      if (antigravityManagerWindow && !antigravityManagerWindow.isDestroyed()) {
+        try { antigravityManagerWindow.webContents.send('antigravityManager:importProgress', progress); } catch (_) {}
+      }
+    },
+    logger: {
+      log: (msg) => console.log(`[ag-manager] ${msg}`),
+      warn: (msg) => console.warn(`[ag-manager] ${msg}`),
+      error: (msg) => console.error(`[ag-manager] ${msg}`)
+    }
+  });
+  return antigravityManagerService;
+}
+
+function discardFailedAntigravityManagerWindow(win, reason) {
+  if (!win || win !== antigravityManagerWindow || win.isDestroyed()) return;
+  console.log(`[ag-manager] ${reason}`);
+  win.destroy();
+}
+
+function createAntigravityManagerWindow() {
+  ensureAntigravityManagerService();
+  if (antigravityManagerWindow && !antigravityManagerWindow.isDestroyed()) {
+    if (antigravityManagerWindowReady) showDashboardWindow(antigravityManagerWindow);
+    return antigravityManagerWindow;
+  }
+  const windowOptions = {
+    width: 980,
+    height: 680,
+    minWidth: 720,
+    minHeight: 500,
+    frame: false,
+    transparent: true,
+    show: false,
+    backgroundColor: '#00000000',
+    ...appWindowIcon(),
+    skipTaskbar: false,
+    ...(process.platform === 'darwin' ? { vibrancy: 'hud', visualEffectState: 'active' } : {}),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  };
+  const managerWindow = new BrowserWindow(windowOptions);
+  antigravityManagerWindow = managerWindow;
+  antigravityManagerWindowReady = false;
+  applyWindowsChrome(managerWindow, { round: true });
+  suppressLinuxSystemContextMenu(managerWindow);
+  syncWindowsBackdrop(managerWindow, { enabled: nativeBlurEnabled() });
+  attachNativeMaterialVisibility(managerWindow, () => nativeMaterialOptions(settings, true));
+  syncNativeMaterialVisibility(managerWindow, nativeMaterialOptions(settings, true));
+  managerWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isAllowedExternalUrl(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  managerWindow.webContents.on('will-navigate', (event, url) => {
+    event.preventDefault();
+    if (isAllowedExternalUrl(url)) shell.openExternal(url);
+  });
+  managerWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, _url, isMainFrame) => {
+    if (!isMainFrame || errorCode === -3) return;
+    discardFailedAntigravityManagerWindow(managerWindow, `load failed: ${errorDescription}`);
+  });
+  managerWindow.on('unresponsive', () => {
+    if (!managerWindow.isVisible()) discardFailedAntigravityManagerWindow(managerWindow, 'renderer became unresponsive while opening');
+  });
+  managerWindow.on('closed', () => {
+    if (antigravityManagerWindow === managerWindow) {
+      antigravityManagerWindow = null;
+      antigravityManagerWindowReady = false;
+    }
+  });
+  managerWindow.loadFile(path.join(__dirname, 'renderer', 'antigravityManager.html'))
+    .catch((error) => discardFailedAntigravityManagerWindow(managerWindow, `load failed: ${error.message}`));
+  return managerWindow;
+}
+
 const approvalAlertRuntime = createApprovalAlertRuntime({
   onError: (error) => console.log(`[approval-alerts] ${error.message}`),
   onAlertSent: (alert) => ensureOpenClawBridge().onApprovalAlert(alert)
@@ -8131,6 +8250,7 @@ app.whenReady().then(() => {
   regenerateTokscalePricing();
   if (widgetRuntimeSupported) ensureMacWidgetDemand();
   startMode();
+  ensureAntigravityManagerService().start();
   void ensureOpenClawBridge().reconcile(settings.reportIntegrations);
   void reconcileApprovalAlerts();
   void widgetRecovery.then((result) => {
@@ -10090,6 +10210,137 @@ app.whenReady().then(() => {
   });
   ipcMain.on('dashboard:minimize', (event) => { BrowserWindow.fromWebContents(event.sender)?.minimize(); });
   ipcMain.on('dashboard:close', (event) => { BrowserWindow.fromWebContents(event.sender)?.close(); });
+  ipcMain.handle('antigravityManager:open', () => {
+    if (screenUiSuspended) return false;
+    createAntigravityManagerWindow();
+    return true;
+  });
+  ipcMain.on('antigravityManager:ready', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win !== antigravityManagerWindow || win.isDestroyed()) return;
+    if (process.platform === 'darwin') win.setBackgroundColor('#00000000');
+    antigravityManagerWindowReady = true;
+    showDashboardWindow(win);
+  });
+  ipcMain.on('antigravityManager:minimize', (event) => { BrowserWindow.fromWebContents(event.sender)?.minimize(); });
+  ipcMain.on('antigravityManager:close', (event) => { BrowserWindow.fromWebContents(event.sender)?.close(); });
+  ipcMain.handle('antigravityManager:getState', () => ensureAntigravityManagerService().getState());
+  ipcMain.handle('antigravityManager:updateConfig', (_event, patch) => ensureAntigravityManagerService().updateConfig(patch || {}));
+  ipcMain.handle('antigravityManager:refreshAccount', (_event, id) => ensureAntigravityManagerService().refreshAccount(id));
+  ipcMain.handle('antigravityManager:refreshAccounts', (_event, ids) => ensureAntigravityManagerService().refreshAccounts(Array.isArray(ids) ? ids : []));
+  ipcMain.handle('antigravityManager:refreshAll', () => ensureAntigravityManagerService().refreshAccounts([]));
+  ipcMain.handle('antigravityManager:cancelRefresh', () => ensureAntigravityManagerService().cancelRefresh());
+  ipcMain.handle('antigravityManager:switchAccount', (_event, id, targetClient) => ensureAntigravityManagerService().switchAccountTo(id, targetClient));
+  ipcMain.handle('antigravityManager:switchBestAccount', (_event, targetClient) => ensureAntigravityManagerService().switchBestAccount(targetClient));
+  ipcMain.handle('antigravityManager:detectActiveClients', () => ensureAntigravityManagerService().detectActiveClients());
+  ipcMain.handle('antigravityManager:startOAuthLogin', (_event, clientKey) => ensureAntigravityManagerService().startOAuthLogin(clientKey));
+  ipcMain.handle('antigravityManager:cancelOAuthLogin', () => ensureAntigravityManagerService().cancelOAuthLogin());
+  ipcMain.handle('antigravityManager:importFromString', (_event, content, options) => ensureAntigravityManagerService().importFromString(content, options || {}));
+  ipcMain.handle('antigravityManager:pickAndImportJson', async (event, options) => {
+    const owner = antigravityManagerWindow && !antigravityManagerWindow.isDestroyed()
+      ? antigravityManagerWindow
+      : actionWindowForEvent(BrowserWindow, event, mainWindow);
+    /** @type {import('electron').OpenDialogOptions} */
+    const dialogOpts = {
+      properties: ['openFile'],
+      filters: [{ name: 'JSON / Text', extensions: ['json', 'txt'] }]
+    };
+    const picked = await (owner ? dialog.showOpenDialog(owner, dialogOpts) : dialog.showOpenDialog(dialogOpts));
+    if (picked.canceled || !picked.filePaths?.[0]) return { canceled: true };
+    try {
+      const content = await fs.promises.readFile(picked.filePaths[0], 'utf8');
+      return await ensureAntigravityManagerService().importFromString(content, options || {});
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  ipcMain.handle('antigravityManager:importDefaultDataDir', () => {
+    try {
+      return ensureAntigravityManagerService().importDataDir();
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  ipcMain.handle('antigravityManager:pickAndImportDataDir', async (event) => {
+    const owner = antigravityManagerWindow && !antigravityManagerWindow.isDestroyed()
+      ? antigravityManagerWindow
+      : actionWindowForEvent(BrowserWindow, event, mainWindow);
+    /** @type {import('electron').OpenDialogOptions} */
+    const dialogOpts = { properties: ['openDirectory'] };
+    const picked = await (owner ? dialog.showOpenDialog(owner, dialogOpts) : dialog.showOpenDialog(dialogOpts));
+    if (picked.canceled || !picked.filePaths?.[0]) return { canceled: true };
+    try {
+      return ensureAntigravityManagerService().importDataDir(picked.filePaths[0]);
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  ipcMain.handle('antigravityManager:pickAndImportStateDb', async (event) => {
+    const owner = antigravityManagerWindow && !antigravityManagerWindow.isDestroyed()
+      ? antigravityManagerWindow
+      : actionWindowForEvent(BrowserWindow, event, mainWindow);
+    /** @type {import('electron').OpenDialogOptions} */
+    const dialogOpts = {
+      properties: ['openFile'],
+      filters: [{ name: 'SQLite DB', extensions: ['vscdb', 'db', 'sqlite'] }]
+    };
+    const picked = await (owner ? dialog.showOpenDialog(owner, dialogOpts) : dialog.showOpenDialog(dialogOpts));
+    if (picked.canceled || !picked.filePaths?.[0]) return { canceled: true };
+    try {
+      return await ensureAntigravityManagerService().importStateDb(picked.filePaths[0]);
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  ipcMain.handle('antigravityManager:scanLocalAccounts', async () => {
+    try {
+      return await ensureAntigravityManagerService().scanLocalAccounts();
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  ipcMain.handle('antigravityManager:pickAndImportV1Dir', async (event) => {
+    const owner = antigravityManagerWindow && !antigravityManagerWindow.isDestroyed()
+      ? antigravityManagerWindow
+      : actionWindowForEvent(BrowserWindow, event, mainWindow);
+    /** @type {import('electron').OpenDialogOptions} */
+    const dialogOpts = { properties: ['openDirectory'] };
+    const picked = await (owner ? dialog.showOpenDialog(owner, dialogOpts) : dialog.showOpenDialog(dialogOpts));
+    if (picked.canceled || !picked.filePaths?.[0]) return { canceled: true };
+    try {
+      return await ensureAntigravityManagerService().importV1Dir(picked.filePaths[0]);
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  ipcMain.handle('antigravityManager:exportAccounts', async (event, ids) => {
+    const items = ensureAntigravityManagerService().exportJson(Array.isArray(ids) ? ids : []);
+    if (!Array.isArray(items) || items.length === 0) {
+      return { ok: false, error: 'No exportable accounts' };
+    }
+    const owner = antigravityManagerWindow && !antigravityManagerWindow.isDestroyed()
+      ? antigravityManagerWindow
+      : actionWindowForEvent(BrowserWindow, event, mainWindow);
+    const defaultPath = `antigravity_accounts_${new Date().toISOString().slice(0, 10)}.json`;
+    /** @type {import('electron').SaveDialogOptions} */
+    const dialogOpts = {
+      defaultPath,
+      filters: [{ name: 'JSON', extensions: ['json'] }]
+    };
+    const picked = await (owner ? dialog.showSaveDialog(owner, dialogOpts) : dialog.showSaveDialog(dialogOpts));
+    if (picked.canceled || !picked.filePath) return { canceled: true };
+    try {
+      await fs.promises.writeFile(picked.filePath, `${JSON.stringify(items, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+      try { await fs.promises.chmod(picked.filePath, 0o600); } catch (_) {}
+      return { ok: true, count: items.length, filePath: picked.filePath };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  ipcMain.handle('antigravityManager:deleteAccounts', (_event, ids) => ensureAntigravityManagerService().deleteAccounts(Array.isArray(ids) ? ids : []));
+  ipcMain.handle('antigravityManager:setAccountDisabled', (_event, id, disabled) => ensureAntigravityManagerService().setAccountDisabled(id, disabled));
+  ipcMain.handle('antigravityManager:bindDeviceProfile', (_event, id, mode) => ensureAntigravityManagerService().bindDeviceProfile(id, mode));
+  ipcMain.handle('antigravityManager:restoreOriginalDevice', () => ensureAntigravityManagerService().restoreOriginalDevice());
   app.on('activate', () => {
     if (screenUiSuspended) return;
     // A parked history window is not owned by the dock or notch, so the normal
@@ -10237,6 +10488,7 @@ app.on('before-quit', () => {
   // An updater can abort this quit; subsequent reads need an open store.
   limitsHistoryStore = null;
   cancelAntigravityManagedAccountLogin();
+  if (typeof antigravityManagerService !== 'undefined') antigravityManagerService?.stop();
   workbuddyManagedAccountService?.cancelLogin();
   resetMacWidgetReloadThrottle();
   if (rateRefreshTimer) clearInterval(rateRefreshTimer);

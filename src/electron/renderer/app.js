@@ -414,6 +414,9 @@ const els = {
   subscriptionList: document.getElementById('subscriptionList'), subscriptionAddForm: document.getElementById('subscriptionAddForm'), subscriptionAddToggle: document.getElementById('subscriptionAddToggle'), subscriptionAddDetails: document.getElementById('subscriptionAddDetails'), subscriptionProviderInput: document.getElementById('subscriptionProviderInput'), subscriptionAccountInput: document.getElementById('subscriptionAccountInput'), subscriptionPlanNameInput: document.getElementById('subscriptionPlanNameInput'), subscriptionAmountInput: document.getElementById('subscriptionAmountInput'), subscriptionCurrencyInput: document.getElementById('subscriptionCurrencyInput'), subscriptionIntervalCountInput: document.getElementById('subscriptionIntervalCountInput'), subscriptionIntervalInput: document.getElementById('subscriptionIntervalInput'), subscriptionStartDateInput: document.getElementById('subscriptionStartDateInput'), subscriptionAutoRenewInput: document.getElementById('subscriptionAutoRenewInput'), subscriptionNextRenewalInput: document.getElementById('subscriptionNextRenewalInput'), subscriptionNote: document.getElementById('subscriptionNote'), subscriptionOrphanNotice: document.getElementById('subscriptionOrphanNotice'), subscriptionOrphanText: document.getElementById('subscriptionOrphanText'), subscriptionOrphanAdopt: document.getElementById('subscriptionOrphanAdopt'), subscriptionOrphanDiscard: document.getElementById('subscriptionOrphanDiscard'), subscriptionSyncError: document.getElementById('subscriptionSyncError'), subscriptionNextRenewalLabel: document.getElementById('subscriptionNextRenewalLabel'), subscriptionNextRenewalNote: document.getElementById('subscriptionNextRenewalNote'), subscriptionSubmit: document.getElementById('subscriptionSubmit'), subscriptionCancelEdit: document.getElementById('subscriptionCancelEdit'), subscriptionTotalRow: document.getElementById('subscriptionTotalRow'), subscriptionErrorMessage: document.getElementById('subscriptionErrorMessage'), subscriptionPlanFields: document.getElementById('subscriptionPlanFields'), subscriptionTopUpFields: document.getElementById('subscriptionTopUpFields'), subscriptionTopUpList: document.getElementById('subscriptionTopUpList'), subscriptionTopUpDateInput: document.getElementById('subscriptionTopUpDateInput'), subscriptionTopUpAmountInput: document.getElementById('subscriptionTopUpAmountInput'), subscriptionTopUpAddButton: document.getElementById('subscriptionTopUpAddButton'), subscriptionAmountRow: document.getElementById('subscriptionAmountRow'), subscriptionTopUpHeadingRow: document.getElementById('subscriptionTopUpHeadingRow'), subscriptionKindInputs: [...document.querySelectorAll('input[name="subscriptionKind"]')]
 };
 Object.assign(els, {
+  limitsToolsBar: document.getElementById('limitsToolsBar'),
+  limitsOpenAgManagerButton: document.getElementById('limitsOpenAgManagerButton'),
+  antigravityOpenManagerButton: document.getElementById('antigravityOpenManagerButton'),
   sessionSearchToggle: document.getElementById('sessionSearchToggle'),
   sessionSearchHost: document.getElementById('sessionSearchHost'),
   sessionSearchInput: document.getElementById('sessionSearchInput'),
@@ -8470,6 +8473,7 @@ function renderAppContent({ fromSearch = false } = {}) {
     els.breakdown.classList.add('hidden');
     els.serviceStatusPanel?.classList.add('hidden');
     els.trendsPanel.classList.add('hidden');
+    els.limitsToolsBar?.classList.add('hidden');
     els.limitsPanel.classList.add('hidden');
     els.homePanel.classList.remove('hidden');
     renderHome();
@@ -8478,12 +8482,14 @@ function renderAppContent({ fromSearch = false } = {}) {
     els.breakdown.classList.add('hidden');
     els.serviceStatusPanel?.classList.add('hidden');
     els.trendsPanel.classList.add('hidden');
+    els.limitsToolsBar?.classList.remove('hidden');
     els.limitsPanel.classList.remove('hidden');
     maybeFetchCodexResetForecast();
     renderLimits();
   } else if (state.breakdown === 'trends') {
     els.homePanel.classList.add('hidden');
     els.breakdown.classList.add('hidden');
+    els.limitsToolsBar?.classList.add('hidden');
     els.limitsPanel.classList.add('hidden');
     els.serviceStatusPanel?.classList.add('hidden');
     els.trendsPanel.classList.remove('hidden');
@@ -8491,6 +8497,7 @@ function renderAppContent({ fromSearch = false } = {}) {
   } else if (state.breakdown === 'status') {
     els.homePanel.classList.add('hidden');
     els.breakdown.classList.add('hidden');
+    els.limitsToolsBar?.classList.add('hidden');
     els.limitsPanel.classList.add('hidden');
     els.trendsPanel.classList.add('hidden');
     els.serviceStatusPanel?.classList.remove('hidden');
@@ -8498,6 +8505,7 @@ function renderAppContent({ fromSearch = false } = {}) {
   } else if (state.openSession) {
     // session-detail view replaces the breakdown list; keep both the list and
     // limits hidden so a periodic re-render doesn't surface them over the detail.
+    els.limitsToolsBar?.classList.add('hidden');
     els.limitsPanel.classList.add('hidden');
     els.serviceStatusPanel?.classList.add('hidden');
     els.trendsPanel.classList.add('hidden');
@@ -18056,6 +18064,12 @@ els.minButton.addEventListener('click', (event) => {
 els.closeButton.addEventListener('click', (event) => {
   if (event.detail > 0) els.closeButton.blur();
   window.tokenMonitor.close();
+});
+els.limitsOpenAgManagerButton?.addEventListener('click', () => {
+  void window.tokenMonitor.antigravityManager?.openWindow?.();
+});
+els.antigravityOpenManagerButton?.addEventListener('click', () => {
+  void window.tokenMonitor.antigravityManager?.openWindow?.();
 });
 els.trendsPanel.addEventListener('click', (event) => {
   if (event.target.closest('.trends-spark, .trends-open-hint')) window.tokenMonitor.openDashboard();

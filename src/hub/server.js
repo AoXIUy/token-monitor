@@ -40,6 +40,12 @@ const { CONVERSATION_BASE, MAX_CONVERSATION_BYTES } = require('../shared/session
 const { createSessionConversationRelay } = require('./sessionConversations');
 const { APPROVAL_ALERT_BASE, MAX_APPROVAL_BODY_BYTES } = require('../shared/approvalProtocol');
 const { createApprovalAlertStore } = require('./approvalAlerts');
+const {
+  AG_MANAGER_BASE,
+  AG_MANAGER_SNAPSHOT_PATH,
+  MAX_AG_MANAGER_SNAPSHOT_BYTES
+} = require('../shared/antigravityManagerProtocol');
+const { createAntigravityManagerStore } = require('./antigravityManager');
 const { REPORT_GRANULARITIES } = require('../shared/usageReport');
 const {
   createMcpReportServer,
@@ -1440,6 +1446,7 @@ function createHub({
     getDevice: (id) => store.devices[id] });
   const approvalAlertStore = createApprovalAlertStore({ enabled: approvalAlerts === true,
     getDevice: (id) => store.devices[id] });
+  const antigravityManagerStore = createAntigravityManagerStore({ dataFile, logger });
   let integrationManager = null;
   let openclawSurface = null;
   const reportManager = createReportManager({
@@ -1686,6 +1693,7 @@ function createHub({
     }
     conversationRelay.remove(deviceId);
     approvalAlertStore.remove(deviceId);
+    antigravityManagerStore.removeDevice(deviceId);
     broadcastStats('delete');
     try { reportManager.onStatsChanged(); } catch (error) {
       (logger.error || console.error)('Hub failed to update report snapshot on delete:', error);
@@ -1882,6 +1890,23 @@ function createHub({
         }
         return sendJson(res, 400, { error: 'invalid_request' });
       }
+    }
+
+    if (url.pathname === AG_MANAGER_SNAPSHOT_PATH && req.method === 'PUT') {
+      try {
+        const payload = await readJsonBody(req, MAX_AG_MANAGER_SNAPSHOT_BYTES);
+        return sendJson(res, 200, antigravityManagerStore.putSnapshot(payload));
+      } catch (error) {
+        if (error.code === 'payload_too_large') {
+          res.shouldKeepAlive = false;
+          return sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+        }
+        return sendJson(res, 400, { error: 'invalid_request', message: error.message });
+      }
+    }
+
+    if (url.pathname === AG_MANAGER_BASE && req.method === 'GET') {
+      return sendJson(res, 200, antigravityManagerStore.getSnapshots());
     }
 
     if (req.method === 'GET' && url.pathname === '/api/sync/content') return sendJson(res, 200, getSyncContent());
@@ -2098,6 +2123,8 @@ function createHub({
     getSubscriptions, setSubscriptions, getSyncContent, getSyncSettings, setSyncSettings, setSyncTitlePolicy,
     setSessionConversationsEnabled: (enabled) => conversationRelay.setEnabled(enabled),
     setApprovalAlertsEnabled: (enabled) => approvalAlertStore.setEnabled(enabled),
+    setAntigravityManagerSnapshot: (payload) => antigravityManagerStore.putSnapshot(payload),
+    getAntigravityManagerSnapshot: () => antigravityManagerStore.getSnapshots(),
     getReportConfig: () => reportManager.getConfig(),
     setReportConfig: (patch) => reportManager.setConfig(patch),
     listReports: (options) => reportManager.listReports(options),

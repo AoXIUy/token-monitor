@@ -73,6 +73,8 @@ const NODE_RUNTIME_SOURCE_FILES = Object.freeze([
   'src/shared/sessionConversationProtocol.js',
   'src/hub/approvalAlerts.js',
   'src/shared/approvalProtocol.js',
+  'src/hub/antigravityManager.js',
+  'src/shared/antigravityManagerProtocol.js',
   'src/shared/http.js',
   'src/shared/outboundFetch.js',
   'src/shared/config.js'

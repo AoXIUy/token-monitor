@@ -396,6 +396,10 @@ function buildTrayMenuTemplate(options = {}) {
       }))
     },
     ...(codexItem ? [codexItem] : []),
+    ...(state.antigravityManagerAvailable === true ? [{
+      label: t('trayMenu.antigravityManager'),
+      click: callback('onOpenAntigravityManager')
+    }] : []),
     { type: 'separator' },
     {
       label: t('trayMenu.trayDisplay'),
@@ -461,6 +465,7 @@ function createTray({
   onRestartPluginsSafe,
   onPluginMenu,
   onOpenView,
+  onOpenAntigravityManager,
   onQuit,
   onRefresh,
   onSetTrayContent,
@@ -487,6 +492,7 @@ function createTray({
     onRestartPluginsSafe,
     onPluginMenu,
     onOpenView,
+    onOpenAntigravityManager,
     onQuit,
     onRefresh,
     onSetTrayContent,

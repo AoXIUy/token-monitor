@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Antigravity Account Manager</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="antigravityManager.css" />
+  </head>
+  <body>
+    <header class="agm-header">
+      <div class="agm-title-wrap">
+        <span class="agm-title" data-i18n="agManager.title">Antigravity Account Manager</span>
+        <span id="agmIsolatedBadge" class="agm-pill agm-pill-muted" data-i18n="agManager.isolatedBadge">Standalone · Separated from main collector</span>
+      </div>
+      <div class="agm-header-actions">
+        <button id="agmThemeToggle" class="icon-button" type="button" aria-label="Toggle flat background">◐</button>
+        <button id="agmMinBtn" class="icon-button" type="button" aria-label="Minimize">−</button>
+        <button id="agmCloseBtn" class="icon-button" type="button" aria-label="Close">×</button>
+      </div>
+    </header>
+
+    <section class="agm-summary-bar">
+      <div id="agmStatsPills" class="agm-stats-pills"></div>
+      <div id="agmRuntimeMeta" class="agm-runtime-meta"></div>
+    </section>
+
+    <section class="agm-toolbar">
+      <div class="agm-toolbar-group">
+        <label class="agm-target-select-wrap">
+          <span class="agm-label" data-i18n="agManager.targetClient">Target</span>
+          <select id="agmTargetClient" class="agm-select" aria-label="Switch target client">
+            <option value="auto" data-i18n="agManager.target.auto">Auto detect</option>
+            <option value="classic" data-i18n="agManager.target.classic">Antigravity (Classic)</option>
+            <option value="ide" data-i18n="agManager.target.ide">Antigravity IDE</option>
+            <option value="agy" data-i18n="agManager.target.agy">Antigravity CLI (agy)</option>
+            <option value="acp" data-i18n="agManager.target.acp">IDE Plugin (ACP)</option>
+          </select>
+        </label>
+        <button id="agmSwitchBestBtn" class="agm-btn agm-btn-accent" type="button" data-i18n="agManager.switchBest">Switch Best</button>
+      </div>
+
+      <div class="agm-toolbar-group agm-toolbar-right">
+        <div class="agm-refresh-split" id="agmRefreshSplit">
+          <button id="agmRefreshNowBtn" class="agm-btn agm-btn-primary" type="button">
+            <span id="agmRefreshNowLabel" data-i18n="agManager.refreshAll">Refresh All</span>
+          </button>
+          <button id="agmCancelRefreshBtn" class="agm-btn agm-btn-danger hidden" type="button" data-i18n="agManager.cancel">Cancel</button>
+          <button id="agmRefreshMenuBtn" class="agm-btn agm-btn-split-arrow" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Auto refresh settings">▾</button>
+
+          <div id="agmRefreshPopover" class="agm-popover hidden" role="dialog" aria-label="Refresh settings">
+            <div class="agm-popover-title" data-i18n="agManager.refreshSettingsTitle">Refresh &amp; Sync Settings</div>
+            <label class="agm-toggle-row">
+              <span class="agm-toggle-text">
+                <strong data-i18n="agManager.startupRefresh">Refresh on startup</strong>
+                <small data-i18n="agManager.startupRefreshDesc">Automatically refresh all accounts once when the app starts (default off).</small>
+              </span>
+              <input id="agmStartupRefreshInput" type="checkbox" />
+            </label>
+            <label class="agm-toggle-row">
+              <span class="agm-toggle-text">
+                <strong data-i18n="agManager.autoRefresh">Background auto-refresh</strong>
+                <small data-i18n="agManager.autoRefreshDesc">Periodically refresh quotas in the background (default off).</small>
+              </span>
+              <input id="agmAutoRefreshInput" type="checkbox" />
+            </label>
+            <div class="agm-field-grid">
+              <label class="agm-field">
+                <span data-i18n="agManager.intervalMinutes">Interval (min)</span>
+                <input id="agmIntervalInput" type="number" min="1" max="1440" value="10" />
+              </label>
+              <label class="agm-field">
+                <span data-i18n="agManager.concurrency">Concurrency</span>
+                <input id="agmConcurrencyInput" type="number" min="1" max="20" value="5" />
+              </label>
+              <label class="agm-field">
+                <span data-i18n="agManager.slideDelay">Slide delay (s)</span>
+                <input id="agmSlideDelayInput" type="number" min="0" max="10" step="0.1" value="0.2" />
+              </label>
+            </div>
+            <label class="agm-toggle-row agm-toggle-divider">
+              <span class="agm-toggle-text">
+                <strong data-i18n="agManager.syncToHub">Sync to Hub (Android view)</strong>
+                <small data-i18n="agManager.syncToHubDesc">Push sanitized quota snapshots (no tokens) to Node Hub for read-only viewing on Android.</small>
+              </span>
+              <input id="agmSyncToHubInput" type="checkbox" />
+            </label>
+          </div>
+        </div>
+
+        <button id="agmOpenImportBtn" class="agm-btn" type="button" data-i18n="agManager.importAdd">Import / Add</button>
+        <button id="agmExportBtn" class="agm-btn" type="button" data-i18n="agManager.exportJson">Export JSON</button>
+        <button id="agmRestoreDeviceBtn" class="agm-btn hidden" type="button" data-i18n="agManager.restoreDevice">Restore Device</button>
+      </div>
+    </section>
+
+    <section class="agm-filters">
+      <div class="agm-search-wrap">
+        <input id="agmSearchInput" class="agm-search" type="search" autocomplete="off" spellcheck="false" data-i18n-placeholder="agManager.searchPlaceholder" placeholder="Search by email or name..." aria-label="Search accounts" />
+      </div>
+      <div id="agmFilterChips" class="agm-filter-chips" role="group" aria-label="Filter accounts">
+        <button class="agm-chip active" type="button" data-filter="all" data-i18n="agManager.filter.all">All</button>
+        <button class="agm-chip" type="button" data-filter="ULTRA">Ultra</button>
+        <button class="agm-chip" type="button" data-filter="PRO">Pro</button>
+        <button class="agm-chip" type="button" data-filter="FREE">Free</button>
+        <button class="agm-chip" type="button" data-filter="abnormal" data-i18n="agManager.filter.abnormal">Abnormal</button>
+      </div>
+      <div class="agm-batch-bar">
+        <label class="agm-select-all">
+          <input id="agmSelectAllInput" type="checkbox" />
+          <span data-i18n="agManager.selectAll">Select all</span>
+        </label>
+        <button id="agmBatchDeleteBtn" class="agm-btn agm-btn-sm agm-btn-danger hidden" type="button" data-i18n="agManager.deleteSelected">Delete selected</button>
+      </div>
+    </section>
+
+    <div id="agmProgressBar" class="agm-progress-banner hidden" role="status" aria-live="polite"></div>
+    <div id="agmToast" class="agm-toast hidden" role="status" aria-live="polite"></div>
+
+    <main id="agmAccountList" class="agm-account-list"></main>
+
+    <dialog id="agmImportDialog" class="agm-dialog" aria-labelledby="agmImportTitle">
+      <div class="agm-dialog-head">
+        <h2 id="agmImportTitle" data-i18n="agManager.importDialogTitle">Import or Add Accounts</h2>
+        <button id="agmCloseImportDialog" class="icon-button" type="button" aria-label="Close">×</button>
+      </div>
+      <div class="agm-dialog-tabs" role="tablist">
+        <button class="agm-dialog-tab active" type="button" data-import-tab="json" data-i18n="agManager.tab.json">JSON / Tokens</button>
+        <button class="agm-dialog-tab" type="button" data-import-tab="db" data-i18n="agManager.tab.db">Database / Data Dir</button>
+        <button class="agm-dialog-tab" type="button" data-import-tab="oauth" data-i18n="agManager.tab.oauth">Google OAuth</button>
+      </div>
+
+      <div id="agmImportTabJson" class="agm-dialog-body">
+        <p class="agm-hint" data-i18n="agManager.jsonHint">Import Antigravity-Manager exported JSON (antigravity_accounts_*.json) or paste refresh tokens (1//...).</p>
+        <div class="agm-inline-actions">
+          <button id="agmPickJsonFileBtn" class="agm-btn" type="button" data-i18n="agManager.pickJsonFile">Choose JSON File…</button>
+        </div>
+        <textarea id="agmTokenPasteInput" class="agm-textarea" rows="5" spellcheck="false" placeholder='[{"email":"user@gmail.com","refresh_token":"1//..."}] or 1//...'></textarea>
+        <label class="agm-checkbox-inline">
+          <input id="agmRefreshAfterImportInput" type="checkbox" checked />
+          <span data-i18n="agManager.refreshAfterImport">Refresh quotas immediately after import</span>
+        </label>
+        <div class="agm-dialog-actions">
+          <button id="agmSubmitPasteBtn" class="agm-btn agm-btn-primary" type="button" data-i18n="agManager.importNow">Import</button>
+        </div>
+      </div>
+
+      <div id="agmImportTabDb" class="agm-dialog-body hidden">
+        <div class="agm-db-option">
+          <div>
+            <strong data-i18n="agManager.importDataDir">Import Antigravity-Manager Data Directory</strong>
+            <p class="agm-hint" data-i18n="agManager.importDataDirDesc">Imports accounts.json + accounts/*.json (e.g. ~/.antigravity_tools), preserving cached quotas and active selections.</p>
+          </div>
+          <div class="agm-inline-actions">
+            <button id="agmImportDefaultDirBtn" class="agm-btn" type="button" data-i18n="agManager.importDefaultDir">Import Default (~/.antigravity_tools)</button>
+            <button id="agmPickDataDirBtn" class="agm-btn agm-btn-primary" type="button" data-i18n="agManager.pickDataDir">Choose Folder…</button>
+          </div>
+        </div>
+        <div class="agm-db-option">
+          <div>
+            <strong data-i18n="agManager.scanLocal">Scan Local Logged-in Accounts</strong>
+            <p class="agm-hint" data-i18n="agManager.scanLocalDesc">Scans system Keyring, Antigravity Classic/IDE state.vscdb, and ~/.gemini credentials.</p>
+          </div>
+          <div class="agm-inline-actions">
+            <button id="agmScanLocalBtn" class="agm-btn agm-btn-primary" type="button" data-i18n="agManager.scanLocalBtn">Scan &amp; Import Local</button>
+          </div>
+        </div>
+        <div class="agm-db-option">
+          <div>
+            <strong data-i18n="agManager.importCustomDb">Import Custom state.vscdb / V1 Backup</strong>
+            <p class="agm-hint" data-i18n="agManager.importCustomDbDesc">Select a state.vscdb SQLite file or an Antigravity-Agent V1 directory.</p>
+          </div>
+          <div class="agm-inline-actions">
+            <button id="agmPickStateDbBtn" class="agm-btn" type="button" data-i18n="agManager.pickStateDb">Choose state.vscdb…</button>
+            <button id="agmPickV1DirBtn" class="agm-btn" type="button" data-i18n="agManager.pickV1Dir">Choose V1 Dir…</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="agmImportTabOauth" class="agm-dialog-body hidden">
+        <p class="agm-hint" data-i18n="agManager.oauthHint">Sign in with Google via local loopback PKCE flow (includes aicode scope for CLI/ACP switching).</p>
+        <label class="agm-field">
+          <span data-i18n="agManager.oauthClientType">OAuth Client</span>
+          <select id="agmOAuthClientSelect" class="agm-select">
+            <option value="antigravity_enterprise" data-i18n="agManager.oauthStandard">Antigravity (Standard)</option>
+            <option value="antigravity_gcp" data-i18n="agManager.oauthEnterprise">Google Cloud / Vertex AI (Enterprise)</option>
+          </select>
+        </label>
+        <div class="agm-dialog-actions">
+          <button id="agmStartOAuthBtn" class="agm-btn agm-btn-primary" type="button" data-i18n="agManager.startOAuth">Sign in with Google</button>
+          <button id="agmCancelOAuthBtn" class="agm-btn agm-btn-danger hidden" type="button" data-i18n="agManager.cancel">Cancel</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="agmDeviceDialog" class="agm-dialog" aria-labelledby="agmDeviceTitle">
+      <div class="agm-dialog-head">
+        <h2 id="agmDeviceTitle" data-i18n="agManager.deviceDialogTitle">Device Fingerprint Binding</h2>
+        <button id="agmCloseDeviceDialog" class="icon-button" type="button" aria-label="Close">×</button>
+      </div>
+      <div id="agmDeviceBody" class="agm-dialog-body"></div>
+    </dialog>
+
+    <script src="themePresets.js"></script>
+    <script src="i18n.js"></script>
+    <script src="fontSettings.js"></script>
+    <script src="../motionPreference.js"></script>
+    <script src="glassRendering.js"></script>
+    <script src="antigravityManager.js"></script>
+  </body>
+</html>

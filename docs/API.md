@@ -452,6 +452,13 @@ This fork's optional Codex/Antigravity approval-alert stream is Node-Hub-only, r
 - `GET /api/approval-alerts`: Read-only endpoint returning `{ "ok": true, "alerts": [...] }` sorted oldest-first. Each entry carries `{ id, deviceId, deviceName, client, sessionId, tool, command, description, projectLabel, createdAt, expiresAt }`.
 - `POST /api/approval-alerts`: Producer bridge submits a read-only alert (`{ deviceId, client, sessionId, tool, command, description, projectLabel }`, body limit 16 KiB) and immediately receives `{ "ok": true, "id": "<uuid>", "expiresAt": <epochMs> }` (2-minute TTL, FIFO-bounded at 32 global / 8 per-device). No `/poll`, `/decision` or `/cancel` endpoints exist; confirming or denying stays strictly on the desktop.
 
+### Antigravity Manager snapshots (Node-Hub-only)
+
+The standalone desktop Antigravity Account Manager optionally publishes sanitized multi-account quota snapshots to Node Hub (Cloudflare Worker does not implement these routes). Both routes require the Hub bearer secret and set `Cache-Control: no-store`. Raw OAuth tokens, refresh tokens and device fingerprint machine identifiers are stripped on serialization and rejected by the Hub sanitizer.
+
+- `PUT /api/antigravity-manager/snapshot`: Accepts a per-device snapshot (`{ version: 1, deviceId, hostname, updatedAt, settings: { startupRefresh, autoRefresh, refreshIntervalMinutes }, activeAccounts: { classic, ide, agy, acp }, accounts: [...] }`, body limit 512 KiB, max 200 accounts per device) and returns `{ "ok": true, "deviceId", "accountCount", "updatedAt" }`.
+- `GET /api/antigravity-manager`: Returns `{ "ok": true, "version": 1, "updatedAt", "devices": [...] }` across up to 32 publishing desktop hosts for read-only viewing on Android (`AG 账号池`). Switching accounts, importing/exporting tokens and changing refresh settings stay desktop-only.
+
 ## Usage and project analysis reports and MCP (Node Hub extension)
 
 The Node Hub can persist standard daily, weekly, and monthly usage & project analysis reports (`token-monitor-report/v1` JSON + Markdown) and expose them over HTTP and MCP JSON-RPC 2.0. All routes sit behind the same shared `secret` Bearer / header gate as the rest of the Hub API. The Cloudflare Worker does not implement this extension. See [the reports and MCP guide](reports-mcp.md) for the schema, Markdown template, and client setups.
