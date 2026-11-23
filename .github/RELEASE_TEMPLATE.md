@@ -3,18 +3,20 @@
 ## What's changed
 
 <!-- app-update-notes:en:start -->
+### Added
+- **Native Hub HTTPS & Certificate Import:** Added native Node Hub TLS 1.2–1.3 listener support (`--tls-cert` / `--tls-key` for PEM and `--tls-pfx` / `--tls-passphrase-file` for encrypted PKCS#12 `.p12`/`.pfx`), zero-downtime certificate hot-reload via `server.setSecureContext()` and `SIGHUP`, `Strict-Transport-Security` on TLS responses, and certificate bundle import/validation (`src/shared/tlsCert.js`, `src/hub/tls.js`).
+- **Desktop, Agent & MCP Custom CA Pinning:** Added custom CA trust pinning (`--tls-ca` / `TOKEN_MONITOR_TLS_CA_FILE` and `src/shared/hubClientFetch.js`) across the Desktop client, headless Agent, and MCP server, plus Desktop Settings UI for importing, inspecting (subject, SHA-256 fingerprint, expiry), and clearing custom Hub CA or self-signed certificates per profile.
+
 ### Fixed
-- **Account Manager Switching, Keyring & Process Detection:** Hardened Antigravity Classic/IDE switching, hot-switch `language_server` respawn tracking (`excludePids` and target isolation), POSIX/macOS spaced-path and quoted `--user-data-dir` parsing, helper-process filtering, Windows Registry custom-drive executable lookup, clean Electron/AppImage spawn environment, and Windows Credential Manager reliability (anonymous Koffi structs avoiding symbol collisions, 2560-byte blob cap fallback, UTF-8/UTF-16LE decoding, and removing destructive pre-delete writes).
-- **Encrypted Storage, State DB, Quota, OAuth & Hub Sync:** Hardened `tokens.enc` to fail closed on corrupt or symlinked files with write rollback, wrapped SQLite `state.vscdb` token injection in atomic `BEGIN IMMEDIATE` transactions (fixing `isGcpTos` decoding), preserved proto3 `0%` depleted quota buckets and `401`/`403`/abort handling, tightened OAuth login timeouts/state checks and rotated refresh token persistence, blocked import path traversal, fixed scheduler refresh state/baseline tracking, separated Hub sync fetch from provider proxy transport, and preserved Hub `banCode`/`accountCount` with persistence rollback.
-- **Account Manager Themes, Layout, Accessibility & i18n:** Fixed the standalone Account Manager script load order so Porcelain light theme, theme presets, and custom fonts render cleanly instead of getting stuck in dark mode; fixed z-index and viewport flip on card menus and popovers, 3-segment Refresh/Cancel split styling, full-width readable fallback model rows, state/progress-bar synchronization, IPC clipboard copy, two-step batch delete confirmation, keyboard (`Escape`/arrow) navigation, OAuth dialog-close cancellation, and 7-language localization including all ARIA labels.
-- **Main Widget Footer & Limits Bar:** Hid `#limitsToolsBar` across all non-Limits views, replaced hardcoded dark colors on `.limits-tool-btn` with theme-aware tokens and Liquid Glass parity, and prevented narrow (`240px`) footer overlap between the live token rate, `#viewSwitcher`, and the Account Manager button.
+- **Hub Authentication, Transport & Storage Hardening:** Changed empty-secret Node Hub startup to bind `127.0.0.1` and fail closed (`503`) unless `--insecure-no-auth` is explicitly passed; enforced `>= 24`-char secrets on non-loopback binds with per-IP `401` rate limiting (`429`) and failure logging; added scoped `readSecret` and `ingestSecret` tokens; disabled `?secret=` query-string authentication; added DNS-rebinding `Host` validation, security headers, hardened HTTP timeouts, SSE connection caps, upfront `Content-Length` `413` checks, `64 KiB` control-route body limits, and `0600` atomic state persistence.
+- **Data Models, Integrations, OpenClaw & MCP Security:** Blocked prototype pollution (`__proto__`, `constructor`, `prototype`) in usage and history aggregation and sanitized malformed history rows; prevented SSRF and credential exfiltration by clearing stored API/hook tokens when integration origins change and enforcing `redirect: 'error'`; restricted OpenClaw host provisioning and `queryPermissions` mutations to local/opt-in admin flows with direct atomic `openclaw.json` writes; capped `/api/mcp` JSON-RPC batch size/concurrency, report date ranges (`2000..2100`), WeChat QR sessions, and Antigravity/approval-alert device validation.
 <!-- app-update-notes:en:end -->
 ## Download
 
-- **Windows Installer** — [Token-Monitor-Setup-0.102.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-Setup-0.102.2.exe) (recommended)
-- **Windows Portable** — [Token-Monitor-0.102.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-0.102.2.exe) (no install required)
-- **Linux amd64** — [Token-Monitor-0.102.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-0.102.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.102.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-0.102.2-x86_64.AppImage)
+- **Windows Installer** — [Token-Monitor-Setup-0.103.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-Setup-0.103.0.exe) (recommended)
+- **Windows Portable** — [Token-Monitor-0.103.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-0.103.0.exe) (no install required)
+- **Linux amd64** — [Token-Monitor-0.103.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-0.103.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.103.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-0.103.0-x86_64.AppImage)
 
 <details>
 <summary><strong>First launch and other notes</strong></summary>
@@ -23,7 +25,7 @@
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.102.2-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.102.2-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.103.0-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.103.0-x86_64.AppImage` then run it.
 
 ### Other notes
 
@@ -42,19 +44,21 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 ## 更新内容
 
 <!-- app-update-notes:zh:start -->
+### 新增
+- **原生 Hub HTTPS 与证书导入：** 为 Node Hub 新增原生 TLS 1.2–1.3 HTTPS 监听支持（支持 PEM `--tls-cert`/`--tls-key` 与加密 PKCS#12 `.p12`/`.pfx` `--tls-pfx`/`--tls-passphrase-file`）、基于 `server.setSecureContext()` 与 `SIGHUP` 的零停机证书热重载、TLS 响应 `Strict-Transport-Security` 头以及证书链导入与校验模块（`src/shared/tlsCert.js`、`src/hub/tls.js`）。
+- **桌面端、Agent 与 MCP 自定义 CA 证书信任：** 为桌面客户端、无头 Agent 与 MCP Server 新增自定义 CA 证书固定支持（`--tls-ca` / `TOKEN_MONITOR_TLS_CA_FILE` 与 `src/shared/hubClientFetch.js`），并在桌面端设置中支持按配置导入、查看（主题、SHA-256 指纹、有效期）与清除自定义 Hub CA 或自签名证书。
+
 ### 修复
-- **账号切换、系统密钥链与进程识别：** 加固 Antigravity Classic / IDE 切换流程，修复热切换 `language_server` 重生检测（`excludePids` 与目标隔离）、POSIX/macOS 含空格路径与带引号 `--user-data-dir` 解析、辅助子进程过滤、Windows 注册表自定义盘符路径发现、子进程 Electron/AppImage 环境变量清理，以及 Windows 凭据管理器稳定性（匿名 Koffi 结构体避免符号冲突、2560 字节凭据上限降级、UTF-8/UTF-16LE 解码及移除破坏性预删除）。
-- **加密存储、State DB、配额、OAuth 与 Hub 同步：** 加固 `tokens.enc` 在损坏或符号链接场景下安全失败并支持写入回滚；为 SQLite `state.vscdb` 注入加入 `BEGIN IMMEDIATE` 原子事务并修复 `isGcpTos` 解码；保留 proto3 `0%` 耗尽配额桶并修正 `401`/`403`/中止处理；完善 OAuth 登录超时与状态校验、导入路径穿越防护及轮换 `refresh_token` 持久化；修复调度器刷新状态与基线跟踪，隔离 Hub 同步请求与代理通道，并在 Hub 侧保留 `banCode`/`accountCount` 及持久化失败回滚。
-- **账号管理窗口主题、布局、无障碍与多语言：** 修复独立账号管理窗口脚本加载顺序，使 Porcelain 浅色主题、主题预设与自定义字体正常生效而不再卡在深色模式；修复卡片菜单与弹层的层级和视口翻转、刷新/取消三段式拆分按钮样式、回退模型行全宽展示、状态与进度条同步、IPC 剪贴板复制、批量删除两段式确认、键盘（`Escape`/方向键）导航、关闭弹窗时取消 OAuth 以及 7 语言文案与全部 ARIA 标签。
-- **主窗口底部栏与 Limits 工具栏：** 在所有非 Limits 视图下正确隐藏 `#limitsToolsBar`，将 `.limits-tool-btn` 的硬编码深色值替换为主题自适应变量并对齐 Liquid Glass 样式，同时避免窄屏（`240px`）下实时输出速率、视图切换器与账号管理按钮重叠。
+- **Hub 认证、传输与持久化安全加固：** 无密钥启动时默认仅绑定 `127.0.0.1` 并默认拒绝请求（`503`，需显式开启 `--insecure-no-auth`）；非回环地址强制要求至少 24 位密钥并加入按 IP 的 `401` 速率限制（`429`）与失败日志；新增 `readSecret` 与 `ingestSecret` 分权令牌；禁用 URL `?secret=` 查询参数鉴权；补齐 DNS 重绑定 `Host` 校验、安全响应头、HTTP 超时控制、SSE 并发连接上限、`Content-Length` 前置 `413` 拦截、`64 KiB` 控制路由体积限制以及 `0600` 权限持久化。
+- **数据模型、第三方集成、OpenClaw 与 MCP 防护：** 拦截用量与历史聚合中的原型污染（`__proto__`、`constructor`、`prototype`）并清洗异常历史记录；在集成服务域名变更时自动清空已存密钥、强制 `redirect: 'error'` 并拦截内网/回环 SSRF；限制远程 HTTP 修改 `queryPermissions` 与主机配置，改用直接原子写入 `openclaw.json` 并在警告中脱敏密钥；限制 `/api/mcp` JSON-RPC 批处理大小与并发、报告年份范围（`2000..2100`）、微信扫码会话上限以及 Antigravity/审批提醒设备校验。
 <!-- app-update-notes:zh:end -->
 
 ## 下载
 
-- **Windows 安装版** — [Token-Monitor-Setup-0.102.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-Setup-0.102.2.exe)（推荐）
-- **Windows 便携版** — [Token-Monitor-0.102.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-0.102.2.exe)（免安装）
-- **Linux amd64** — [Token-Monitor-0.102.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-0.102.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.102.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-0.102.2-x86_64.AppImage)
+- **Windows 安装版** — [Token-Monitor-Setup-0.103.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-Setup-0.103.0.exe)（推荐）
+- **Windows 便携版** — [Token-Monitor-0.103.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-0.103.0.exe)（免安装）
+- **Linux amd64** — [Token-Monitor-0.103.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-0.103.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.103.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-0.103.0-x86_64.AppImage)
 
 <details>
 <summary><strong>首次启动与其他说明</strong></summary>
@@ -63,7 +67,7 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.102.2-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.102.2-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.103.0-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.103.0-x86_64.AppImage` then run it.
 
 ### 其他说明
 
@@ -78,7 +82,7 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ---
 
 <details>
-<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.102.1...v0.102.2">v0.102.1...v0.102.2</a></summary>
+<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.102.2...v0.103.0">v0.102.2...v0.103.0</a></summary>
 
 <!-- github-generated-release-notes -->
 
@@ -95,19 +99,21 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ## 更新內容
 
 <!-- app-update-notes:zh-TW:start -->
+### 新增
+- **原生 Hub HTTPS 與憑證匯入：** 為 Node Hub 新增原生 TLS 1.2–1.3 HTTPS 監聽支援（支援 PEM `--tls-cert`/`--tls-key` 與加密 PKCS#12 `.p12`/`.pfx` `--tls-pfx`/`--tls-passphrase-file`）、基於 `server.setSecureContext()` 與 `SIGHUP` 的零停機憑證熱重載、TLS 回應 `Strict-Transport-Security` 標頭以及憑證鏈匯入與驗證模組（`src/shared/tlsCert.js`、`src/hub/tls.js`）。
+- **桌面端、Agent 與 MCP 自訂 CA 憑證信任：** 為桌面用戶端、無頭 Agent 與 MCP Server 新增自訂 CA 憑證釘選支援（`--tls-ca` / `TOKEN_MONITOR_TLS_CA_FILE` 與 `src/shared/hubClientFetch.js`），並在桌面端設定中支援依設定檔匯入、檢視（主體、SHA-256 指紋、到期日）與清除自訂 Hub CA 或自簽名憑證。
+
 ### 修復
-- **帳號切換、系統鑰匙圈與處理程序識別：** 加固 Antigravity Classic / IDE 切換流程，修復熱切換 `language_server` 重生偵測（`excludePids` 與目標隔離）、POSIX/macOS 含空格路徑與帶引號 `--user-data-dir` 解析、輔助子程序過濾、Windows 登錄檔自訂磁碟路徑偵測、子程序 Electron/AppImage 環境變數清理，以及 Windows 認證管理員穩定性（匿名 Koffi 結構避免符號衝突、2560 位元組上限降級、UTF-8/UTF-16LE 解碼與移除破壞性預刪除）。
-- **加密儲存、State DB、額度、OAuth 與 Hub 同步：** 加固 `tokens.enc` 在損毀或符號連結時安全失敗並支援寫入回滾；為 SQLite `state.vscdb` 注入加入 `BEGIN IMMEDIATE` 原子交易並修復 `isGcpTos` 解碼；保留 proto3 `0%` 耗盡額度與修正 `401`/`403`/中止處理；強化 OAuth 逾時與狀態驗證、匯入路徑穿越防護及輪替 `refresh_token` 持久化；修復排程刷新狀態與基線追蹤，隔離 Hub 同步與代理通道，並在 Hub 保留 `banCode`/`accountCount` 及儲存回滾。
-- **帳號管理視窗主題、排版、無障礙與多語系：** 修復獨立帳號管理視窗腳本載入順序，讓 Porcelain 淺色主題、主題預設與自訂字型正常套用；修復卡片選單與彈窗的層級與視窗翻轉、重新整理/取消三段拆分按鈕樣式、回退模型列全寬顯示、狀態與進度列同步、IPC 剪貼簿複製、批次刪除兩段式確認、鍵盤（`Escape`/方向鍵）導覽、關閉對話框時取消 OAuth 及 7 語系文案與全部 ARIA 標籤。
-- **主視窗底部列與 Limits 工具列：** 在所有非 Limits 檢視中正確隱藏 `#limitsToolsBar`，將 `.limits-tool-btn` 硬編碼深色值改為主題自適應變數並對齊 Liquid Glass 樣式，同時避免窄視窗（`240px`）下即時輸出速率、檢視切換器與帳號管理按鈕重疊。
+- **Hub 驗證、傳輸與持久化安全加固：** 無密鑰啟動時預設僅綁定 `127.0.0.1` 並拒絕請求（`503`，需顯式開啟 `--insecure-no-auth`）；非迴路位址強制要求至少 24 字元密鑰並加入依 IP 的 `401` 速率限制（`429`）與失敗記錄；新增 `readSecret` 與 `ingestSecret` 分權權杖；停用 URL `?secret=` 查詢參數驗證；補齊 DNS 重新綁定 `Host` 驗證、安全回應標頭、HTTP 逾時控制、SSE 連線上限、`Content-Length` 前置 `413` 攔截、`64 KiB` 控制路由大小限制及 `0600` 權限持久化。
+- **資料模型、第三方整合、OpenClaw 與 MCP 防護：** 攔截用量與歷史聚合中的原型污染（`__proto__`、`constructor`、`prototype`）並清理異常歷史記錄；在整合服務網域變更時自動清空已存密鑰、強制 `redirect: 'error'` 並攔截內網/迴路 SSRF；限制遠端 HTTP 修改 `queryPermissions` 與主機設定，改用直接原子寫入 `openclaw.json` 並在警告中遮罩密鑰；限制 `/api/mcp` JSON-RPC 批次大小與並行數、報告年份範圍（`2000..2100`）、WeChat QR 登入工作階段上限以及 Antigravity/審批提醒裝置驗證。
 <!-- app-update-notes:zh-TW:end -->
 
 ## 下載
 
-- **Windows 安裝版** — [Token-Monitor-Setup-0.102.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-Setup-0.102.2.exe)（推薦）
-- **Windows 便攜版** — [Token-Monitor-0.102.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-0.102.2.exe)（免安裝）
-- **Linux amd64** — [Token-Monitor-0.102.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-0.102.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.102.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-0.102.2-x86_64.AppImage)
+- **Windows 安裝版** — [Token-Monitor-Setup-0.103.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-Setup-0.103.0.exe)（推薦）
+- **Windows 便攜版** — [Token-Monitor-0.103.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-0.103.0.exe)（免安裝）
+- **Linux amd64** — [Token-Monitor-0.103.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-0.103.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.103.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-0.103.0-x86_64.AppImage)
 
 </details>
 
@@ -119,19 +125,21 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ## 업데이트 내용
 
 <!-- app-update-notes:ko:start -->
+### 추가
+- **네이티브 Hub HTTPS 및 인증서 가져오기:** Node Hub에 네이티브 TLS 1.2–1.3 HTTPS 리스너 지원(PEM `--tls-cert`/`--tls-key` 및 암호화된 PKCS#12 `.p12`/`.pfx` `--tls-pfx`/`--tls-passphrase-file`), `server.setSecureContext()` 및 `SIGHUP` 기반 무중단 인증서 핫 리로드, TLS 응답 `Strict-Transport-Security` 헤더, 인증서 번들 가져오기 및 검증 모듈(`src/shared/tlsCert.js`, `src/hub/tls.js`)을 추가했습니다.
+- **데스크톱, Agent 및 MCP 사용자 지정 CA 고정:** 데스크톱 클라이언트, 헤드리스 Agent, MCP 서버 전반에 사용자 지정 CA 신뢰 고정(`--tls-ca` / `TOKEN_MONITOR_TLS_CA_FILE` 및 `src/shared/hubClientFetch.js`)을 추가하고, 데스크톱 설정 UI에서 프로필별 사용자 지정 Hub CA 또는 자체 서명 인증서 가져오기·조회(주체, SHA-256 지문, 만료일)·삭제를 지원합니다.
+
 ### 수정
-- **계정 전환, 시스템 키링 및 프로세스 감지:** Antigravity Classic/IDE 전환 안정화, 핫스위치 `language_server` 재생성 추적(`excludePids` 및 대상 격리), POSIX/macOS 공백 경로 및 따옴표 `--user-data-dir` 파싱, 헬퍼 프로세스 필터링, Windows 레지스트리 사용자 지정 드라이브 경로 탐색, Electron/AppImage 하위 프로세스 환경 정리, Windows 자격 증명 관리자 안정성(익명 Koffi 구조체 충돌 방지, 2560바이트 제한 대응, UTF-8/UTF-16LE 디코딩, 선행 삭제 제거)을 수정했습니다.
-- **암호화 저장소, State DB, 할당량, OAuth 및 Hub 동기화:** 손상·심볼릭 링크 `tokens.enc` 안전 실패 및 쓰기 롤백, SQLite `state.vscdb` `BEGIN IMMEDIATE` 원자적 트랜잭션 및 `isGcpTos` 디코딩 수정, proto3 `0%` 소진 할당량 유지 및 `401`/`403`/중단 처리, OAuth 타임아웃·상태 검증과 회전된 `refresh_token` 저장, 가져오기 경로 순회 차단, 스케줄러 새로고침 상태/기준 분리, Hub 전용 fetch 분리 및 `banCode`/`accountCount`·롤백 보강을 적용했습니다.
-- **계정 관리 창 테마, 레이아웃, 접근성 및 다국어:** 독립 계정 관리 창 스크립트 로드 순서를 수정해 Porcelain 라이트 테마·테마 프리셋·사용자 글꼴이 정상 적용되도록 했으며, 카드 메뉴/팝오버 z-index 및 뷰포트 반전, 3분할 새로고침/취소 버튼, 전체 너비 폴백 모델 행, 진행 표시줄 동기화, IPC 클립보드 복사, 일괄 삭제 2단계 확인, 키보드(`Escape`/화살표) 탐색, 다이얼로그 종료 시 OAuth 취소, 7개 언어 및 모든 ARIA 라벨을 수정했습니다.
-- **메인 위젯 하단 및 Limits 도구 모음:** 비-Limits 화면에서 `#limitsToolsBar`를 숨기고 `.limits-tool-btn`에 테마 토큰과 Liquid Glass 스타일을 적용했으며, 좁은 폭(`240px`)에서 실시간 토큰 속도·뷰 전환기·계정 관리 버튼이 겹치지 않도록 수정했습니다.
+- **Hub 인증, 전송 및 저장소 보안 강화:** 비밀 키 없이 시작할 때 기본적으로 `127.0.0.1`에만 바인딩하고 요청을 거부(`503`, `--insecure-no-auth` 명시 필요)하도록 변경했으며, 비-루프백 바인딩 시 24자 이상 비밀 키 강제 및 IP별 `401` 속도 제한(`429`)·실패 로깅, `readSecret`/`ingestSecret` 범위별 토큰, `?secret=` 쿼리 인증 비활성화, DNS 리바인딩 `Host` 검증, 보안 응답 헤더, HTTP 타임아웃, SSE 연결 제한, 사전 `Content-Length` `413` 차단, `64 KiB` 제어 본문 제한 및 `0600` 파일 권한 저장을 적용했습니다.
+- **데이터 모델, 통합, OpenClaw 및 MCP 보안:** 사용량 및 기록 집계에서 프로토타입 오염(`__proto__`, `constructor`, `prototype`)을 차단하고 손상된 기록 행을 정제하며, 통합 URL 출처 변경 시 저장된 API/훅 토큰을 초기화하고 `redirect: 'error'` 및 사설/루프백 SSRF 차단을 적용했습니다. 또한 원격 HTTP를 통한 `queryPermissions` 변경 및 호스트 프로비저닝을 제한하고 `openclaw.json` 직접 원자적 쓰기 및 경고 내 비밀 값 마스킹, `/api/mcp` 배치 크기·동시성 제한, 보고서 연도 범위(`2000..2100`), WeChat QR 세션 수 제한 및 Antigravity/승인 알림 장치 검증을 강화했습니다.
 <!-- app-update-notes:ko:end -->
 
 ## 다운로드
 
-- **Windows 설치 버전** — [Token-Monitor-Setup-0.102.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-Setup-0.102.2.exe) (권장)
-- **Windows 포터블 버전** — [Token-Monitor-0.102.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-0.102.2.exe) (설치 필요 없음)
-- **Linux amd64** — [Token-Monitor-0.102.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-0.102.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.102.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-0.102.2-x86_64.AppImage)
+- **Windows 설치 버전** — [Token-Monitor-Setup-0.103.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-Setup-0.103.0.exe) (권장)
+- **Windows 포터블 버전** — [Token-Monitor-0.103.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-0.103.0.exe) (설치 필요 없음)
+- **Linux amd64** — [Token-Monitor-0.103.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-0.103.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.103.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-0.103.0-x86_64.AppImage)
 
 </details>
 
@@ -143,19 +151,21 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ## 更新内容
 
 <!-- app-update-notes:ja:start -->
+### 追加
+- **ネイティブ Hub HTTPS と証明書インポート：** Node Hub にネイティブ TLS 1.2–1.3 HTTPS リスナー対応（PEM `--tls-cert`/`--tls-key` および暗号化 PKCS#12 `.p12`/`.pfx` `--tls-pfx`/`--tls-passphrase-file`）、`server.setSecureContext()` と `SIGHUP` による無停止証明書ホットリロード、TLS 応答の `Strict-Transport-Security` ヘッダー、および証明書バンドルのインポート・検証モジュール（`src/shared/tlsCert.js`、`src/hub/tls.js`）を追加しました。
+- **デスクトップ・Agent・MCP のカスタム CA ピン留め：** デスクトップクライアント、ヘッドレス Agent、MCP サーバーにカスタム CA 信頼ピン留め（`--tls-ca` / `TOKEN_MONITOR_TLS_CA_FILE` と `src/shared/hubClientFetch.js`）を追加し、デスクトップ設定 UI でプロファイルごとにカスタム Hub CA または自己署名証明書のインポート・確認（サブジェクト、SHA-256 フィンガープリント、有効期限）・削除に対応しました。
+
 ### 修正
-- **アカウント切替・システムキーリング・プロセス検出：** Antigravity Classic/IDE 切替、ホットスワップ時の `language_server` 再起動監視（`excludePids` と対象分離）、POSIX/macOS の空白パスや引用符付き `--user-data-dir` 解析、ヘルパープロセス除外、Windows レジストリのカスタムドライブ探索、起動時 Electron/AppImage 環境変数クリーンアップ、Windows 資格情報マネージャー（匿名 Koffi 構造体による衝突回避、2560 バイト上限フォールバック、UTF-8/UTF-16LE デコード、破壊的事前削除の廃止）を修正しました。
-- **暗号化保存・State DB・クォータ・OAuth・Hub 同期：** 破損・シンボリックリンク時の `tokens.enc` フェイルクローズと書き込みロールバック、SQLite `state.vscdb` への `BEGIN IMMEDIATE` 原子トランザクションと `isGcpTos` デコード修正、proto3 の `0%` 枯渇バケット保持と `401`/`403`/中断処理、OAuth タイムアウト・状態検証とローテーション済み `refresh_token` 保存、インポートのパストラバーサル防止、スケジューラー更新状態/基準分離、Hub 同期 fetch 分離および `banCode`/`accountCount` 保持とロールバックを強化しました。
-- **アカウント管理画面のテーマ・レイアウト・アクセシビリティ・多言語：** スクリプト読込順序を修正して Porcelain ライトテーマ・プリセット・カスタムフォントが正しく適用されるようにし、メニュー/ポップオーバーの重なりと反転、更新/キャンセル 3 分割ボタン、フォールバックモデル行の全幅表示、進捗バー同期、IPC クリップボードコピー、一括削除の 2 段階確認、キーボード（`Escape`/矢印）操作、ダイアログ終了時の OAuth キャンセル、7 言語と全 ARIA ラベルを修正しました。
-- **メインウィジェット下部と Limits ツールバー：** 非 Limits 画面で `#limitsToolsBar` を非表示にし、`.limits-tool-btn` をテーマ連動トークンと Liquid Glass 対応に改め、狭幅（`240px`）フッターでのライブ速度・ビュー切替・アカウント管理ボタンの重なりを解消しました。
+- **Hub 認証・通信・保存のセキュリティ強化：** シークレット未設定時の起動を `127.0.0.1` バインドかつデフォルト拒否（`503`、`--insecure-no-auth` 明示時のみ許可）に変更し、非ループバックでの 24 文字以上のシークレット強制と IP 単位の `401` レート制限（`429`）・失敗ログ記録、`readSecret`/`ingestSecret` スコープトークン、`?secret=` クエリ認証の廃止、DNS リバインディング `Host` 検証、セキュリティヘッダー、HTTP タイムアウト、SSE 接続数上限、事前 `Content-Length` `413` 拒否、`64 KiB` 制御ルート上限および `0600` 権限での永続化を適用しました。
+- **データモデル・外部連携・OpenClaw・MCP の保護：** 使用量・履歴集計でのプロトタイプ汚染（`__proto__`、`constructor`、`prototype`）防止と不正な履歴行のサニタイズ、連携先オリジン変更時の保存済み API/フックトークン自動消去と `redirect: 'error'`・プライベート/ループバック SSRF 遮断、リモート HTTP からの `queryPermissions` 変更やホスト設定の制限および `openclaw.json` の直接アトミック書き込みと警告メッセージの秘密情報マスク、`/api/mcp` バッチサイズ・並列数上限、レポート年範囲（`2000..2100`）、WeChat QR セッション上限、Antigravity/承認通知のデバイス検証を強化しました。
 <!-- app-update-notes:ja:end -->
 
 ## ダウンロード
 
-- **Windows インストーラー** — [Token-Monitor-Setup-0.102.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-Setup-0.102.2.exe)（推奨）
-- **Windows ポータブル版** — [Token-Monitor-0.102.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-0.102.2.exe)（インストール不要）
-- **Linux amd64** — [Token-Monitor-0.102.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-0.102.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.102.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.102.2/Token-Monitor-0.102.2-x86_64.AppImage)
+- **Windows インストーラー** — [Token-Monitor-Setup-0.103.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-Setup-0.103.0.exe)（推奨）
+- **Windows ポータブル版** — [Token-Monitor-0.103.0.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-0.103.0.exe)（インストール不要）
+- **Linux amd64** — [Token-Monitor-0.103.0-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-0.103.0-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.103.0-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.103.0/Token-Monitor-0.103.0-x86_64.AppImage)
 
 </details>
 
