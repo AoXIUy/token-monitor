@@ -35,6 +35,7 @@ function shouldTriggerAutoRefresh(
  *   getConfig: () => { startupRefresh: boolean, autoRefresh: boolean, refreshIntervalMinutes: number },
  *   getAccountCount: () => number,
  *   onRefreshAll: (reason: 'startup' | 'interval') => Promise<unknown>,
+ *   onRefreshStateChange?: (isRefreshing: boolean) => void,
  *   nowSec?: () => number,
  *   pollMs?: number,
  *   startupDelayMs?: number,
@@ -45,6 +46,7 @@ function createAntigravityManagerScheduler({
   getConfig,
   getAccountCount,
   onRefreshAll,
+  onRefreshStateChange,
   nowSec = () => Math.floor(Date.now() / 1000),
   pollMs = 10_000,
   startupDelayMs = 1500,
@@ -54,6 +56,7 @@ function createAntigravityManagerScheduler({
   let stopped = false;
   let refreshing = false;
   let lastRefreshSec = 0;
+  let intervalBaselineSec = 0;
   /** @type {ReturnType<typeof setTimeout> | null} */
   let startupTimer = null;
   /** @type {ReturnType<typeof setInterval> | null} */
@@ -79,6 +82,7 @@ function createAntigravityManagerScheduler({
   function recordRefreshTimestamp(tsSec = nowSec()) {
     if (Number.isFinite(tsSec)) {
       lastRefreshSec = tsSec;
+      intervalBaselineSec = tsSec;
     }
   }
 
@@ -92,6 +96,7 @@ function createAntigravityManagerScheduler({
   async function runScheduledRefresh(reason) {
     if (stopped) return;
     if (!tryAcquireLock()) return;
+    try { onRefreshStateChange?.(true); } catch (_) {}
     try {
       await onRefreshAll(reason);
     } catch (error) {
@@ -99,13 +104,15 @@ function createAntigravityManagerScheduler({
     } finally {
       recordRefreshTimestamp(nowSec());
       releaseLock();
+      try { onRefreshStateChange?.(false); } catch (_) {}
     }
   }
 
   function start() {
     if (started || stopped) return;
     started = true;
-    lastRefreshSec = nowSec();
+    // Track interval pacing separately so lastRefreshSec stays 0 until a real refresh completes.
+    intervalBaselineSec = nowSec();
 
     startupTimer = setTimeout(() => {
       startupTimer = null;
@@ -120,11 +127,11 @@ function createAntigravityManagerScheduler({
     intervalHandle = setInterval(() => {
       if (stopped) return;
       const cfg = getConfig();
-      if (shouldTriggerAutoRefresh(
+      if (getAccountCount() > 0 && shouldTriggerAutoRefresh(
         cfg?.autoRefresh === true,
         Number(cfg?.refreshIntervalMinutes || 0),
         nowSec(),
-        lastRefreshSec,
+        intervalBaselineSec,
         refreshing
       )) {
         void runScheduledRefresh('interval');

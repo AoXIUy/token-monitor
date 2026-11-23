@@ -95,3 +95,99 @@ test('importFromManagerDataDir imports ~/.antigravity_tools format, exports JSON
     { email: 'alice@example.com', refresh_token: '1//secret-alice' }
   ]);
 });
+
+test('importExport rejects path traversal, normalizes Rust quota timestamps, preserves rotated refresh tokens, and recovers disabled accounts', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-io-sec-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  // Outside secret file that path traversal must NEVER read
+  const outsideFile = path.join(dir, 'outside.json');
+  fs.writeFileSync(outsideFile, JSON.stringify({
+    email: 'escape@example.com',
+    token: { refresh_token: '1//escaped-secret' }
+  }));
+
+  const dataDir = path.join(dir, 'data_dir');
+  const accountsDir = path.join(dataDir, 'accounts');
+  fs.mkdirSync(accountsDir, { recursive: true });
+  fs.writeFileSync(path.join(dataDir, 'accounts.json'), JSON.stringify({
+    accounts: [{ id: '../../outside' }, { id: 'valid-1' }]
+  }));
+  fs.writeFileSync(path.join(accountsDir, 'valid-1.json'), JSON.stringify({
+    email: 'ok@example.com',
+    token: { refresh_token: '1//valid-rt' },
+    quota: {
+      last_updated: 1763942400,
+      quota_groups: [{ display_name: 'Gemini', buckets: [{ bucket_id: '5h', remaining_fraction: 1.5 }] }],
+      models: []
+    }
+  }));
+
+  const store = createAntigravityManagerStore({ baseDir: path.join(dir, 'store') });
+  const dirRes = importExport.importFromManagerDataDir(dataDir, { store });
+  assert.equal(dirRes.imported, 1);
+  assert.equal(store.findAccountByEmail('escape@example.com'), null);
+  const okAcc = store.findAccountByEmail('ok@example.com');
+  assert.equal(okAcc.quota.lastUpdatedAt, 1763942400 * 1000);
+  assert.equal(okAcc.quota.groups[0].buckets[0].remainingFraction, 1);
+
+  // V1 import rejects backup_file escaping v1Dir
+  const v1Dir = path.join(dir, 'v1');
+  fs.mkdirSync(v1Dir, { recursive: true });
+  fs.writeFileSync(path.join(v1Dir, 'accounts.json'), JSON.stringify({
+    accounts: {
+      evil: { email: 'escape@example.com', backup_file: outsideFile }
+    }
+  }));
+  const v1Res = await importExport.importFromV1Dir(v1Dir, {
+    store,
+    oauth: {
+      refreshAccessToken: async () => { throw new Error('should not be called'); },
+      fetchUserInfo: async () => { throw new Error('should not be called'); }
+    }
+  });
+  assert.equal(v1Res.total, 0);
+
+  // Re-importing a previously invalid_grant-disabled account keeps saved name, clears disabled, and stores rotated refresh token
+  store.upsertAccount({
+    email: 'recover@example.com',
+    name: 'Saved Display Name',
+    disabled: true,
+    disabledReason: 'invalid_grant',
+    disabledAt: 1763942000
+  }, { accessToken: 'ya29.old', refreshToken: '1//old-rt', expiryTimestamp: 100 });
+
+  const recovered = await importExport.importSingleRefreshToken(
+    { refreshToken: '1//input-rt' },
+    {
+      store,
+      oauth: {
+        BUILTIN_GCP_CLIENT_KEY: 'antigravity_gcp',
+        refreshAccessToken: async () => ({
+          accessToken: 'ya29.new',
+          refreshToken: '1//rotated-rt',
+          expiresIn: 3600,
+          expiryTimestamp: 1800000000,
+          idToken: '',
+          oauthClientKey: 'antigravity_enterprise'
+        }),
+        fetchUserInfo: async () => ({ email: 'recover@example.com', name: '' })
+      }
+    }
+  );
+  assert.equal(recovered.name, 'Saved Display Name');
+  assert.equal(recovered.disabled, false);
+  assert.equal(recovered.disabledReason, '');
+  assert.equal(recovered.disabledAt, null);
+  assert.equal(store.getAccountToken(recovered.id).refreshToken, '1//rotated-rt');
+
+  // Mixed JSON array with raw token strings & non-email names
+  const mixed = importExport.parseImportEntriesFromString(JSON.stringify([
+    { name: 'Not An Email', refresh_token: '1//mixed-1' },
+    '1//mixed-2'
+  ]));
+  assert.deepEqual(mixed, [
+    { refreshToken: '1//mixed-1' },
+    { refreshToken: '1//mixed-2' }
+  ]);
+});

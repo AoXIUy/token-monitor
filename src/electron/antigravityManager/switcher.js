@@ -189,26 +189,42 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', store,
     signal: deps.signal,
     nowSec: deps.nowSec
   });
-  if (freshToken.accessToken !== tokenData.accessToken) {
+  if (
+    freshToken.accessToken !== tokenData.accessToken
+    || freshToken.refreshToken !== tokenData.refreshToken
+    || freshToken.oauthClientKey !== tokenData.oauthClientKey
+  ) {
     store.saveAccountToken(account.id, freshToken);
   }
 
-  // 2. Ensure device profile isolation + backup original device profile if missing
   let activeAccount = account;
-  if (!activeAccount.deviceProfile) {
+  /**
+   * Ensure device profile isolation + backup original device profile from the effective target.
+   * @param {'classic' | 'ide' | null} profileTarget
+   * @param {Record<string, any>} profileDeps
+   */
+  const ensureDeviceProfile = (profileTarget, profileDeps) => {
+    if (activeAccount.deviceProfile) return;
     try {
-      const existingStoragePath = dp.getStoragePath(targetClient === 'ide' ? 'ide' : 'classic', deps);
-      const original = dp.readDeviceProfile(existingStoragePath);
-      if (original) store.saveOriginalDeviceProfileIfMissing(original);
+      const candidates = profileTarget === 'ide' ? ['ide', 'classic'] : ['classic', 'ide'];
+      for (const candidate of candidates) {
+        const storagePath = dp.getStoragePath(candidate, profileDeps);
+        const original = dp.readDeviceProfile(storagePath);
+        if (original) {
+          store.saveOriginalDeviceProfileIfMissing(original);
+          break;
+        }
+      }
     } catch (_) {}
     const generated = dp.generateDeviceProfile();
     activeAccount = store.upsertAccount({ ...activeAccount, deviceProfile: generated }) || { ...activeAccount, deviceProfile: generated };
-  }
+  };
 
   const normalizedTarget = String(targetClient || 'auto').trim().toLowerCase();
 
   // 3a. AGY CLI target
   if (normalizedTarget === 'agy') {
+    ensureDeviceProfile('classic', deps);
     kr.writeToSystemKeyring({
       accessToken: freshToken.accessToken,
       refreshToken: freshToken.refreshToken,
@@ -234,6 +250,7 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', store,
 
   // 3b. ACP IDE Plugin target
   if (normalizedTarget === 'acp' || normalizedTarget === 'plugin' || normalizedTarget === 'ide-plugin') {
+    ensureDeviceProfile('classic', deps);
     try {
       kr.writeToSystemKeyring({
         accessToken: freshToken.accessToken,
@@ -260,10 +277,14 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', store,
 
   // 3c. Desktop Classic / IDE target
   const explicitTarget = normalizedTarget === 'ide' ? 'ide' : (normalizedTarget === 'classic' ? 'classic' : null);
-  const classicRunning = pm.isAntigravityRunning(null, deps);
-  const ideRunning = pm.isAntigravityRunning('ide', deps);
-  const classicExe = pm.getAntigravityExecutablePath('classic', deps);
-  const ideExe = pm.getAntigravityExecutablePath('ide', deps);
+  const initialProcs = !deps.listProcesses && typeof pm.listProcesses === 'function'
+    ? pm.listProcesses(deps)
+    : null;
+  const snapshotDeps = initialProcs ? { ...deps, listProcesses: () => initialProcs } : deps;
+  const classicRunning = pm.isAntigravityRunning(null, snapshotDeps);
+  const ideRunning = pm.isAntigravityRunning('ide', snapshotDeps);
+  const classicExe = pm.getAntigravityExecutablePath('classic', snapshotDeps);
+  const ideExe = pm.getAntigravityExecutablePath('ide', snapshotDeps);
 
   const { isIde, effectiveTarget } = resolveEffectiveTarget(explicitTarget, {
     classicRunning,
@@ -272,24 +293,42 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', store,
     ideExePath: ideExe
   });
 
-  const activeExePath = pm.getAntigravityExecutablePath(effectiveTarget, deps);
-  const activeArgs = pm.getArgsFromRunningProcess(effectiveTarget, deps);
-  const running = pm.isAntigravityRunning(effectiveTarget, deps);
+  const activeExePath = pm.getAntigravityExecutablePath(effectiveTarget, snapshotDeps);
+  const activeArgs = pm.getArgsFromRunningProcess(effectiveTarget, snapshotDeps);
+  const runningUserDataDir = typeof pm.getUserDataDirFromProcess === 'function'
+    ? pm.getUserDataDirFromProcess(effectiveTarget, snapshotDeps)
+    : null;
+  const running = pm.isAntigravityRunning(effectiveTarget, snapshotDeps);
+  const credDeps = {
+    ...deps,
+    ...(runningUserDataDir ? { userDataDir: runningUserDataDir } : {}),
+    ...(activeExePath ? { executablePath: activeExePath } : {})
+  };
+  ensureDeviceProfile(isIde ? 'ide' : 'classic', credDeps);
 
   let hotSwitched = false;
+  let launched = false;
 
   if (running) {
     try {
       // Pre-write credentials before killing language_server so supervisor respawns with new account
-      applyAccountCredentials(activeAccount, freshToken, { isIde, effectiveTarget, activeExePath, deps });
+      applyAccountCredentials(activeAccount, freshToken, { isIde, effectiveTarget, activeExePath, deps: credDeps });
+      const previousLsPids = typeof pm.getLanguageServerPids === 'function'
+        ? pm.getLanguageServerPids(effectiveTarget, snapshotDeps)
+        : [];
       const killedLs = pm.killLanguageServer(effectiveTarget, deps);
       if (killedLs > 0) {
         try {
-          applyAccountCredentials(activeAccount, freshToken, { isIde, effectiveTarget, activeExePath, deps });
+          applyAccountCredentials(activeAccount, freshToken, { isIde, effectiveTarget, activeExePath, deps: credDeps });
         } catch (_) {}
-        const respawned = await pm.waitForLanguageServerRespawn(effectiveTarget, deps.respawnTimeoutMs || 15_000, deps);
+        const respawned = await pm.waitForLanguageServerRespawn(
+          effectiveTarget,
+          deps.respawnTimeoutMs || 15_000,
+          { ...deps, excludePids: previousLsPids }
+        );
         if (respawned) {
           hotSwitched = true;
+          launched = true;
         }
       }
     } catch (_) {
@@ -300,13 +339,14 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', store,
   if (!hotSwitched) {
     if (running) {
       await pm.closeAntigravity(20, effectiveTarget, deps);
-      applyAccountCredentials(activeAccount, freshToken, { isIde, effectiveTarget, activeExePath, deps });
+      applyAccountCredentials(activeAccount, freshToken, { isIde, effectiveTarget, activeExePath, deps: credDeps });
     } else {
-      applyAccountCredentials(activeAccount, freshToken, { isIde, effectiveTarget, activeExePath, deps });
+      applyAccountCredentials(activeAccount, freshToken, { isIde, effectiveTarget, activeExePath, deps: credDeps });
     }
 
     try {
       pm.startAntigravity(effectiveTarget, activeExePath, activeArgs, deps);
+      launched = true;
     } catch (error) {
       if (running || /** @type {any} */ (error)?.code !== 'EXECUTABLE_NOT_FOUND') {
         throw error;
@@ -320,6 +360,7 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', store,
     ok: true,
     target: activeSlot,
     mode: hotSwitched ? 'hot' : (running ? 'restart' : 'offline'),
+    launched,
     accountId: activeAccount.id
   };
 }

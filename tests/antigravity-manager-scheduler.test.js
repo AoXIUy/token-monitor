@@ -63,3 +63,37 @@ test('scheduler tryAcquireLock enforces single-flight exclusion', () => {
   scheduler.releaseLock();
   assert.equal(scheduler.isRefreshing(), false);
 });
+
+test('scheduler keeps lastRefreshTimestamp=0 at start and notifies onRefreshStateChange after lock release', async () => {
+  let clockSec = 10_000;
+  const observed = [];
+  const scheduler = createAntigravityManagerScheduler({
+    getConfig: () => ({ startupRefresh: true, autoRefresh: false, refreshIntervalMinutes: 10 }),
+    getAccountCount: () => 1,
+    nowSec: () => clockSec,
+    onRefreshAll: async () => {
+      clockSec += 5;
+      await new Promise((r) => setTimeout(r, 5));
+    },
+    onRefreshStateChange: (isRefreshing) => {
+      observed.push({
+        isRefreshing,
+        lockState: scheduler.isRefreshing(),
+        lastRefreshAt: scheduler.getLastRefreshTimestamp()
+      });
+    },
+    pollMs: 1000,
+    startupDelayMs: 5
+  });
+
+  scheduler.start();
+  // Before any actual refresh completes, lastRefreshAt must stay 0 (not app launch time)
+  assert.equal(scheduler.getLastRefreshTimestamp(), 0);
+  await new Promise((r) => setTimeout(r, 40));
+  scheduler.stop();
+
+  assert.deepEqual(observed, [
+    { isRefreshing: true, lockState: true, lastRefreshAt: 0 },
+    { isRefreshing: false, lockState: false, lastRefreshAt: 10_005 }
+  ]);
+});

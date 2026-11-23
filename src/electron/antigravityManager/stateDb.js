@@ -35,16 +35,17 @@ function getSqlite() {
  */
 function getAllCandidateDbPaths(targetIde = null, deps = {}) {
   const platform = deps.platform || process.platform;
+  const pathApi = platform === 'win32' ? path.win32 : path;
   const home = deps.home || os.homedir();
   const env = deps.env || process.env;
   /** @type {string[]} */
   const paths = [];
 
   if (deps.userDataDir) {
-    paths.push(path.join(deps.userDataDir, 'User', 'globalStorage', 'state.vscdb'));
+    paths.push(pathApi.join(deps.userDataDir, 'User', 'globalStorage', 'state.vscdb'));
   }
   if (deps.executablePath) {
-    paths.push(path.join(path.dirname(deps.executablePath), 'data', 'user-data', 'User', 'globalStorage', 'state.vscdb'));
+    paths.push(pathApi.join(pathApi.dirname(deps.executablePath), 'data', 'user-data', 'User', 'globalStorage', 'state.vscdb'));
   }
 
   const folderNames = targetIde === 'ide'
@@ -53,18 +54,18 @@ function getAllCandidateDbPaths(targetIde = null, deps = {}) {
 
   if (platform === 'darwin' && home) {
     for (const folder of folderNames) {
-      paths.push(path.join(home, 'Library', 'Application Support', folder, 'User', 'globalStorage', 'state.vscdb'));
+      paths.push(pathApi.join(home, 'Library', 'Application Support', folder, 'User', 'globalStorage', 'state.vscdb'));
     }
   } else if (platform === 'win32') {
     const appData = env.APPDATA || '';
     if (appData) {
       for (const folder of folderNames) {
-        paths.push(path.join(appData, folder, 'User', 'globalStorage', 'state.vscdb'));
+        paths.push(pathApi.join(appData, folder, 'User', 'globalStorage', 'state.vscdb'));
       }
     }
   } else if (home) {
     for (const folder of folderNames) {
-      paths.push(path.join(home, '.config', folder, 'User', 'globalStorage', 'state.vscdb'));
+      paths.push(pathApi.join(home, '.config', folder, 'User', 'globalStorage', 'state.vscdb'));
     }
   }
 
@@ -128,6 +129,18 @@ function extractEnterpriseProjectIdFromDb(db) {
 }
 
 /**
+ * @param {any} db
+ * @returns {boolean}
+ */
+function readOnboardingIsGcpTos(db) {
+  const agyFlag = readItemValue(db, 'agy.onboarding.lastLoginIsGcpTos');
+  if (agyFlag !== null) return agyFlag.trim().toLowerCase() === 'true';
+  const jetskiFlag = readItemValue(db, 'jetski.onboarding.lastLoginIsGcpTos');
+  if (jetskiFlag !== null) return jetskiFlag.trim().toLowerCase() === 'true';
+  return false;
+}
+
+/**
  * Extract OAuth refresh_token, isGcpTos, and optional projectId from state.vscdb.
  * Supports both unified state sync format and legacy jetskiStateSync format.
  *
@@ -156,7 +169,7 @@ function extractOAuthStateFromDb(dbPath, deps = {}) {
       const refreshToken = rtBytes.toString('utf8').trim();
       if (!refreshToken) throw new Error('Refresh Token in OAuthInfo is empty');
       const field6 = protobuf.findVarintField(payload, 6);
-      const isGcpTos = field6 === null ? true : field6 !== 0n;
+      const isGcpTos = field6 !== null ? field6 !== 0n : readOnboardingIsGcpTos(db);
       const projectId = extractEnterpriseProjectIdFromDb(db);
       return { refreshToken, isGcpTos, projectId };
     }
@@ -173,7 +186,7 @@ function extractOAuthStateFromDb(dbPath, deps = {}) {
     const refreshToken = rtBytes.toString('utf8').trim();
     if (!refreshToken) throw new Error('Refresh Token in legacy data is empty');
     const projectId = extractEnterpriseProjectIdFromDb(db);
-    return { refreshToken, isGcpTos: true, projectId };
+    return { refreshToken, isGcpTos: readOnboardingIsGcpTos(db), projectId };
   } finally {
     try { db.close(); } catch (_) {}
   }
@@ -209,13 +222,18 @@ function injectTokenToDb(dbPath, payload, deps = {}) {
   }
 
   if (deps.createBackup !== false && fs.existsSync(dbPath)) {
+    const backupTmp = `${dbPath}.backup.${process.pid}.${Date.now()}.tmp`;
     try {
-      fs.copyFileSync(dbPath, `${dbPath}.backup`);
-    } catch (_) {}
+      fs.copyFileSync(dbPath, backupTmp);
+      fs.renameSync(backupTmp, `${dbPath}.backup`);
+    } catch (_) {
+      try { fs.unlinkSync(backupTmp); } catch (_) {}
+    }
   }
 
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new sqlite.DatabaseSync(dbPath);
+  let inTx = false;
   try {
     db.exec('PRAGMA busy_timeout = 2000;');
     db.exec('CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);');
@@ -229,11 +247,20 @@ function injectTokenToDb(dbPath, payload, deps = {}) {
       email: payload.email
     });
 
+    db.exec('BEGIN IMMEDIATE;');
+    inTx = true;
+
     const existingTopicVal = readItemValue(db, 'antigravityUnifiedStateSync.oauthToken');
     const currentTopic = existingTopicVal ? Buffer.from(existingTopicVal, 'base64') : Buffer.alloc(0);
-    let topic = currentTopic.length > 0
-      ? protobuf.removeUnifiedTopicEntry(currentTopic, 'oauthTokenInfoSentinelKey')
-      : Buffer.alloc(0);
+    /** @type {Buffer} */
+    let topic = Buffer.alloc(0);
+    if (currentTopic.length > 0) {
+      try {
+        topic = protobuf.removeUnifiedTopicEntry(currentTopic, 'oauthTokenInfoSentinelKey');
+      } catch (_) {
+        topic = Buffer.alloc(0);
+      }
+    }
     topic = Buffer.concat([topic, protobuf.createUnifiedTopicEntry('oauthTokenInfoSentinelKey', oauthInfo)]);
 
     const upsert = db.prepare('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)');
@@ -263,7 +290,15 @@ function injectTokenToDb(dbPath, payload, deps = {}) {
     upsert.run('jetski.onboarding.lastLoginIsGcpTos', isGcpTos ? 'true' : 'false');
     db.prepare('DELETE FROM ItemTable WHERE key = ?').run('jetskiStateSync.agentManagerInitState');
 
+    db.exec('COMMIT;');
+    inTx = false;
+
     return 'Token injection successful (new format)';
+  } catch (error) {
+    if (inTx) {
+      try { db.exec('ROLLBACK;'); } catch (_) {}
+    }
+    throw error;
   } finally {
     try { db.close(); } catch (_) {}
   }

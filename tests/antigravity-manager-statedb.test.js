@@ -84,3 +84,70 @@ test('deviceProfile read/write updates nested+flat telemetry keys and sibling se
   db.close();
   assert.equal(row.value, generated.devDeviceId);
 });
+
+test('stateDb preserves isGcpTos=false on personal accounts, recovers corrupt oauth blob, and rolls back failed transactions', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-db-reg-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dbPath = path.join(dir, 'state.vscdb');
+
+  // Seed DB with corrupt oauthToken blob to verify recovery during injection
+  const initDb = new DatabaseSync(dbPath);
+  initDb.exec('CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);');
+  initDb.prepare('INSERT INTO ItemTable (key, value) VALUES (?, ?)').run(
+    'antigravityUnifiedStateSync.oauthToken',
+    Buffer.from([0x0a, 0xff, 0xff, 0xff, 0xff, 0x0f]).toString('base64')
+  );
+  initDb.close();
+
+  stateDb.injectTokenToDb(dbPath, {
+    accessToken: 'ya29.personal',
+    refreshToken: '1//personal-rt',
+    expiry: 1763942400,
+    email: 'user@gmail.com',
+    isGcpTos: false
+  });
+
+  // Personal account has Field 6 omitted (proto3 false) and must NOT invert to isGcpTos=true
+  const extracted = stateDb.extractOAuthStateFromDb(dbPath);
+  assert.equal(extracted.refreshToken, '1//personal-rt');
+  assert.equal(extracted.isGcpTos, false);
+  assert.equal(extracted.projectId, null);
+
+  // Simulated mid-transaction SQLite failure must trigger ROLLBACK so DB is not half-updated
+  let rolledBack = false;
+  let beganImmediate = false;
+  let runCalls = 0;
+  class MockDatabaseSync {
+    exec(sql) {
+      if (/BEGIN IMMEDIATE/i.test(sql)) beganImmediate = true;
+      if (/ROLLBACK/i.test(sql)) rolledBack = true;
+    }
+    prepare() {
+      return {
+        get: () => undefined,
+        run: () => {
+          runCalls += 1;
+          if (runCalls === 3) throw new Error('SQLITE_FULL');
+        }
+      };
+    }
+    close() {}
+  }
+  assert.throws(() => stateDb.injectTokenToDb(dbPath, {
+    accessToken: 'ya29.fail',
+    refreshToken: '1//fail-rt',
+    expiry: 1763942400,
+    email: 'fail@example.com'
+  }, { sqlite: { DatabaseSync: MockDatabaseSync }, createBackup: false }), /SQLITE_FULL/);
+  assert.equal(beganImmediate, true);
+  assert.equal(rolledBack, true);
+
+  // Windows path candidates use win32 separators even when evaluated on Linux/macOS
+  const winPaths = stateDb.getAllCandidateDbPaths('classic', {
+    platform: 'win32',
+    env: { APPDATA: 'C:\\Users\\Alice\\AppData\\Roaming' },
+    executablePath: 'D:\\Apps\\Antigravity\\Antigravity.exe'
+  });
+  assert.ok(winPaths.includes('D:\\Apps\\Antigravity\\data\\user-data\\User\\globalStorage\\state.vscdb'));
+  assert.ok(winPaths.includes('C:\\Users\\Alice\\AppData\\Roaming\\Antigravity\\User\\globalStorage\\state.vscdb'));
+});

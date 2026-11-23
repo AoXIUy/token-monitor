@@ -9,6 +9,7 @@ const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const USERINFO_URL = 'https://www.googleapis.com/oauth2/v2/userinfo';
 const TOKEN_REFRESH_SKEW_SECONDS = 900;
+const DEFAULT_OAUTH_TIMEOUT_MS = 5 * 60_000;
 
 const BUILTIN_PERSONAL_CLIENT_KEY = 'antigravity_personal';
 const BUILTIN_ENTERPRISE_CLIENT_KEY = 'antigravity_enterprise';
@@ -118,6 +119,9 @@ function selectAuthClient(clientKey, env = process.env) {
   if (matched) return matched;
   if (isGcpEnterpriseClient(activeKey)) {
     throw new Error('Enterprise/GCP OAuth client is not configured. Set ANTIGRAVITY_GCP_OAUTH_CLIENT_ID and ANTIGRAVITY_GCP_OAUTH_CLIENT_SECRET (or ANTIGRAVITY_OAUTH_CLIENTS).');
+  }
+  if (all.length === 0) {
+    throw new Error('No Google OAuth client is configured');
   }
   return all[0];
 }
@@ -235,7 +239,7 @@ async function ensureFreshToken(currentToken, deps = {}) {
     expiresIn: refreshed.expiresIn,
     expiryTimestamp: refreshed.expiryTimestamp,
     idToken: refreshed.idToken || currentToken.idToken || '',
-    oauthClientKey: currentToken.oauthClientKey || refreshed.oauthClientKey
+    oauthClientKey: refreshed.oauthClientKey || currentToken.oauthClientKey || ''
   };
 }
 
@@ -305,6 +309,16 @@ async function exchangeAuthorizationCode({ code, redirectUri, codeVerifier, clie
 }
 
 /**
+ * @param {string} a
+ * @param {string} b
+ */
+function timingSafeEqualStr(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a || ''), 'utf8').digest();
+  const hb = crypto.createHash('sha256').update(String(b || ''), 'utf8').digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+/**
  * Run loopback browser OAuth flow on 127.0.0.1 ephemeral port with PKCE + 32-byte state.
  * @param {{
  *   clientKey?: string,
@@ -312,11 +326,13 @@ async function exchangeAuthorizationCode({ code, redirectUri, codeVerifier, clie
  *   openExternal: (url: string) => unknown,
  *   signal?: AbortSignal,
  *   env?: NodeJS.ProcessEnv,
+ *   timeoutMs?: number,
  *   onAuthUrl?: (url: string) => void
  * }} options
  */
 async function runOAuthLogin(options) {
   const { clientKey, fetch: fetchFn, openExternal, signal, env, onAuthUrl } = options;
+  const timeoutMs = Number.isFinite(Number(options.timeoutMs)) ? Math.max(0, Number(options.timeoutMs)) : DEFAULT_OAUTH_TIMEOUT_MS;
   const client = selectAuthClient(clientKey, env);
   const state = crypto.randomBytes(32).toString('base64url');
   const codeVerifier = crypto.randomBytes(32).toString('base64url');
@@ -324,9 +340,14 @@ async function runOAuthLogin(options) {
 
   /** @type {http.Server | null} */
   let server = null;
+  let redirectUri = '';
+  /** @type {string} */
+  let code;
   try {
-    const code = await new Promise((resolve, reject) => {
+    code = await new Promise((resolve, reject) => {
       let settled = false;
+      /** @type {ReturnType<typeof setTimeout> | null} */
+      let timer = null;
       /**
        * @param {any} err
        * @param {string} [value]
@@ -334,9 +355,13 @@ async function runOAuthLogin(options) {
       const finish = (err, value) => {
         if (settled) return;
         settled = true;
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
         signal?.removeEventListener('abort', onAbort);
         if (err) reject(err);
-        else resolve(value);
+        else resolve(String(value || ''));
       };
       const onAbort = () => {
         const err = new Error('OAuth login cancelled');
@@ -349,33 +374,59 @@ async function runOAuthLogin(options) {
       }
       signal?.addEventListener('abort', onAbort, { once: true });
 
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          const err = new Error('OAuth login timed out');
+          err.name = 'TimeoutError';
+          finish(err);
+        }, timeoutMs);
+        timer.unref?.();
+      }
+
       const activeServer = http.createServer((req, res) => {
-        const reqUrl = new URL(req.url || '/', 'http://127.0.0.1');
+        const baseHeaders = {
+          'cache-control': 'no-store',
+          connection: 'close'
+        };
+        if (req.method !== 'GET') {
+          res.writeHead(405, { ...baseHeaders, 'content-type': 'text/plain; charset=utf-8' });
+          res.end('Method not allowed');
+          return;
+        }
+        /** @type {URL} */
+        let reqUrl;
+        try {
+          reqUrl = new URL(req.url || '/', 'http://127.0.0.1');
+        } catch (_) {
+          res.writeHead(400, { ...baseHeaders, 'content-type': 'text/plain; charset=utf-8' });
+          res.end('Invalid request URL');
+          return;
+        }
         if (reqUrl.pathname !== '/callback' && reqUrl.pathname !== '/oauth-callback') {
-          res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+          res.writeHead(404, { ...baseHeaders, 'content-type': 'text/plain; charset=utf-8' });
           res.end('Not found');
           return;
         }
         const incomingState = reqUrl.searchParams.get('state') || '';
-        if (incomingState !== state) {
-          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+        if (!incomingState || !timingSafeEqualStr(incomingState, state)) {
+          res.writeHead(400, { ...baseHeaders, 'content-type': 'text/html; charset=utf-8' });
           res.end('<html><body><h3>Invalid OAuth state</h3></body></html>');
           return;
         }
         const oauthError = reqUrl.searchParams.get('error');
         if (oauthError) {
-          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+          res.writeHead(400, { ...baseHeaders, 'content-type': 'text/html; charset=utf-8' });
           res.end('<html><body><h3>Authorization failed. You may close this tab.</h3></body></html>');
           finish(new Error(`Google OAuth denied: ${oauthError}`));
           return;
         }
         const authCode = reqUrl.searchParams.get('code') || '';
         if (!authCode) {
-          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+          res.writeHead(400, { ...baseHeaders, 'content-type': 'text/html; charset=utf-8' });
           res.end('<html><body><h3>Missing authorization code</h3></body></html>');
           return;
         }
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.writeHead(200, { ...baseHeaders, 'content-type': 'text/html; charset=utf-8' });
         res.end('<html><body><h3>Login complete. You may close this window and return to Token Monitor.</h3></body></html>');
         finish(null, authCode);
       });
@@ -385,7 +436,7 @@ async function runOAuthLogin(options) {
       activeServer.listen(0, '127.0.0.1', () => {
         const addr = activeServer.address();
         const port = typeof addr === 'object' && addr ? addr.port : 0;
-        const redirectUri = `http://127.0.0.1:${port}/callback`;
+        redirectUri = `http://127.0.0.1:${port}/callback`;
         const authUrl = new URL(AUTH_URL);
         authUrl.searchParams.set('client_id', client.clientId);
         authUrl.searchParams.set('redirect_uri', redirectUri);
@@ -401,21 +452,20 @@ async function runOAuthLogin(options) {
         Promise.resolve(openExternal(urlStr)).catch((err) => finish(err));
       });
     });
-
-    const runningServer = /** @type {http.Server | null} */ (server);
-    const addr = runningServer?.address();
-    const port = typeof addr === 'object' && addr ? addr.port : 0;
-    const redirectUri = `http://127.0.0.1:${port}/callback`;
-    return await exchangeAuthorizationCode({ code, redirectUri, codeVerifier, clientKey: client.key }, { fetch: fetchFn, env, signal });
   } finally {
-    try { /** @type {http.Server | null} */ (server)?.close(); } catch (_) {}
+    const active = /** @type {http.Server | null} */ (server);
+    try { active?.closeAllConnections?.(); } catch (_) {}
+    try { active?.close(); } catch (_) {}
   }
+
+  return await exchangeAuthorizationCode({ code, redirectUri, codeVerifier, clientKey: client.key }, { fetch: fetchFn, env, signal });
 }
 
 module.exports = {
   BUILTIN_ENTERPRISE_CLIENT_KEY,
   BUILTIN_GCP_CLIENT_KEY,
   BUILTIN_PERSONAL_CLIENT_KEY,
+  DEFAULT_OAUTH_TIMEOUT_MS,
   SCOPES,
   TOKEN_REFRESH_SKEW_SECONDS,
   buildOAuthClients,

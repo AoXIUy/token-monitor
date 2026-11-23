@@ -68,3 +68,11 @@ test('unified state entry roundtrip and removeUnifiedTopicEntry preserve unrelat
   assert.equal(remaining.sentinelKey, 'otherKey');
   assert.equal(remaining.payload.toString('utf8'), 'keep');
 });
+
+test('protobuf bounds-checks huge 64-bit length varints without overflow', () => {
+  // Tag: field 1 wireType 2 (0x0a), length: 2^63-1 varint (9 bytes 0xff + 0x7f)
+  const hugeLen = Buffer.from([0x0a, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f, 0x01]);
+  assert.throws(() => protobuf.skipField(hugeLen, 1, 2), /incomplete_len_delim/);
+  assert.throws(() => protobuf.findField(hugeLen, 1), /incomplete_len_delim/);
+  assert.deepEqual(protobuf.findAllFields(hugeLen, 1), []);
+});

@@ -12,6 +12,21 @@ const fileCredentials = require('./fileCredentials');
 const { normalizeSubscriptionTier } = require('../../shared/antigravityManagerProtocol');
 
 /**
+ * Resolve `candidate` and return its absolute path only if it stays strictly inside `baseDir`.
+ *
+ * @param {string} baseDir
+ * @param {string} candidate
+ * @returns {string | null}
+ */
+function resolvePathInsideDir(baseDir, candidate) {
+  const root = path.resolve(String(baseDir || ''));
+  const resolved = path.resolve(root, String(candidate || ''));
+  const rel = path.relative(root, resolved);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return resolved;
+}
+
+/**
  * Parse Antigravity-Manager export JSON, account object, or raw refresh tokens (`1//...`).
  * @param {string} content
  * @returns {Array<{ email?: string, refreshToken: string }>}
@@ -55,8 +70,15 @@ function parseImportEntriesFromString(content) {
       }
     }
     for (const item of rawItems) {
+      if (typeof item === 'string') {
+        pushEntry(item);
+        continue;
+      }
       if (!item || typeof item !== 'object') continue;
-      const email = String(item.email || item.name || '').trim();
+      const email = String(
+        item.email
+        || (typeof item.name === 'string' && item.name.includes('@') ? item.name : '')
+      ).trim();
       const rt = String(
         item.refresh_token
         || item.refreshToken
@@ -89,14 +111,19 @@ function convertRustQuota(rawQuota) {
   const groups = groupsRaw.map((/** @type {any} */ g) => ({
     displayName: String(g?.display_name ?? g?.displayName ?? ''),
     description: g?.description ? String(g.description) : '',
-    buckets: (Array.isArray(g?.buckets) ? g.buckets : []).map((/** @type {any} */ b) => ({
-      bucketId: String(b?.bucket_id ?? b?.bucketId ?? ''),
-      window: String(b?.window ?? ''),
-      remainingFraction: Number(b?.remaining_fraction ?? b?.remainingFraction ?? 0),
-      resetTime: String(b?.reset_time ?? b?.resetTime ?? ''),
-      displayName: String(b?.display_name ?? b?.displayName ?? ''),
-      description: String(b?.description ?? '')
-    }))
+    buckets: (Array.isArray(g?.buckets) ? g.buckets : []).map((/** @type {any} */ b) => {
+      const rfRaw = b?.remaining_fraction ?? b?.remainingFraction;
+      const rfNum = Number(rfRaw);
+      const remainingFraction = Number.isFinite(rfNum) ? Math.max(0, Math.min(1, rfNum)) : 0;
+      return {
+        bucketId: String(b?.bucket_id ?? b?.bucketId ?? ''),
+        window: String(b?.window ?? ''),
+        remainingFraction,
+        resetTime: String(b?.reset_time ?? b?.resetTime ?? ''),
+        displayName: String(b?.display_name ?? b?.displayName ?? ''),
+        description: String(b?.description ?? '')
+      };
+    })
   }));
   const modelsRaw = Array.isArray(rawQuota.models) ? rawQuota.models : [];
   const models = modelsRaw.map((/** @type {any} */ m) => ({
@@ -106,8 +133,13 @@ function convertRustQuota(rawQuota) {
     resetTime: String(m?.reset_time ?? m?.resetTime ?? '')
   })).filter((/** @type {any} */ m) => m.name);
 
+  const rawUpdated = Number(rawQuota.last_updated ?? rawQuota.lastUpdatedAt ?? 0);
+  const lastUpdatedAt = Number.isFinite(rawUpdated) && rawUpdated > 0
+    ? (rawUpdated < 10_000_000_000 ? Math.round(rawUpdated * 1000) : Math.round(rawUpdated))
+    : 0;
+
   return {
-    lastUpdatedAt: Number(rawQuota.last_updated ?? rawQuota.lastUpdatedAt ?? 0),
+    lastUpdatedAt,
     isForbidden: rawQuota.is_forbidden === true || rawQuota.isForbidden === true,
     forbiddenReason: String(rawQuota.forbidden_reason ?? rawQuota.forbiddenReason ?? ''),
     subscriptionTier: normalizeSubscriptionTier(rawQuota.subscription_tier ?? rawQuota.subscriptionTier ?? 'UNKNOWN'),
@@ -166,9 +198,16 @@ function importFromManagerDataDir(dirPath, { store }) {
     throw new Error('Not a valid Antigravity-Manager data directory (missing accounts.json / accounts/)');
   }
 
+  /** @type {string[]} */
+  const errors = [];
+
   let indexDoc = null;
   if (fs.existsSync(indexPath)) {
-    indexDoc = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    try {
+      indexDoc = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    } catch (error) {
+      errors.push(`accounts.json: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /** @type {Set<string>} */
@@ -186,11 +225,19 @@ function importFromManagerDataDir(dirPath, { store }) {
   const oldIdToNewId = new Map();
   let imported = 0;
   let skipped = 0;
-  /** @type {string[]} */
-  const errors = [];
 
   for (const rawId of idList) {
-    const filePath = path.join(accountsDir, `${rawId}.json`);
+    if (!rawId || /[/\\]/.test(rawId) || rawId === '.' || rawId === '..') {
+      skipped += 1;
+      errors.push(`${rawId}: invalid account id`);
+      continue;
+    }
+    const filePath = resolvePathInsideDir(accountsDir, `${rawId}.json`);
+    if (!filePath) {
+      skipped += 1;
+      errors.push(`${rawId}: path traversal rejected`);
+      continue;
+    }
     if (!fs.existsSync(filePath)) {
       skipped += 1;
       continue;
@@ -290,10 +337,13 @@ async function importSingleRefreshToken(entry, deps) {
   });
   const saved = deps.store.upsertAccount({
     email: userInfo.email,
-    name: userInfo.name || ''
+    name: userInfo.name || '',
+    disabled: false,
+    disabledReason: '',
+    disabledAt: null
   }, {
     accessToken: tokenRes.accessToken,
-    refreshToken: entry.refreshToken,
+    refreshToken: tokenRes.refreshToken || entry.refreshToken,
     expiresIn: tokenRes.expiresIn,
     expiryTimestamp: tokenRes.expiryTimestamp,
     email: userInfo.email,
@@ -452,7 +502,12 @@ async function importFromV1Dir(v1Dir, deps) {
   for (const filename of ['antigravity_accounts.json', 'accounts.json']) {
     const indexPath = path.join(v1Dir, filename);
     if (!fs.existsSync(indexPath)) continue;
-    const raw = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    let raw;
+    try {
+      raw = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    } catch (_) {
+      continue;
+    }
     const accountsObj = raw?.accounts && typeof raw.accounts === 'object' && !Array.isArray(raw.accounts)
       ? raw.accounts
       : (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {});
@@ -464,12 +519,12 @@ async function importFromV1Dir(v1Dir, deps) {
       if (!target) continue;
       const baseName = path.basename(String(target));
       const candidates = [
-        String(target),
-        path.join(v1Dir, baseName),
-        path.join(v1Dir, 'backups', baseName),
-        path.join(v1Dir, 'accounts', baseName)
-      ];
-      const backupFile = candidates.find((c) => fs.existsSync(c));
+        resolvePathInsideDir(v1Dir, String(target)),
+        resolvePathInsideDir(v1Dir, baseName),
+        resolvePathInsideDir(v1Dir, path.join('backups', baseName)),
+        resolvePathInsideDir(v1Dir, path.join('accounts', baseName))
+      ].filter((c) => Boolean(c));
+      const backupFile = candidates.find((c) => c && fs.existsSync(c));
       if (!backupFile) continue;
 
       try {

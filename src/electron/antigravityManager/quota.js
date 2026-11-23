@@ -153,7 +153,6 @@ function classify403Response(status, bodyText) {
   const hasPhrase = BAN_PHRASES.some((phrase) => lower.includes(phrase));
   if (reasonCode || hasPhrase) {
     let message = '';
-    let appealUrl = '';
     try {
       const parsed = JSON.parse(text);
       message = String(parsed?.error?.message || parsed?.message || '');
@@ -163,9 +162,9 @@ function classify403Response(status, bodyText) {
           message = String(inner?.error?.message || inner?.message || message);
         } catch (_) {}
       }
-      const urls = text.match(/https?:\/\/[^\s"'<>]+/g) || [];
-      appealUrl = urls.find((u) => /appeal|support\.google\.com/i.test(u)) || '';
     } catch (_) {}
+    const urls = text.match(/https?:\/\/[^\s"'<>]+/g) || [];
+    const appealUrl = urls.find((u) => /appeal|support\.google\.com/i.test(u)) || '';
     return {
       kind: 'banned',
       banInfo: {
@@ -392,6 +391,25 @@ function pickMostRestrictiveBucket(buckets) {
 }
 
 /**
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+function parseRemainingFraction(value) {
+  if (value === null || value === undefined || typeof value === 'boolean') return null;
+  if (typeof value === 'string' && !value.trim()) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : null;
+}
+
+/**
+ * @param {unknown} error
+ * @param {AbortSignal | undefined} signal
+ */
+function isAbortError(error, signal) {
+  return Boolean(signal?.aborted) || (error instanceof Error && error.name === 'AbortError');
+}
+
+/**
  * @param {string} accessToken
  * @param {{ fetch?: typeof fetch, healthTracker?: EndpointHealthTracker, signal?: AbortSignal, userAgent?: string }} deps
  */
@@ -436,8 +454,11 @@ async function fetchProjectAndTier(accessToken, deps) {
       }
       if (shouldTryNextEndpointForUrl(response.status, url)) {
         tracker.markFailure(url);
+      } else {
+        break;
       }
-    } catch (_) {
+    } catch (error) {
+      if (isAbortError(error, deps.signal)) throw error;
       tracker.markFailure(url);
     }
   }
@@ -471,8 +492,9 @@ async function fetchQuotaSummary(accessToken, projectId, deps) {
       if (!response.ok) {
         if (shouldTryNextEndpointForUrl(response.status, url)) {
           tracker.markFailure(url);
+          continue;
         }
-        continue;
+        break;
       }
       tracker.markSuccess(url);
       const data = await response.json().catch(() => null);
@@ -481,19 +503,25 @@ async function fetchQuotaSummary(accessToken, projectId, deps) {
         displayName: String(g?.displayName || ''),
         description: g?.description ? String(g.description) : '',
         buckets: (Array.isArray(g?.buckets) ? g.buckets : []).flatMap((/** @type {any} */ b) => {
-          const rf = Number(b?.remainingFraction);
-          if (!Number.isFinite(rf)) return [];
+          const resetTime = String(b?.resetTime || '').trim();
+          let rf = parseRemainingFraction(b?.remainingFraction);
+          if (rf === null && (b?.remainingFraction === undefined || b?.remainingFraction === null) && resetTime) {
+            // Proto3 JSON omits 0 remainingFraction on depleted buckets when resetTime is present.
+            rf = 0;
+          }
+          if (rf === null) return [];
           return [{
             bucketId: String(b?.bucketId || ''),
             window: String(b?.window || ''),
-            remainingFraction: Math.max(0, Math.min(1, rf)),
-            resetTime: String(b?.resetTime || ''),
+            remainingFraction: rf,
+            resetTime,
             displayName: b?.displayName ? String(b.displayName) : '',
             description: b?.description ? String(b.description) : ''
           }];
         })
       }));
-    } catch (_) {
+    } catch (error) {
+      if (isAbortError(error, deps.signal)) throw error;
       tracker.markFailure(url);
     }
   }
@@ -561,7 +589,7 @@ async function fetchAccountQuota(account, tokenData, deps = {}) {
   }
   const existingTier = account?.subscriptionTier && account.subscriptionTier !== 'UNKNOWN'
     ? account.subscriptionTier
-    : 'FREE';
+    : 'UNKNOWN';
   const subscriptionTier = loadRes.subscriptionTier || existingTier;
   const rawTier = loadRes.rawTier || account?.quota?.rawTier || '';
   const isUltra = subscriptionTier === 'ULTRA';
@@ -584,9 +612,6 @@ async function fetchAccountQuota(account, tokenData, deps = {}) {
         signal: deps.signal
       });
       if (!response.ok) {
-        if (shouldTryNextEndpointForUrl(response.status, url)) {
-          tracker.markFailure(url);
-        }
         if (response.status === 403) {
           const text = await response.text().catch(() => '');
           const classified = classify403Response(403, text);
@@ -602,7 +627,11 @@ async function fetchAccountQuota(account, tokenData, deps = {}) {
           return { ok: true, quota, subscriptionTier, classification: classified, token: activeToken };
         }
         lastError = new Error(`Quota API ${url} returned HTTP ${response.status}`);
-        continue;
+        if (shouldTryNextEndpointForUrl(response.status, url)) {
+          tracker.markFailure(url);
+          continue;
+        }
+        break;
       }
 
       tracker.markSuccess(url);
@@ -707,6 +736,7 @@ async function fetchAccountQuota(account, tokenData, deps = {}) {
       };
       return { ok: true, quota, subscriptionTier, classification: { kind: 'ok' }, token: activeToken };
     } catch (error) {
+      if (isAbortError(error, deps.signal)) throw error;
       tracker.markFailure(url);
       lastError = error;
     }

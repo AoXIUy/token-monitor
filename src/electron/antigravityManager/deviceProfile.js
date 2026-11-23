@@ -26,14 +26,16 @@ function generateDeviceProfile() {
  * @param {{ platform?: NodeJS.Platform, home?: string, env?: NodeJS.ProcessEnv, userDataDir?: string | null, executablePath?: string | null }} [deps]
  */
 function getStoragePath(targetIde = null, deps = {}) {
+  const platform = deps.platform || process.platform;
+  const pathApi = platform === 'win32' ? path.win32 : path;
   const dbCandidates = stateDb.getAllCandidateDbPaths(targetIde, deps);
-  const storageCandidates = dbCandidates.map((p) => path.join(path.dirname(p), 'storage.json'));
+  const storageCandidates = dbCandidates.map((p) => pathApi.join(pathApi.dirname(p), 'storage.json'));
   for (const p of storageCandidates) {
     if (fs.existsSync(p)) return p;
   }
   for (const p of storageCandidates) {
     // Check if the app root dir exists (e.g. ~/.config/Antigravity)
-    const appDir = path.dirname(path.dirname(path.dirname(p)));
+    const appDir = pathApi.dirname(pathApi.dirname(pathApi.dirname(p)));
     if (fs.existsSync(appDir)) return p;
   }
   return storageCandidates[0] || '';
@@ -46,7 +48,9 @@ function getStoragePath(targetIde = null, deps = {}) {
 function readDeviceProfile(storagePath) {
   try {
     if (!storagePath || !fs.existsSync(storagePath)) return null;
-    const json = JSON.parse(fs.readFileSync(storagePath, 'utf8'));
+    const rawText = fs.readFileSync(storagePath, 'utf8').replace(/^\uFEFF/, '');
+    if (!rawText.trim()) return null;
+    const json = JSON.parse(rawText);
     const telemetry = json?.telemetry && typeof json.telemetry === 'object' ? json.telemetry : {};
     const machineId = String(telemetry.machineId || json['telemetry.machineId'] || '').trim();
     const macMachineId = String(telemetry.macMachineId || json['telemetry.macMachineId'] || '').trim();
@@ -71,7 +75,8 @@ function writeDeviceProfile(storagePath, profile, deps = {}) {
   if (!storagePath) throw new Error('storage.json path is empty');
   let json = {};
   if (fs.existsSync(storagePath)) {
-    json = JSON.parse(fs.readFileSync(storagePath, 'utf8'));
+    const rawText = fs.readFileSync(storagePath, 'utf8').replace(/^\uFEFF/, '');
+    json = rawText.trim() ? JSON.parse(rawText) : {};
     if (!json || typeof json !== 'object' || Array.isArray(json)) {
       throw new Error('storage.json top-level is not an object');
     }
@@ -92,9 +97,14 @@ function writeDeviceProfile(storagePath, profile, deps = {}) {
   json['telemetry.devDeviceId'] = profile.devDeviceId;
   json['telemetry.sqmId'] = profile.sqmId;
 
-  const tempPath = `${storagePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tempPath, `${JSON.stringify(json, null, 2)}\n`, 'utf8');
-  fs.renameSync(tempPath, storagePath);
+  const tempPath = `${storagePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  try {
+    fs.writeFileSync(tempPath, `${JSON.stringify(json, null, 2)}\n`, 'utf8');
+    fs.renameSync(tempPath, storagePath);
+  } catch (error) {
+    try { fs.unlinkSync(tempPath); } catch (_) {}
+    throw error;
+  }
 
   const siblingDb = path.join(path.dirname(storagePath), 'state.vscdb');
   if (fs.existsSync(siblingDb) && profile.devDeviceId) {

@@ -8013,6 +8013,8 @@ function ensureAntigravityManagerService() {
     baseDir: path.join(app.getPath('userData'), 'antigravity-manager'),
     safeStorage,
     fetch: electronLimitsFetch(),
+    // Hub snapshot uploads bypass app proxy settings per docs/architecture.md.
+    hubFetch: fetch,
     openExternal: (url) => shell.openExternal(url),
     getDeviceIdentity: () => ({
       deviceId: String(settings?.deviceId || '').trim() || defaultDeviceId(),
@@ -8109,6 +8111,7 @@ function createAntigravityManagerWindow() {
     if (antigravityManagerWindow === managerWindow) {
       antigravityManagerWindow = null;
       antigravityManagerWindowReady = false;
+      antigravityManagerService?.cancelOAuthLogin?.();
     }
   });
   managerWindow.loadFile(path.join(__dirname, 'renderer', 'antigravityManager.html'))
@@ -8980,7 +8983,7 @@ app.whenReady().then(() => {
     // Other document windows retain their saved theme; glass previews
     // also reach the floating surfaces so the range control has one meaning.
     const win = BrowserWindow.fromWebContents(event.sender);
-    syncNativeMaterialVisibility(win, nativeMaterialOptions({ ...settings, ...patch }, win === dashboardWindow));
+    syncNativeMaterialVisibility(win, nativeMaterialOptions({ ...settings, ...patch }, win === dashboardWindow || win === antigravityManagerWindow));
     if (win === mainWindow || win === dashboardWindow) previewDockAppearance(patch);
     if (patch && patch.zoomFactor !== undefined && mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.setZoomFactor(clampZoom(patch.zoomFactor));
@@ -10248,6 +10251,10 @@ app.whenReady().then(() => {
     const picked = await (owner ? dialog.showOpenDialog(owner, dialogOpts) : dialog.showOpenDialog(dialogOpts));
     if (picked.canceled || !picked.filePaths?.[0]) return { canceled: true };
     try {
+      const stat = await fs.promises.stat(picked.filePaths[0]);
+      if (stat.size > 10 * 1024 * 1024) {
+        return { ok: false, error: 'Import file exceeds 10 MiB limit' };
+      }
       const content = await fs.promises.readFile(picked.filePaths[0], 'utf8');
       return await ensureAntigravityManagerService().importFromString(content, options || {});
     } catch (error) {

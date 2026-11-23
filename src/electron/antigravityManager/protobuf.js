@@ -63,9 +63,8 @@ function skipField(data, offset, wireType) {
   }
   if (wireType === 2) {
     const { value: length, nextOffset } = readVarint(data, offset);
-    const end = nextOffset + Number(length);
-    if (end > data.length) throw new Error('incomplete_len_delim');
-    return end;
+    if (length > BigInt(data.length - nextOffset)) throw new Error('incomplete_len_delim');
+    return nextOffset + Number(length);
   }
   if (wireType === 5) {
     if (offset + 4 > data.length) throw new Error('incomplete_32bit');
@@ -117,9 +116,8 @@ function findField(data, targetField) {
     const fieldNum = Number(parsed.value >> 3n);
     if (fieldNum === targetField && wireType === 2) {
       const lenParsed = readVarint(data, parsed.nextOffset);
-      const len = Number(lenParsed.value);
-      const end = lenParsed.nextOffset + len;
-      if (end > data.length) throw new Error('incomplete_len_delim');
+      if (lenParsed.value > BigInt(data.length - lenParsed.nextOffset)) throw new Error('incomplete_len_delim');
+      const end = lenParsed.nextOffset + Number(lenParsed.value);
       return Buffer.from(data.subarray(lenParsed.nextOffset, end));
     }
     offset = skipField(data, parsed.nextOffset, wireType);
@@ -148,11 +146,9 @@ function findAllFields(data, targetField) {
     const fieldNum = Number(parsed.value >> 3n);
     if (fieldNum === targetField && wireType === 2) {
       const lenParsed = readVarint(data, parsed.nextOffset);
-      const len = Number(lenParsed.value);
-      const end = lenParsed.nextOffset + len;
-      if (end <= data.length) {
-        results.push(Buffer.from(data.subarray(lenParsed.nextOffset, end)));
-      }
+      if (lenParsed.value > BigInt(data.length - lenParsed.nextOffset)) break;
+      const end = lenParsed.nextOffset + Number(lenParsed.value);
+      results.push(Buffer.from(data.subarray(lenParsed.nextOffset, end)));
       offset = end;
     } else {
       offset = skipField(data, parsed.nextOffset, wireType);
@@ -318,8 +314,12 @@ function removeUnifiedTopicEntry(data, targetKey) {
     let shouldRemove = false;
     if (fieldNum === 1 && wireType === 2) {
       const lenParsed = readVarint(data, nextOffset);
-      const entry = data.subarray(lenParsed.nextOffset, lenParsed.nextOffset + Number(lenParsed.value));
-      shouldRemove = unifiedTopicEntryKey(entry) === targetKey;
+      if (lenParsed.value <= BigInt(data.length - lenParsed.nextOffset)) {
+        const entry = data.subarray(lenParsed.nextOffset, lenParsed.nextOffset + Number(lenParsed.value));
+        try {
+          shouldRemove = unifiedTopicEntryKey(entry) === targetKey;
+        } catch (_) {}
+      }
     }
     if (!shouldRemove) {
       chunks.push(data.subarray(start, endOffset));

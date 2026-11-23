@@ -1,6 +1,7 @@
 // @ts-check
 'use strict';
 
+const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createAntigravityManagerStore } = require('./store');
@@ -23,6 +24,7 @@ const {
  *   baseDir: string,
  *   safeStorage?: any,
  *   fetch?: typeof fetch,
+ *   hubFetch?: typeof fetch,
  *   openExternal?: (url: string) => unknown,
  *   getDeviceIdentity?: () => { deviceId: string, hostname: string },
  *   getHubSyncTarget?: () => { mode: string, hubUrl?: string, secret?: string, embeddedHub?: any } | null,
@@ -47,6 +49,7 @@ function createAntigravityManagerService(options) {
   let activeOAuthAbort = null;
   /** @type {ReturnType<typeof setTimeout> | null} */
   let hubSyncTimer = null;
+  let switching = false;
   let stopped = false;
 
   /**
@@ -113,11 +116,12 @@ function createAntigravityManagerService(options) {
         if (target.secret) {
           headers.authorization = `Bearer ${target.secret}`;
         }
-        const fetchFn = options.fetch || fetch;
+        const fetchFn = options.hubFetch || options.fetch || fetch;
         const response = await fetchFn(`${baseUrl}${AG_MANAGER_SNAPSHOT_PATH}`, {
           method: 'PUT',
           headers,
           body: JSON.stringify(payload),
+          redirect: 'error',
           signal: AbortSignal.timeout(10_000)
         });
         return { ok: response.ok, mode: 'client', status: response.status };
@@ -162,7 +166,8 @@ function createAntigravityManagerService(options) {
     if (result.invalidGrant) {
       store.updateAccountQuota(accountId, account.quota || {}, {
         disabled: true,
-        disabledReason: result.error || 'invalid_grant'
+        disabledReason: result.error || 'invalid_grant',
+        disabledAt: Math.floor(Date.now() / 1000)
       });
       throw new Error(result.error || 'invalid_grant');
     }
@@ -184,6 +189,7 @@ function createAntigravityManagerService(options) {
       extra.validationMessage = '';
       extra.banned = false;
       extra.banInfo = null;
+      extra.forbiddenModels = [];
     }
 
     store.updateAccountQuota(accountId, result.quota || {}, extra);
@@ -204,6 +210,7 @@ function createAntigravityManagerService(options) {
 
     const controller = new AbortController();
     activeRefreshAbort = controller;
+    notifyStateChanged(false);
 
     try {
       const stats = await quota.runSlidingWindowBatch(targets, {
@@ -228,7 +235,6 @@ function createAntigravityManagerService(options) {
         }
       });
       scheduler.recordRefreshTimestamp();
-      notifyStateChanged(true);
       return { ok: true, ...stats };
     } finally {
       if (activeRefreshAbort === controller) activeRefreshAbort = null;
@@ -258,6 +264,9 @@ function createAntigravityManagerService(options) {
   const scheduler = createAntigravityManagerScheduler({
     getConfig: () => store.getConfig(),
     getAccountCount: () => store.listAccounts().filter((a) => !a.disabled && !a.banned && a.hasToken).length,
+    onRefreshStateChange: (isNowRefreshing) => {
+      notifyStateChanged(!isNowRefreshing);
+    },
     onRefreshAll: async () => {
       const cfg = store.getConfig();
       const targets = store.listAccounts().filter((a) => !a.disabled && !a.banned && a.hasToken);
@@ -278,6 +287,7 @@ function createAntigravityManagerService(options) {
                 currentEmail: p.item?.email || ''
               });
             } catch (_) {}
+            notifyStateChanged(false);
           },
           worker: async (acc) => {
             await refreshSingleAccountInternal(acc.id, controller.signal);
@@ -286,7 +296,6 @@ function createAntigravityManagerService(options) {
         });
       } finally {
         if (activeRefreshAbort === controller) activeRefreshAbort = null;
-        notifyStateChanged(true);
       }
     },
     logger,
@@ -328,7 +337,10 @@ function createAntigravityManagerService(options) {
       });
       const saved = store.upsertAccount({
         email: identity.email,
-        name: identity.name
+        name: identity.name,
+        disabled: false,
+        disabledReason: '',
+        disabledAt: null
       }, token);
       if (!saved?.id) return { ok: false, error: 'Failed to store OAuth account' };
       try {
@@ -444,24 +456,32 @@ function createAntigravityManagerService(options) {
    * @param {string} [targetClient]
    */
   async function switchAccountTo(accountId, targetClient) {
+    if (switching) return { ok: false, error: 'Account switch already in progress' };
     const account = store.getAccount(accountId);
     if (!account) return { ok: false, error: 'Account not found' };
     const tokenData = store.getAccountToken(accountId);
     if (!tokenData) return { ok: false, error: 'Account has no stored token' };
     const cfg = store.getConfig();
     const target = targetClient || cfg.defaultSwitchTarget || 'auto';
-    const res = await switcher.switchAccount({
-      account,
-      tokenData,
-      targetClient: target,
-      store,
-      deps: {
-        fetch: options.fetch,
-        customExecutablePaths: cfg.customExecutablePaths
-      }
-    });
-    notifyStateChanged(true);
-    return res;
+    switching = true;
+    try {
+      const res = await switcher.switchAccount({
+        account,
+        tokenData,
+        targetClient: target,
+        store,
+        deps: {
+          fetch: options.fetch,
+          customExecutablePaths: cfg.customExecutablePaths
+        }
+      });
+      notifyStateChanged(true);
+      return res;
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      switching = false;
+    }
   }
 
   /**
@@ -489,9 +509,23 @@ function createAntigravityManagerService(options) {
   function setAccountDisabled(id, disabled) {
     const acc = store.getAccount(id);
     if (!acc) return { ok: false, error: 'Account not found' };
-    store.upsertAccount({ ...acc, disabled: Boolean(disabled), disabledReason: disabled ? 'Manually disabled' : '' });
+    const nextDisabled = Boolean(disabled);
+    store.upsertAccount({
+      ...acc,
+      disabled: nextDisabled,
+      disabledReason: nextDisabled ? 'Manually disabled' : '',
+      disabledAt: nextDisabled ? Math.floor(Date.now() / 1000) : null
+    });
     notifyStateChanged(true);
     return { ok: true, account: store.getAccount(id) };
+  }
+
+  function resolveExistingDesktopStoragePath() {
+    const classicPath = deviceProfile.getStoragePath('classic');
+    if (classicPath && fs.existsSync(classicPath)) return classicPath;
+    const idePath = deviceProfile.getStoragePath('ide');
+    if (idePath && fs.existsSync(idePath)) return idePath;
+    return classicPath || idePath || '';
   }
 
   /**
@@ -501,37 +535,45 @@ function createAntigravityManagerService(options) {
   function bindDeviceProfile(id, mode = 'generate') {
     const acc = store.getAccount(id);
     if (!acc) return { ok: false, error: 'Account not found' };
-    let profile;
-    if (mode === 'capture') {
-      const storagePath = deviceProfile.getStoragePath('classic') || deviceProfile.getStoragePath('ide');
-      profile = deviceProfile.readDeviceProfile(storagePath) || deviceProfile.generateDeviceProfile();
-    } else {
-      profile = deviceProfile.generateDeviceProfile();
+    try {
+      const existingStorage = resolveExistingDesktopStoragePath();
+      const orig = existingStorage ? deviceProfile.readDeviceProfile(existingStorage) : null;
+      if (orig) store.saveOriginalDeviceProfileIfMissing(orig);
+      const profile = mode === 'capture'
+        ? (orig || deviceProfile.generateDeviceProfile())
+        : deviceProfile.generateDeviceProfile();
+      const updated = store.upsertAccount({ ...acc, deviceProfile: profile });
+      notifyStateChanged(true);
+      return { ok: true, account: updated, deviceProfile: profile };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
-    const existingStorage = deviceProfile.getStoragePath('classic');
-    const orig = deviceProfile.readDeviceProfile(existingStorage);
-    if (orig) store.saveOriginalDeviceProfileIfMissing(orig);
-    const updated = store.upsertAccount({ ...acc, deviceProfile: profile });
-    notifyStateChanged(false);
-    return { ok: true, account: updated, deviceProfile: profile };
   }
 
   function restoreOriginalDevice() {
     const orig = store.getOriginalDeviceProfile();
     if (!orig) return { ok: false, error: 'No original device backup found' };
-    const storagePath = deviceProfile.getStoragePath('classic') || deviceProfile.getStoragePath('ide');
+    const storagePath = resolveExistingDesktopStoragePath();
     if (!storagePath) return { ok: false, error: 'storage.json not found' };
-    deviceProfile.writeDeviceProfile(storagePath, orig);
-    return { ok: true, storagePath };
+    try {
+      deviceProfile.writeDeviceProfile(storagePath, orig);
+      return { ok: true, storagePath };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   function detectActiveClients() {
+    const procs = processManager.listProcesses();
+    const procDeps = { listProcesses: () => procs };
+    const defaultDataDir = importExport.defaultManagerDataDir();
     return {
-      classicRunning: processManager.isAntigravityRunning('classic'),
-      ideRunning: processManager.isAntigravityRunning('ide'),
-      agyRunning: processManager.isProcessRunningByName('agy'),
-      acpRunning: processManager.isProcessRunningByName('agy_acp_server'),
-      defaultDataDirExists: importExport.defaultManagerDataDir()
+      classicRunning: processManager.isAntigravityRunning('classic', procDeps),
+      ideRunning: processManager.isAntigravityRunning('ide', procDeps),
+      agyRunning: processManager.isProcessRunningByName('agy', procDeps),
+      acpRunning: processManager.isProcessRunningByName('agy_acp_server', procDeps),
+      defaultDataDir,
+      defaultDataDirExists: Boolean(defaultDataDir && fs.existsSync(defaultDataDir))
     };
   }
 

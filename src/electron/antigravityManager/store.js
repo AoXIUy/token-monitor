@@ -49,17 +49,29 @@ function readJsonSafe(filePath, fallback) {
  * @param {boolean} [privateMode]
  */
 function writeJsonAtomic(filePath, value, privateMode = false) {
+  try {
+    if (fs.lstatSync(filePath).isSymbolicLink()) {
+      throw new Error(`Refusing to overwrite symlinked file: ${filePath}`);
+    }
+  } catch (error) {
+    if (/** @type {any} */ (error)?.code !== 'ENOENT') throw error;
+  }
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true, ...(privateMode && process.platform !== 'win32' ? { mode: 0o700 } : {}) });
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`;
   const payload = `${JSON.stringify(value, null, 2)}\n`;
-  fs.writeFileSync(tempPath, payload, {
-    encoding: 'utf8',
-    ...(privateMode && process.platform !== 'win32' ? { mode: 0o600 } : {})
-  });
-  fs.renameSync(tempPath, filePath);
-  if (privateMode && process.platform !== 'win32') {
-    try { fs.chmodSync(filePath, 0o600); } catch (_) {}
+  try {
+    fs.writeFileSync(tempPath, payload, {
+      encoding: 'utf8',
+      ...(privateMode && process.platform !== 'win32' ? { mode: 0o600 } : {})
+    });
+    fs.renameSync(tempPath, filePath);
+    if (privateMode && process.platform !== 'win32') {
+      try { fs.chmodSync(filePath, 0o600); } catch (_) {}
+    }
+  } catch (error) {
+    try { fs.unlinkSync(tempPath); } catch (_) {}
+    throw error;
   }
 }
 
@@ -125,6 +137,26 @@ function sanitizeTokenRecord(raw) {
 }
 
 /**
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+function optionalPositiveNumber(value) {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
+  const num = Number(value);
+  return Number.isFinite(num) && num > 0 ? num : null;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {number}
+ */
+function nonNegativeTimestamp(value) {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return 0;
+  const num = Number(value);
+  return Number.isFinite(num) && num >= 0 ? num : 0;
+}
+
+/**
  * @param {Record<string, any>} raw
  */
 function sanitizeAccountMeta(raw) {
@@ -142,7 +174,7 @@ function sanitizeAccountMeta(raw) {
     subscriptionTier,
     disabled: raw?.disabled === true,
     disabledReason: typeof raw?.disabledReason === 'string' ? raw.disabledReason : '',
-    disabledAt: Number.isFinite(Number(raw?.disabledAt)) ? Number(raw.disabledAt) : null,
+    disabledAt: optionalPositiveNumber(raw?.disabledAt),
     banned: raw?.banned === true,
     banInfo: raw?.banInfo && typeof raw.banInfo === 'object'
       ? {
@@ -159,8 +191,8 @@ function sanitizeAccountMeta(raw) {
     deviceProfile: raw?.deviceProfile && typeof raw.deviceProfile === 'object' ? { ...raw.deviceProfile } : null,
     deviceVersions: Array.isArray(raw?.deviceVersions) ? raw.deviceVersions.slice(0, 20) : [],
     quota,
-    createdAt: Number.isFinite(Number(raw?.createdAt)) ? Number(raw.createdAt) : Math.floor(Date.now() / 1000),
-    lastUsedAt: Number.isFinite(Number(raw?.lastUsedAt)) ? Number(raw.lastUsedAt) : 0
+    createdAt: optionalPositiveNumber(raw?.createdAt) ?? Math.floor(Date.now() / 1000),
+    lastUsedAt: nonNegativeTimestamp(raw?.lastUsedAt)
   };
 }
 
@@ -212,11 +244,34 @@ function createAntigravityManagerStore({ baseDir, safeStorage = null, logger = c
     }
   }
 
+  /** @type {Error | null} */
+  let tokensLoadError = null;
+
   /** @returns {Record<string, NonNullable<ReturnType<typeof sanitizeTokenRecord>>>} */
   function loadTokensMap() {
-    const envelope = readJsonSafe(tokensFile, null);
-    if (!envelope || typeof envelope !== 'object') return {};
+    tokensLoadError = null;
     try {
+      const stat = fs.lstatSync(tokensFile);
+      if (stat.isSymbolicLink()) {
+        throw new Error('Refusing to load symlinked tokens store');
+      }
+      if (!stat.isFile()) {
+        throw new Error('Tokens store path is not a regular file');
+      }
+    } catch (error) {
+      if (/** @type {any} */ (error)?.code === 'ENOENT') return {};
+      tokensLoadError = error instanceof Error ? error : new Error(String(error));
+      (logger.warn || console.warn)(`[antigravity-manager] could not read tokens store: ${tokensLoadError.message}`);
+      return {};
+    }
+
+    try {
+      const rawFile = fs.readFileSync(tokensFile, 'utf8');
+      if (!rawFile.trim()) return {};
+      const envelope = JSON.parse(rawFile);
+      if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
+        throw new Error('Invalid tokens store envelope');
+      }
       let jsonStr = '';
       if (envelope.mode === 'safeStorage' && typeof envelope.data === 'string') {
         if (!safeStorage || typeof safeStorage.decryptString !== 'function') {
@@ -226,10 +281,12 @@ function createAntigravityManagerStore({ baseDir, safeStorage = null, logger = c
       } else if (envelope.mode === 'plain-private' && typeof envelope.data === 'string') {
         jsonStr = Buffer.from(envelope.data, 'base64').toString('utf8');
       } else {
-        return {};
+        throw new Error(`Unsupported tokens store mode: ${String(envelope.mode || 'unknown')}`);
       }
       const parsed = JSON.parse(jsonStr);
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Invalid decrypted tokens payload');
+      }
       /** @type {Record<string, NonNullable<ReturnType<typeof sanitizeTokenRecord>>>} */
       const out = {};
       for (const [id, rawToken] of Object.entries(parsed)) {
@@ -238,7 +295,8 @@ function createAntigravityManagerStore({ baseDir, safeStorage = null, logger = c
       }
       return out;
     } catch (error) {
-      (logger.warn || console.warn)(`[antigravity-manager] could not read tokens store: ${error instanceof Error ? error.message : String(error)}`);
+      tokensLoadError = error instanceof Error ? error : new Error(String(error));
+      (logger.warn || console.warn)(`[antigravity-manager] could not read tokens store: ${tokensLoadError.message}`);
       return {};
     }
   }
@@ -255,6 +313,9 @@ function createAntigravityManagerStore({ baseDir, safeStorage = null, logger = c
   }
 
   function saveTokensMap() {
+    if (tokensLoadError) {
+      throw new Error(`Refusing to overwrite unreadable tokens store: ${tokensLoadError.message}`);
+    }
     const rawJson = JSON.stringify(tokensMap);
     const envelope = canEncrypt() && safeStorage && typeof safeStorage.encryptString === 'function'
       ? {
@@ -343,24 +404,18 @@ function createAntigravityManagerStore({ baseDir, safeStorage = null, logger = c
     const existing = accountsDoc.accounts.find(
       (a) => (incomingId && a.id === incomingId) || (emailNorm && a.email === emailNorm)
     );
+    const incomingName = typeof meta?.name === 'string' ? meta.name.trim() : '';
     const merged = sanitizeAccountMeta({
       ...(existing || {}),
       ...meta,
       id: existing?.id || incomingId || `agm-${crypto.randomUUID()}`,
       email: emailNorm || existing?.email || '',
-      name: meta?.name !== undefined ? meta.name : (existing?.name || ''),
+      name: incomingName || existing?.name || '',
       quota: meta?.quota !== undefined ? meta.quota : (existing?.quota || null),
       deviceProfile: meta?.deviceProfile !== undefined ? meta.deviceProfile : (existing?.deviceProfile || null),
       deviceVersions: meta?.deviceVersions !== undefined ? meta.deviceVersions : (existing?.deviceVersions || []),
       createdAt: existing?.createdAt || meta?.createdAt || Math.floor(Date.now() / 1000)
     });
-
-    const idx = accountsDoc.accounts.findIndex((a) => a.id === merged.id);
-    if (idx >= 0) {
-      accountsDoc.accounts[idx] = merged;
-    } else {
-      accountsDoc.accounts.push(merged);
-    }
 
     if (tokenData) {
       const cleanToken = sanitizeTokenRecord({
@@ -369,10 +424,26 @@ function createAntigravityManagerStore({ baseDir, safeStorage = null, logger = c
         email: merged.email || tokenData.email || ''
       });
       if (cleanToken) {
+        const hadPrev = Object.hasOwn(tokensMap, merged.id);
+        const prevToken = tokensMap[merged.id];
         tokensMap[merged.id] = cleanToken;
-        saveTokensMap();
+        try {
+          saveTokensMap();
+        } catch (error) {
+          if (hadPrev) tokensMap[merged.id] = prevToken;
+          else delete tokensMap[merged.id];
+          throw error;
+        }
       }
     }
+
+    const idx = accountsDoc.accounts.findIndex((a) => a.id === merged.id);
+    if (idx >= 0) {
+      accountsDoc.accounts[idx] = merged;
+    } else {
+      accountsDoc.accounts.push(merged);
+    }
+
     saveAccountsDoc();
     return getAccount(merged.id);
   }
@@ -387,8 +458,16 @@ function createAntigravityManagerStore({ baseDir, safeStorage = null, logger = c
       ...tokenData
     });
     if (!clean) return false;
+    const hadPrev = Object.hasOwn(tokensMap, id);
+    const prevToken = tokensMap[id];
     tokensMap[id] = clean;
-    saveTokensMap();
+    try {
+      saveTokensMap();
+    } catch (error) {
+      if (hadPrev) tokensMap[id] = prevToken;
+      else delete tokensMap[id];
+      throw error;
+    }
     return true;
   }
 
@@ -435,7 +514,7 @@ function createAntigravityManagerStore({ baseDir, safeStorage = null, logger = c
   /**
    * @param {string} id
    * @param {Record<string, any>} quota
-   * @param {{ subscriptionTier?: string, name?: string, validationBlocked?: boolean, validationMessage?: string, banned?: boolean, banInfo?: any, forbiddenModels?: string[], disabled?: boolean, disabledReason?: string }} [extra]
+   * @param {{ subscriptionTier?: string, name?: string, validationBlocked?: boolean, validationMessage?: string, banned?: boolean, banInfo?: any, forbiddenModels?: string[], disabled?: boolean, disabledReason?: string, disabledAt?: number | null }} [extra]
    */
   function updateAccountQuota(id, quota, extra = {}) {
     const idx = accountsDoc.accounts.findIndex((a) => a.id === id);

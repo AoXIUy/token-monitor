@@ -80,6 +80,26 @@ function nonNegativeNumber(value) {
 }
 
 /**
+ * @param {string} [message]
+ */
+function invalidRequestError(message = 'invalid_request') {
+  const err = new Error(message);
+  /** @type {any} */ (err).code = 'invalid_request';
+  return err;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+function strictRemainingFraction(value) {
+  if (value === null || value === undefined || typeof value === 'boolean') return null;
+  if (typeof value === 'string' && !value.trim()) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : null;
+}
+
+/**
  * @param {unknown} raw
  * @returns {{
  *   lastUpdatedAt: number,
@@ -100,14 +120,18 @@ function sanitizeQuota(raw) {
         const buckets = Array.isArray(group.buckets)
           ? group.buckets.slice(0, MAX_BUCKETS_PER_GROUP).flatMap((bucket) => {
               if (!isPlainObject(bucket)) return [];
-              const fractionRaw = Number(bucket.remainingFraction ?? bucket.remaining_fraction);
-              if (!Number.isFinite(fractionRaw)) return [];
-              const remainingFraction = Math.max(0, Math.min(1, fractionRaw));
+              const resetTime = cleanIsoDate(bucket.resetTime ?? bucket.reset_time) || cleanSingleLine(bucket.resetTime ?? bucket.reset_time, 64);
+              const rawFraction = bucket.remainingFraction ?? bucket.remaining_fraction;
+              let remainingFraction = strictRemainingFraction(rawFraction);
+              if (remainingFraction === null && (rawFraction === undefined || rawFraction === null) && resetTime) {
+                remainingFraction = 0;
+              }
+              if (remainingFraction === null) return [];
               return [{
                 bucketId: cleanSingleLine(bucket.bucketId ?? bucket.bucket_id, 128),
                 window: cleanSingleLine(bucket.window, 32),
                 remainingFraction,
-                resetTime: cleanIsoDate(bucket.resetTime ?? bucket.reset_time) || cleanSingleLine(bucket.resetTime ?? bucket.reset_time, 64),
+                resetTime,
                 displayName: cleanSingleLine(bucket.displayName ?? bucket.display_name, 128)
               }];
             })
@@ -148,9 +172,12 @@ function sanitizeQuota(raw) {
  * @param {unknown} raw
  */
 function sanitizeAntigravityManagerSnapshot(raw) {
-  if (!isPlainObject(raw)) throw new Error('invalid_request');
+  if (!isPlainObject(raw)) throw invalidRequestError('invalid_request');
   const deviceId = cleanSingleLine(raw.deviceId, 256);
-  if (!deviceId) throw new Error('invalid_request');
+  if (!deviceId) throw invalidRequestError('invalid_request');
+  if (raw.accounts !== undefined && !Array.isArray(raw.accounts)) {
+    throw invalidRequestError('accounts must be an array');
+  }
 
   const hostname = cleanSingleLine(raw.hostname, 256);
   const updatedAt = cleanIsoDate(raw.updatedAt) || new Date().toISOString();
@@ -208,7 +235,7 @@ function sanitizeAntigravityManagerSnapshot(raw) {
       disabled: item.disabled === true,
       disabledReason: cleanSingleLine(item.disabledReason, 512),
       banned: item.banned === true,
-      banCode: cleanSingleLine(item.banCode, 128),
+      banCode: cleanSingleLine(item.banCode ?? (isPlainObject(item.banInfo) ? item.banInfo.code : ''), 128),
       validationBlocked: item.validationBlocked === true,
       validationMessage: cleanSingleLine(item.validationMessage, 256),
       hasDeviceProfile: item.hasDeviceProfile === true,

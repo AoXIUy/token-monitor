@@ -1901,7 +1901,10 @@ function createHub({
           res.shouldKeepAlive = false;
           return sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
         }
-        return sendJson(res, 400, { error: 'invalid_request', message: error.message });
+        if (error.code === 'invalid_request' || error instanceof SyntaxError || /^Invalid JSON body/.test(String(error.message || ''))) {
+          return sendJson(res, 400, { error: 'invalid_request', message: error.message });
+        }
+        return sendJson(res, 500, { error: 'storage_error', message: 'Failed to persist snapshot' });
       }
     }
 

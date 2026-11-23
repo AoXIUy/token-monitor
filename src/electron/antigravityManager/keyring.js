@@ -19,8 +19,10 @@ const KEYRING_B64_PREFIX = 'go-keyring-base64:';
  * @returns {string}
  */
 function serializeKeyringPayload(tokenData) {
-  const expiryRaw = Number(tokenData.expiryTimestamp || 0);
-  const expiryMs = expiryRaw > 10_000_000_000 ? expiryRaw : expiryRaw * 1000;
+  const expiryRaw = Number(tokenData.expiryTimestamp);
+  const expiryMs = Number.isFinite(expiryRaw) && expiryRaw > 0
+    ? (expiryRaw > 10_000_000_000 ? Math.trunc(expiryRaw) : Math.trunc(expiryRaw * 1000))
+    : 0;
   const iso = (expiryMs > 0 ? new Date(expiryMs) : new Date()).toISOString();
   const microIso = iso.replace(/\.(\d{3})Z$/, '.$1000Z');
   const payload = {
@@ -60,36 +62,57 @@ function parseKeyringPayload(raw) {
   }
 }
 
+const WIN32_CRED_MAX_BLOB_BYTES = 2560;
+
+/**
+ * Create Windows Credential Manager bindings using anonymous Koffi structs so
+ * global type names (`FILETIME`, `CREDENTIALW`, `PCREDENTIALW`) never collide
+ * with other modules (e.g. `src/shared/providers/claude/limits.js`).
+ *
+ * @param {any} koffi
+ */
+function createWin32CredApi(koffi) {
+  const advapi32 = koffi.load('advapi32.dll');
+  let GetLastError = null;
+  try {
+    const kernel32 = koffi.load('kernel32.dll');
+    GetLastError = kernel32.func('__stdcall', 'GetLastError', 'uint32_t', []);
+  } catch (_) {}
+  const FILETIME = koffi.struct({
+    dwLowDateTime: 'uint32_t',
+    dwHighDateTime: 'uint32_t'
+  });
+  const CREDENTIALW = koffi.struct({
+    Flags: 'uint32_t',
+    Type: 'uint32_t',
+    TargetName: 'str16',
+    Comment: 'void *',
+    LastWritten: FILETIME,
+    CredentialBlobSize: 'uint32_t',
+    CredentialBlob: 'uint8_t *',
+    Persist: 'uint32_t',
+    AttributeCount: 'uint32_t',
+    Attributes: 'void *',
+    TargetAlias: 'void *',
+    UserName: 'str16'
+  });
+  const CredWriteW = advapi32.func('__stdcall', 'CredWriteW', 'int', [koffi.pointer(CREDENTIALW), 'uint32_t']);
+  const CredReadW = advapi32.func('__stdcall', 'CredReadW', 'int', [
+    'str16',
+    'uint32_t',
+    'uint32_t',
+    koffi.out(koffi.pointer(koffi.pointer(CREDENTIALW)))
+  ]);
+  const CredDeleteW = advapi32.func('__stdcall', 'CredDeleteW', 'int', ['str16', 'uint32_t', 'uint32_t']);
+  const CredFree = advapi32.func('__stdcall', 'CredFree', 'void', ['void *']);
+  return { koffi, CredWriteW, CredReadW, CredDeleteW, CredFree, GetLastError, CREDENTIALW };
+}
+
 /** @type {any} */
 let win32Bindings = null;
 function getWin32CredApi() {
   if (win32Bindings) return win32Bindings;
-  const koffi = require('koffi');
-  const advapi32 = koffi.load('advapi32.dll');
-  const FILETIME = koffi.struct('FILETIME', {
-    dwLowDateTime: 'uint32',
-    dwHighDateTime: 'uint32'
-  });
-  const CREDENTIALW = koffi.struct('CREDENTIALW', {
-    Flags: 'uint32',
-    Type: 'uint32',
-    TargetName: 'str16',
-    Comment: 'void*',
-    LastWritten: FILETIME,
-    CredentialBlobSize: 'uint32',
-    CredentialBlob: 'uint8*',
-    Persist: 'uint32',
-    AttributeCount: 'uint32',
-    Attributes: 'void*',
-    TargetAlias: 'void*',
-    UserName: 'str16'
-  });
-  koffi.pointer('PCREDENTIALW', CREDENTIALW);
-  const CredWriteW = advapi32.func('int __stdcall CredWriteW(CREDENTIALW *Credential, uint32 Flags)');
-  const CredReadW = advapi32.func('int __stdcall CredReadW(str16 TargetName, uint32 Type, uint32 Flags, _Out_ PCREDENTIALW *Credential)');
-  const CredDeleteW = advapi32.func('int __stdcall CredDeleteW(str16 TargetName, uint32 Type, uint32 Flags)');
-  const CredFree = advapi32.func('void __stdcall CredFree(void *Buffer)');
-  win32Bindings = { koffi, CredWriteW, CredReadW, CredDeleteW, CredFree, CREDENTIALW };
+  win32Bindings = createWin32CredApi(require('koffi'));
   return win32Bindings;
 }
 
@@ -134,13 +157,16 @@ function writeToSystemKeyring(tokenData, options = {}) {
 
   if (platform === 'win32') {
     const target = `${service}:${account}`;
-    const secretBuf = Buffer.from(payloadJson, 'utf8');
+    let secretBuf = Buffer.from(payloadJson, 'utf8');
+    if (secretBuf.length > WIN32_CRED_MAX_BLOB_BYTES && tokenData.idToken) {
+      // Windows CRED_MAX_CREDENTIAL_BLOB_SIZE is 2560 bytes; omit optional id_token if needed.
+      secretBuf = Buffer.from(serializeKeyringPayload({ ...tokenData, idToken: null }), 'utf8');
+    }
     if (options.win32Cred) {
       options.win32Cred.write(target, account, secretBuf);
       return;
     }
     const api = getWin32CredApi();
-    try { api.CredDeleteW(target, 1, 0); } catch (_) {}
     const ok = api.CredWriteW({
       Flags: 0,
       Type: 1,
@@ -155,7 +181,10 @@ function writeToSystemKeyring(tokenData, options = {}) {
       TargetAlias: null,
       UserName: account
     }, 0);
-    if (!ok) throw new Error('Windows CredWriteW failed');
+    if (!ok) {
+      const errCode = typeof api.GetLastError === 'function' ? api.GetLastError() : null;
+      throw new Error(errCode ? `Windows CredWriteW failed (Win32 error ${errCode})` : 'Windows CredWriteW failed');
+    }
     return;
   }
 
@@ -193,6 +222,22 @@ function writeToSystemKeyring(tokenData, options = {}) {
 }
 
 /**
+ * Decode a raw Windows CredentialBlob buffer (UTF-8 or UTF-16LE, trimming trailing NUL bytes).
+ *
+ * @param {Buffer} rawBuf
+ * @returns {{ refreshToken: string, email: string } | null}
+ */
+function parseWin32CredentialBuffer(rawBuf) {
+  if (!rawBuf || rawBuf.length === 0) return null;
+  const utf8Parsed = parseKeyringPayload(rawBuf.toString('utf8').replace(/\0+$/g, ''));
+  if (utf8Parsed) return utf8Parsed;
+  if (rawBuf.length % 2 === 0) {
+    return parseKeyringPayload(rawBuf.toString('utf16le').replace(/\0+$/g, ''));
+  }
+  return null;
+}
+
+/**
  * Read credential from OS keyring.
  *
  * @param {{
@@ -224,7 +269,7 @@ function readFromSystemKeyring(options = {}) {
       const target = `${service}:${account}`;
       if (options.win32Cred) {
         const buf = options.win32Cred.read(target);
-        return buf ? parseKeyringPayload(buf.toString('utf8')) : null;
+        return buf ? parseWin32CredentialBuffer(buf) : null;
       }
       const api = getWin32CredApi();
       const outPtr = [null];
@@ -233,8 +278,13 @@ function readFromSystemKeyring(options = {}) {
       try {
         const cred = api.koffi.decode(outPtr[0], api.CREDENTIALW);
         if (!cred?.CredentialBlob || !cred.CredentialBlobSize) return null;
-        const rawBytes = api.koffi.decode(cred.CredentialBlob, 'uint8', cred.CredentialBlobSize);
-        return parseKeyringPayload(Buffer.from(rawBytes).toString('utf8'));
+        let rawBuf;
+        try {
+          rawBuf = Buffer.from(new Uint8Array(api.koffi.view(cred.CredentialBlob, cred.CredentialBlobSize)));
+        } catch (_) {
+          rawBuf = Buffer.from(api.koffi.decode(cred.CredentialBlob, 'uint8_t', cred.CredentialBlobSize));
+        }
+        return parseWin32CredentialBuffer(rawBuf);
       } finally {
         api.CredFree(outPtr[0]);
       }
@@ -256,6 +306,8 @@ module.exports = {
   DEFAULT_ACCOUNT,
   DEFAULT_SERVICE,
   KEYRING_B64_PREFIX,
+  WIN32_CRED_MAX_BLOB_BYTES,
+  createWin32CredApi,
   parseKeyringPayload,
   readFromSystemKeyring,
   serializeKeyringPayload,

@@ -1,6 +1,7 @@
 // @ts-check
 'use strict';
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -32,10 +33,27 @@ function resolveGeminiDir(env = process.env, home = os.homedir()) {
 function writePrivateJsonFile(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const text = `${JSON.stringify(value, null, 2)}\n`;
-  fs.writeFileSync(filePath, text, { encoding: 'utf8', ...(process.platform !== 'win32' ? { mode: 0o600 } : {}) });
-  if (process.platform !== 'win32') {
-    try { fs.chmodSync(filePath, 0o600); } catch (_) {}
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  try {
+    fs.writeFileSync(tempPath, text, { encoding: 'utf8', ...(process.platform !== 'win32' ? { mode: 0o600 } : {}) });
+    fs.renameSync(tempPath, filePath);
+    if (process.platform !== 'win32') {
+      try { fs.chmodSync(filePath, 0o600); } catch (_) {}
+    }
+  } catch (error) {
+    try { fs.unlinkSync(tempPath); } catch (_) {}
+    throw error;
   }
+}
+
+/**
+ * @param {unknown} raw
+ * @returns {number}
+ */
+function safeExpiryMs(raw) {
+  const num = Number(raw);
+  if (!Number.isFinite(num) || num <= 0) return 0;
+  return num > 10_000_000_000 ? Math.trunc(num) : Math.trunc(num * 1000);
 }
 
 /**
@@ -48,8 +66,7 @@ function writePrivateJsonFile(filePath, value) {
  * }} tokenData
  */
 function buildAgyTokenObject(tokenData) {
-  const expiryRaw = Number(tokenData.expiryTimestamp || 0);
-  const expiryMs = expiryRaw > 10_000_000_000 ? expiryRaw : expiryRaw * 1000;
+  const expiryMs = safeExpiryMs(tokenData.expiryTimestamp);
   const iso = (expiryMs > 0 ? new Date(expiryMs) : new Date()).toISOString();
   const microIso = iso.replace(/\.(\d{3})Z$/, '.$1000Z');
   return {
@@ -92,8 +109,7 @@ function writeFileCredentials(tokenData, options = {}) {
   }
 
   // 3. Gemini CLI compatible files
-  const expiryRaw = Number(tokenData.expiryTimestamp || 0);
-  const expiryMs = expiryRaw > 10_000_000_000 ? expiryRaw : expiryRaw * 1000;
+  const expiryMs = safeExpiryMs(tokenData.expiryTimestamp);
   writePrivateJsonFile(path.join(geminiDir, 'oauth_creds.json'), {
     access_token: String(tokenData.accessToken || ''),
     refresh_token: String(tokenData.refreshToken || ''),
@@ -103,9 +119,28 @@ function writeFileCredentials(tokenData, options = {}) {
     ...(tokenData.idToken ? { id_token: String(tokenData.idToken) } : {})
   });
   if (tokenData.email) {
-    writePrivateJsonFile(path.join(geminiDir, 'google_accounts.json'), {
-      active: String(tokenData.email),
-      old: []
+    const accountsPath = path.join(geminiDir, 'google_accounts.json');
+    const nextActive = String(tokenData.email);
+    /** @type {string[]} */
+    const prevOld = [];
+    try {
+      if (fs.existsSync(accountsPath)) {
+        const existing = JSON.parse(fs.readFileSync(accountsPath, 'utf8'));
+        if (typeof existing?.active === 'string' && existing.active && existing.active !== nextActive) {
+          prevOld.push(existing.active);
+        }
+        if (Array.isArray(existing?.old)) {
+          for (const item of existing.old) {
+            if (typeof item === 'string' && item && item !== nextActive && !prevOld.includes(item)) {
+              prevOld.push(item);
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    writePrivateJsonFile(accountsPath, {
+      active: nextActive,
+      old: prevOld
     });
   }
 }

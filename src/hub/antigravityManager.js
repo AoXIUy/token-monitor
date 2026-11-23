@@ -38,17 +38,13 @@ function createAntigravityManagerStore({ dataFile = '', logger = console } = {})
     if (typeof saved.updatedAt === 'string') updatedAt = saved.updatedAt;
   }
 
-  function persist() {
+  function persistOrThrow() {
     if (!persistFile) return;
-    try {
-      writeJsonAtomic(persistFile, {
-        version: 1,
-        updatedAt,
-        devices: Array.from(snapshots.values())
-      });
-    } catch (error) {
-      (logger.warn || console.warn)(`[antigravity-manager-hub] failed to save snapshots: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    writeJsonAtomic(persistFile, {
+      version: 1,
+      updatedAt,
+      devices: Array.from(snapshots.values())
+    });
   }
 
   /** @param {string} incomingDeviceId */
@@ -79,19 +75,36 @@ function createAntigravityManagerStore({ dataFile = '', logger = console } = {})
    */
   function putSnapshot(raw) {
     const clean = sanitizeAntigravityManagerSnapshot(raw);
+    const previousEntries = Array.from(snapshots.entries());
+    const previousUpdatedAt = updatedAt;
     evictOldestIfNeeded(clean.deviceId);
     snapshots.set(clean.deviceId, clean);
     updatedAt = new Date().toISOString();
-    persist();
-    return { ok: true, updatedAt, deviceId: clean.deviceId };
+    try {
+      persistOrThrow();
+    } catch (error) {
+      snapshots.clear();
+      for (const [id, entry] of previousEntries) snapshots.set(id, entry);
+      updatedAt = previousUpdatedAt;
+      (logger.warn || console.warn)(`[antigravity-manager-hub] failed to save snapshots: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+    return {
+      ok: true,
+      deviceId: clean.deviceId,
+      accountCount: clean.accounts.length,
+      updatedAt
+    };
   }
 
   function getSnapshots() {
-    const devices = Array.from(snapshots.values()).sort((a, b) => {
-      const ta = Date.parse(a.updatedAt) || 0;
-      const tb = Date.parse(b.updatedAt) || 0;
-      return tb - ta;
-    });
+    const devices = Array.from(snapshots.values())
+      .sort((a, b) => {
+        const ta = Date.parse(a.updatedAt) || 0;
+        const tb = Date.parse(b.updatedAt) || 0;
+        return tb - ta;
+      })
+      .map((entry) => structuredClone(entry));
     return {
       ok: true,
       version: 1,
@@ -106,17 +119,34 @@ function createAntigravityManagerStore({ dataFile = '', logger = console } = {})
   function removeDevice(deviceId) {
     const key = String(deviceId || '').trim();
     if (!key || !snapshots.has(key)) return false;
+    const previousEntry = snapshots.get(key);
+    const previousUpdatedAt = updatedAt;
     snapshots.delete(key);
     updatedAt = new Date().toISOString();
-    persist();
+    try {
+      persistOrThrow();
+    } catch (error) {
+      if (previousEntry) snapshots.set(key, previousEntry);
+      updatedAt = previousUpdatedAt;
+      (logger.warn || console.warn)(`[antigravity-manager-hub] failed to save snapshots after device removal: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
     return true;
   }
 
   function clear() {
     if (snapshots.size === 0) return;
+    const previousEntries = Array.from(snapshots.entries());
+    const previousUpdatedAt = updatedAt;
     snapshots.clear();
     updatedAt = '';
-    persist();
+    try {
+      persistOrThrow();
+    } catch (error) {
+      for (const [id, entry] of previousEntries) snapshots.set(id, entry);
+      updatedAt = previousUpdatedAt;
+      (logger.warn || console.warn)(`[antigravity-manager-hub] failed to clear snapshots: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   loadInitial();
