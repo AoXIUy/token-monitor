@@ -1,7 +1,7 @@
 // @ts-check
 'use strict';
 
-const { execFileSync, spawn } = require('node:child_process');
+const { execFile, execFileSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -182,6 +182,113 @@ function sanitizeRestartArgs(args) {
     });
 }
 
+const WIN32_PS_LIST_SCRIPT = [
+  '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+  '$OutputEncoding = [System.Text.Encoding]::UTF8',
+  'Get-CimInstance Win32_Process | Select-Object ProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress'
+].join('; ');
+
+const WIN32_PS_REGISTRY_SCRIPT = [
+  '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+  '$OutputEncoding = [System.Text.Encoding]::UTF8',
+  '$roots = @("HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*","HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*","HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*")',
+  'Get-ItemProperty $roots -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*Antigravity*" } | Select-Object DisplayName,InstallLocation,DisplayIcon | ConvertTo-Json -Compress'
+].join('; ');
+
+const WIN_REGISTRY_CACHE_TTL_MS = 60_000;
+/** @type {Map<string, { value: string | null, expiresAt: number }>} */
+const winRegistryCache = new Map();
+
+/**
+ * @param {typeof execFile} execAsyncFn
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {import('node:child_process').ExecFileOptions} opts
+ * @returns {Promise<string>}
+ */
+function execFileTextAsync(execAsyncFn, cmd, args, opts) {
+  return new Promise((resolve, reject) => {
+    execAsyncFn(cmd, args, { ...opts, encoding: 'utf8' }, (err, stdout) => {
+      if (err) reject(err);
+      else resolve(String(stdout || ''));
+    });
+  });
+}
+
+/**
+ * @param {string} out
+ */
+function parseWin32ProcessOutput(out) {
+  const cleanJson = String(out || '').replace(/^\uFEFF/, '').trim();
+  const parsed = JSON.parse(cleanJson || '[]');
+  const rows = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
+  return rows.map((row) => {
+    const cmd = String(row?.CommandLine || '');
+    return {
+      pid: Number(row?.ProcessId || 0),
+      name: String(row?.Name || ''),
+      exePath: String(row?.ExecutablePath || ''),
+      argv0: String(row?.ExecutablePath || row?.Name || ''),
+      args: cmd
+    };
+  }).filter((p) => p.pid > 0 && p.pid !== process.pid);
+}
+
+/**
+ * @param {string} commOut
+ */
+function parsePosixCommMap(commOut) {
+  /** @type {Map<number, string>} */
+  const commByPid = new Map();
+  for (const line of String(commOut || '').split('\n')) {
+    const m = line.trim().match(/^(\d+)\s+(.+)$/);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    if (Number.isFinite(pid) && pid > 0) commByPid.set(pid, m[2].trim());
+  }
+  return commByPid;
+}
+
+/**
+ * @param {number} pid
+ * @param {string} fullArgs
+ * @param {string} comm
+ * @param {string} procExePath
+ */
+function buildPosixProcessRecord(pid, fullArgs, comm, procExePath) {
+  let exePath = procExePath ? procExePath.replace(/ \(deleted\)$/, '') : '';
+  if (!exePath && comm.startsWith('/')) {
+    exePath = comm;
+  }
+  if (!exePath && fullArgs.startsWith('/')) {
+    if (comm) {
+      const suffix = `/${comm}`;
+      const idx = fullArgs.indexOf(suffix);
+      if (idx >= 0) {
+        const after = fullArgs[idx + suffix.length];
+        if (!after || /\s/.test(after)) {
+          exePath = fullArgs.slice(0, idx + suffix.length);
+        }
+      }
+    }
+    if (!exePath) {
+      exePath = fullArgs.split(/\s+/)[0] || '';
+    }
+  }
+  if (!exePath) {
+    exePath = comm || fullArgs.split(/\s+/)[0] || '';
+  }
+  const name = path.basename(comm || exePath);
+  const argv0 = exePath || fullArgs.split(/\s+/)[0] || comm;
+  return {
+    pid,
+    name,
+    exePath,
+    argv0,
+    args: fullArgs
+  };
+}
+
 /**
  * @param {{ platform?: NodeJS.Platform, execFileSync?: typeof execFileSync, readlinkSync?: typeof fs.readlinkSync }} [deps]
  * @returns {Array<{ pid: number, name: string, exePath: string, argv0: string, args: string }>}
@@ -193,30 +300,13 @@ function listProcesses(deps = {}) {
   try {
     if (platform === 'win32') {
       // Force UTF-8 output so localized Windows (e.g. CP936/GBK) does not corrupt non-ASCII paths.
-      const psScript = [
-        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
-        '$OutputEncoding = [System.Text.Encoding]::UTF8',
-        'Get-CimInstance Win32_Process | Select-Object ProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress'
-      ].join('; ');
-      const out = execFn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psScript], {
+      const out = execFn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WIN32_PS_LIST_SCRIPT], {
         encoding: 'utf8',
         timeout: 10_000,
         windowsHide: true,
         maxBuffer: 16 * 1024 * 1024
       });
-      const cleanJson = String(out || '').replace(/^\uFEFF/, '').trim();
-      const parsed = JSON.parse(cleanJson || '[]');
-      const rows = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
-      return rows.map((row) => {
-        const cmd = String(row?.CommandLine || '');
-        return {
-          pid: Number(row?.ProcessId || 0),
-          name: String(row?.Name || ''),
-          exePath: String(row?.ExecutablePath || ''),
-          argv0: String(row?.ExecutablePath || row?.Name || ''),
-          args: cmd
-        };
-      }).filter((p) => p.pid > 0 && p.pid !== process.pid);
+      return parseWin32ProcessOutput(String(out || ''));
     }
 
     // Query comm= and args= separately as the final column so executable paths with
@@ -231,14 +321,7 @@ function listProcesses(deps = {}) {
       timeout: 5000,
       maxBuffer: 8 * 1024 * 1024
     });
-    /** @type {Map<number, string>} */
-    const commByPid = new Map();
-    for (const line of String(commOut || '').split('\n')) {
-      const m = line.trim().match(/^(\d+)\s+(.+)$/);
-      if (!m) continue;
-      const pid = Number(m[1]);
-      if (Number.isFinite(pid) && pid > 0) commByPid.set(pid, m[2].trim());
-    }
+    const commByPid = parsePosixCommMap(String(commOut || ''));
 
     const canReadProcExe = platform === 'linux' && (typeof deps.readlinkSync === 'function' || !deps.execFileSync);
     const readlinkFn = deps.readlinkSync || fs.readlinkSync;
@@ -250,43 +333,95 @@ function listProcesses(deps = {}) {
       if (!Number.isFinite(pid) || pid <= 0 || pid === process.pid) return [];
       const fullArgs = match[2].trim();
       const comm = commByPid.get(pid) || '';
-      let exePath = '';
-      if (canReadProcExe) {
+      let procExe = '';
+      if (canReadProcExe && !(fullArgs.startsWith('[') && fullArgs.endsWith(']'))) {
         try {
-          exePath = String(readlinkFn(`/proc/${pid}/exe`) || '').replace(/ \(deleted\)$/, '');
+          procExe = String(readlinkFn(`/proc/${pid}/exe`) || '');
         } catch (_) {}
       }
-      if (!exePath && comm.startsWith('/')) {
-        exePath = comm;
-      }
-      if (!exePath && fullArgs.startsWith('/')) {
-        if (comm) {
-          const suffix = `/${comm}`;
-          const idx = fullArgs.indexOf(suffix);
-          if (idx >= 0) {
-            const after = fullArgs[idx + suffix.length];
-            if (!after || /\s/.test(after)) {
-              exePath = fullArgs.slice(0, idx + suffix.length);
-            }
-          }
-        }
-        if (!exePath) {
-          exePath = fullArgs.split(/\s+/)[0] || '';
-        }
-      }
-      if (!exePath) {
-        exePath = comm || fullArgs.split(/\s+/)[0] || '';
-      }
-      const name = path.basename(comm || exePath);
-      const argv0 = exePath || fullArgs.split(/\s+/)[0] || comm;
-      return [{
-        pid,
-        name,
-        exePath,
-        argv0,
-        args: fullArgs
-      }];
+      return [buildPosixProcessRecord(pid, fullArgs, comm, procExe)];
     });
+  } catch (_) {
+    return [];
+  }
+}
+
+/**
+ * Non-blocking process table enumeration for Electron main-thread IPC paths.
+ *
+ * @param {{
+ *   platform?: NodeJS.Platform,
+ *   execFile?: typeof execFile,
+ *   execFileSync?: typeof execFileSync,
+ *   readlink?: typeof fs.promises.readlink,
+ *   readlinkSync?: typeof fs.readlinkSync,
+ *   listProcesses?: () => ReturnType<typeof listProcesses> | Promise<ReturnType<typeof listProcesses>>
+ * }} [deps]
+ * @returns {Promise<Array<{ pid: number, name: string, exePath: string, argv0: string, args: string }>>}
+ */
+async function listProcessesAsync(deps = {}) {
+  if (deps.listProcesses) {
+    return await deps.listProcesses();
+  }
+  if (deps.execFileSync) {
+    return listProcesses(deps);
+  }
+  const platform = deps.platform || process.platform;
+  const execAsyncFn = deps.execFile || execFile;
+
+  try {
+    if (platform === 'win32') {
+      const out = await execFileTextAsync(
+        execAsyncFn,
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command', WIN32_PS_LIST_SCRIPT],
+        {
+          timeout: 10_000,
+          windowsHide: true,
+          maxBuffer: 16 * 1024 * 1024
+        }
+      );
+      return parseWin32ProcessOutput(out);
+    }
+
+    const [commOut, argsOut] = await Promise.all([
+      execFileTextAsync(execAsyncFn, 'ps', ['-eo', 'pid=,comm='], {
+        timeout: 5000,
+        maxBuffer: 8 * 1024 * 1024
+      }),
+      execFileTextAsync(execAsyncFn, 'ps', ['-eo', 'pid=,args='], {
+        timeout: 5000,
+        maxBuffer: 8 * 1024 * 1024
+      })
+    ]);
+    const commByPid = parsePosixCommMap(commOut);
+    const canReadProcExe = platform === 'linux' && (typeof deps.readlink === 'function' || !deps.execFile);
+    const readlinkAsyncFn = deps.readlink || fs.promises.readlink;
+
+    /** @type {Array<{ pid: number, fullArgs: string, comm: string }>} */
+    const rawRows = [];
+    for (const line of String(argsOut || '').split('\n')) {
+      const match = line.trim().match(/^(\d+)\s+(.+)$/);
+      if (!match) continue;
+      const pid = Number(match[1]);
+      if (!Number.isFinite(pid) || pid <= 0 || pid === process.pid) continue;
+      const fullArgs = match[2].trim();
+      rawRows.push({ pid, fullArgs, comm: commByPid.get(pid) || '' });
+    }
+
+    if (!canReadProcExe) {
+      return rawRows.map((r) => buildPosixProcessRecord(r.pid, r.fullArgs, r.comm, ''));
+    }
+
+    return await Promise.all(rawRows.map(async (r) => {
+      let procExe = '';
+      if (!(r.fullArgs.startsWith('[') && r.fullArgs.endsWith(']'))) {
+        try {
+          procExe = String(await readlinkAsyncFn(`/proc/${r.pid}/exe`) || '');
+        } catch (_) {}
+      }
+      return buildPosixProcessRecord(r.pid, r.fullArgs, r.comm, procExe);
+    }));
   } catch (_) {
     return [];
   }
@@ -358,6 +493,39 @@ function getUserDataDirFromProcess(targetIde = null, deps = {}) {
 }
 
 /**
+ * @param {string} out
+ * @param {boolean} isIde
+ * @param {string[]} exeNames
+ * @param {(p: string) => boolean} existsSync
+ * @returns {string | null}
+ */
+function parseWindowsRegistryExecutable(out, isIde, exeNames, existsSync) {
+  const cleanJson = String(out || '').replace(/^\uFEFF/, '').trim();
+  if (!cleanJson) return null;
+  const parsed = JSON.parse(cleanJson);
+  const rows = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
+  for (const row of rows) {
+    const displayName = String(row?.DisplayName || '');
+    const installLoc = String(row?.InstallLocation || '').trim().replace(/^"|"$/g, '');
+    const displayIcon = String(row?.DisplayIcon || '').trim().replace(/^"|"$/g, '').replace(/,\s*-?\d+$/, '').trim();
+    if (isManagerOrToolsProcess(displayName, installLoc, displayIcon)) continue;
+    const rowIsIde = isAntigravityIdeStr(displayName) || isAntigravityIdeStr(installLoc) || isAntigravityIdeStr(displayIcon);
+    if (isIde !== rowIsIde) continue;
+
+    if (displayIcon && /\.exe$/i.test(displayIcon) && existsSync(displayIcon)) {
+      return displayIcon;
+    }
+    if (installLoc) {
+      for (const exe of exeNames) {
+        const candidate = path.win32.join(installLoc, exe);
+        if (existsSync(candidate)) return candidate;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Best-effort Windows Registry uninstall lookup for custom-drive installs
  * (e.g. D:\Programs\Antigravity\Antigravity.exe).
  *
@@ -369,75 +537,84 @@ function detectWindowsRegistryExecutable(targetIde, deps = {}) {
   const execFn = deps.execFileSync || execFileSync;
   const existsSync = deps.fs?.existsSync || fs.existsSync;
   const isIde = targetIde === 'ide';
+  const cacheKey = isIde ? 'ide' : 'classic';
+  const canCache = !deps.execFileSync && !deps.fs;
+  if (canCache) {
+    const cached = winRegistryCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      if (!cached.value || existsSync(cached.value)) return cached.value;
+    }
+  }
   const exeNames = isIde
     ? ['Antigravity IDE.exe', 'antigravity-ide.exe', 'antigravity_ide.exe', 'Antigravity.exe']
     : ['Antigravity.exe', 'antigravity.exe'];
   try {
-    const psScript = [
-      '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
-      '$OutputEncoding = [System.Text.Encoding]::UTF8',
-      '$roots = @("HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*","HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*","HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*")',
-      'Get-ItemProperty $roots -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*Antigravity*" } | Select-Object DisplayName,InstallLocation,DisplayIcon | ConvertTo-Json -Compress'
-    ].join('; ');
-    const out = execFn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psScript], {
+    const out = execFn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WIN32_PS_REGISTRY_SCRIPT], {
       encoding: 'utf8',
       timeout: 6000,
       windowsHide: true,
       maxBuffer: 2 * 1024 * 1024
     });
-    const cleanJson = String(out || '').replace(/^\uFEFF/, '').trim();
-    if (!cleanJson) return null;
-    const parsed = JSON.parse(cleanJson);
-    const rows = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
-    for (const row of rows) {
-      const displayName = String(row?.DisplayName || '');
-      const installLoc = String(row?.InstallLocation || '').trim().replace(/^"|"$/g, '');
-      const displayIcon = String(row?.DisplayIcon || '').trim().replace(/^"|"$/g, '').replace(/,\s*-?\d+$/, '').trim();
-      if (isManagerOrToolsProcess(displayName, installLoc, displayIcon)) continue;
-      const rowIsIde = isAntigravityIdeStr(displayName) || isAntigravityIdeStr(installLoc) || isAntigravityIdeStr(displayIcon);
-      if (isIde !== rowIsIde) continue;
-
-      if (displayIcon && /\.exe$/i.test(displayIcon) && existsSync(displayIcon)) {
-        return displayIcon;
-      }
-      if (installLoc) {
-        for (const exe of exeNames) {
-          const candidate = path.win32.join(installLoc, exe);
-          if (existsSync(candidate)) return candidate;
-        }
-      }
-    }
+    const found = parseWindowsRegistryExecutable(String(out || ''), isIde, exeNames, existsSync);
+    if (canCache) winRegistryCache.set(cacheKey, { value: found, expiresAt: Date.now() + WIN_REGISTRY_CACHE_TTL_MS });
+    return found;
   } catch (_) {}
+  if (canCache) winRegistryCache.set(cacheKey, { value: null, expiresAt: Date.now() + WIN_REGISTRY_CACHE_TTL_MS });
   return null;
 }
 
 /**
- * @param {string | null} [targetIde]
- * @param {{
- *   platform?: NodeJS.Platform,
- *   home?: string,
- *   env?: NodeJS.ProcessEnv,
- *   customExecutablePaths?: { classic?: string, ide?: string },
- *   listProcesses?: () => ReturnType<typeof listProcesses>,
- *   execFileSync?: typeof execFileSync,
- *   fs?: Pick<typeof fs, 'existsSync'>
- * }} [deps]
- * @returns {string | null}
+ * Async Windows Registry uninstall lookup with 60s result caching.
+ *
+ * @param {string | null} targetIde
+ * @param {{ execFile?: typeof execFile, execFileSync?: typeof execFileSync, fs?: Pick<typeof fs, 'existsSync'> }} [deps]
+ * @returns {Promise<string | null>}
  */
-function getAntigravityExecutablePath(targetIde = null, deps = {}) {
+async function detectWindowsRegistryExecutableAsync(targetIde, deps = {}) {
+  if (deps.execFileSync) {
+    return detectWindowsRegistryExecutable(targetIde, deps);
+  }
+  const execAsyncFn = deps.execFile || execFile;
   const existsSync = deps.fs?.existsSync || fs.existsSync;
-  const custom = targetIde === 'ide' ? deps.customExecutablePaths?.ide : deps.customExecutablePaths?.classic;
-  if (custom && existsSync(custom)) return custom;
-
-  const procs = deps.listProcesses ? deps.listProcesses() : listProcesses(deps);
-  const running = getRunningInstances(targetIde, procs);
-  const mainRunning = running.filter((p) => !isHelperProcess(p.name, p.args, p.exePath));
-  for (const proc of [...mainRunning, ...running]) {
-    if (proc.exePath && !isHelperProcess(proc.name, '', proc.exePath) && existsSync(proc.exePath)) {
-      return proc.exePath;
+  const isIde = targetIde === 'ide';
+  const cacheKey = isIde ? 'ide' : 'classic';
+  const canCache = !deps.execFile && !deps.fs;
+  if (canCache) {
+    const cached = winRegistryCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      if (!cached.value || existsSync(cached.value)) return cached.value;
     }
   }
+  const exeNames = isIde
+    ? ['Antigravity IDE.exe', 'antigravity-ide.exe', 'antigravity_ide.exe', 'Antigravity.exe']
+    : ['Antigravity.exe', 'antigravity.exe'];
+  try {
+    const out = await execFileTextAsync(
+      execAsyncFn,
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', WIN32_PS_REGISTRY_SCRIPT],
+      {
+        timeout: 6000,
+        windowsHide: true,
+        maxBuffer: 2 * 1024 * 1024
+      }
+    );
+    const found = parseWindowsRegistryExecutable(out, isIde, exeNames, existsSync);
+    if (canCache) winRegistryCache.set(cacheKey, { value: found, expiresAt: Date.now() + WIN_REGISTRY_CACHE_TTL_MS });
+    return found;
+  } catch (_) {}
+  if (canCache) winRegistryCache.set(cacheKey, { value: null, expiresAt: Date.now() + WIN_REGISTRY_CACHE_TTL_MS });
+  return null;
+}
 
+/**
+ * Build standard filesystem executable candidates for `classic` or `ide`.
+ *
+ * @param {string | null} targetIde
+ * @param {{ platform?: NodeJS.Platform, home?: string, env?: NodeJS.ProcessEnv }} [deps]
+ * @returns {string[]}
+ */
+function buildExecutableCandidates(targetIde = null, deps = {}) {
   const platform = deps.platform || process.platform;
   const home = deps.home || os.homedir();
   const env = deps.env || process.env;
@@ -502,11 +679,82 @@ function getAntigravityExecutablePath(targetIde = null, deps = {}) {
       }
     }
   }
+  return candidates;
+}
 
+/**
+ * @param {string | null} [targetIde]
+ * @param {{
+ *   platform?: NodeJS.Platform,
+ *   home?: string,
+ *   env?: NodeJS.ProcessEnv,
+ *   customExecutablePaths?: { classic?: string, ide?: string },
+ *   listProcesses?: () => ReturnType<typeof listProcesses>,
+ *   execFileSync?: typeof execFileSync,
+ *   fs?: Pick<typeof fs, 'existsSync'>
+ * }} [deps]
+ * @returns {string | null}
+ */
+function getAntigravityExecutablePath(targetIde = null, deps = {}) {
+  const existsSync = deps.fs?.existsSync || fs.existsSync;
+  const custom = targetIde === 'ide' ? deps.customExecutablePaths?.ide : deps.customExecutablePaths?.classic;
+  if (custom && existsSync(custom)) return custom;
+
+  const procs = deps.listProcesses ? deps.listProcesses() : listProcesses(deps);
+  const running = getRunningInstances(targetIde, procs);
+  const mainRunning = running.filter((p) => !isHelperProcess(p.name, p.args, p.exePath));
+  for (const proc of [...mainRunning, ...running]) {
+    if (proc.exePath && !isHelperProcess(proc.name, '', proc.exePath) && existsSync(proc.exePath)) {
+      return proc.exePath;
+    }
+  }
+
+  const platform = deps.platform || process.platform;
+  const candidates = buildExecutableCandidates(targetIde, deps);
   const found = candidates.find((p) => existsSync(p));
   if (found) return found;
   if (platform === 'win32') {
     return detectWindowsRegistryExecutable(targetIde, deps);
+  }
+  return null;
+}
+
+/**
+ * Async variant of `getAntigravityExecutablePath` avoiding main-thread process/registry spawns.
+ *
+ * @param {string | null} [targetIde]
+ * @param {{
+ *   platform?: NodeJS.Platform,
+ *   home?: string,
+ *   env?: NodeJS.ProcessEnv,
+ *   customExecutablePaths?: { classic?: string, ide?: string },
+ *   listProcesses?: () => ReturnType<typeof listProcesses> | Promise<ReturnType<typeof listProcesses>>,
+ *   execFile?: typeof execFile,
+ *   execFileSync?: typeof execFileSync,
+ *   fs?: Pick<typeof fs, 'existsSync'>
+ * }} [deps]
+ * @returns {Promise<string | null>}
+ */
+async function getAntigravityExecutablePathAsync(targetIde = null, deps = {}) {
+  const existsSync = deps.fs?.existsSync || fs.existsSync;
+  const custom = targetIde === 'ide' ? deps.customExecutablePaths?.ide : deps.customExecutablePaths?.classic;
+  if (custom && existsSync(custom)) return custom;
+
+  const procs = await listProcessesAsync(deps);
+  const running = getRunningInstances(targetIde, procs);
+  const mainRunning = running.filter((p) => !isHelperProcess(p.name, p.args, p.exePath));
+  for (const proc of [...mainRunning, ...running]) {
+    if (proc.exePath && !isHelperProcess(proc.name, '', proc.exePath) && existsSync(proc.exePath)) {
+      return proc.exePath;
+    }
+  }
+
+  const platform = deps.platform || process.platform;
+  const candidates = buildExecutableCandidates(targetIde, deps);
+  const found = candidates.find((p) => existsSync(p));
+  if (found) return found;
+  if (platform === 'win32') {
+    return await detectWindowsRegistryExecutableAsync(targetIde, deps);
   }
   return null;
 }
@@ -532,6 +780,29 @@ function detectAntigravityVersion(exePath) {
         if (/^\d+\.\d+/.test(ver)) return ver;
       } catch (_) {}
     }
+  }
+  return null;
+}
+
+/**
+ * @param {string | null} exePath
+ * @returns {Promise<string | null>}
+ */
+async function detectAntigravityVersionAsync(exePath) {
+  if (!exePath) return null;
+  const dirs = [
+    path.dirname(exePath),
+    path.resolve(path.dirname(exePath), '..'),
+    path.resolve(path.dirname(exePath), '..', 'Resources', 'app'),
+    path.resolve(path.dirname(exePath), 'resources', 'app')
+  ];
+  for (const dir of dirs) {
+    const pkgPath = path.join(dir, 'package.json');
+    try {
+      const pkg = JSON.parse(await fs.promises.readFile(pkgPath, 'utf8'));
+      const ver = String(pkg?.version || '').trim();
+      if (/^\d+\.\d+/.test(ver)) return ver;
+    } catch (_) {}
   }
   return null;
 }
@@ -564,6 +835,32 @@ function terminatePid(pid, force = false) {
         timeout: 5000,
         windowsHide: true,
         stdio: 'ignore'
+      });
+    } else {
+      process.kill(pid, force ? 'SIGKILL' : 'SIGTERM');
+    }
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * @param {number} pid
+ * @param {boolean} [force]
+ * @param {{ platform?: NodeJS.Platform, execFile?: typeof execFile }} [deps]
+ * @returns {Promise<boolean>}
+ */
+async function terminatePidAsync(pid, force = false, deps = {}) {
+  const platform = deps.platform || process.platform;
+  const execAsyncFn = deps.execFile || execFile;
+  try {
+    if (platform === 'win32') {
+      await new Promise((resolve, reject) => {
+        execAsyncFn('taskkill', [...(force ? ['/F'] : []), '/T', '/PID', String(pid)], {
+          timeout: 5000,
+          windowsHide: true
+        }, (err) => (err ? reject(err) : resolve(undefined)));
       });
     } else {
       process.kill(pid, force ? 'SIGKILL' : 'SIGTERM');
@@ -614,6 +911,29 @@ function killLanguageServer(targetIde = null, deps = {}) {
 }
 
 /**
+ * @param {string | null} [targetIde]
+ * @param {{
+ *   platform?: NodeJS.Platform,
+ *   execFile?: typeof execFile,
+ *   execFileSync?: typeof execFileSync,
+ *   listProcesses?: () => ReturnType<typeof listProcesses> | Promise<ReturnType<typeof listProcesses>>,
+ *   terminatePid?: (pid: number, force?: boolean) => boolean | Promise<boolean>
+ * }} [deps]
+ */
+async function killLanguageServerAsync(targetIde = null, deps = {}) {
+  const procs = await listProcessesAsync(deps);
+  const killFn = deps.terminatePid
+    ? (/** @type {number} */ pid, /** @type {boolean | undefined} */ force) => Promise.resolve(deps.terminatePid?.(pid, force))
+    : (/** @type {number} */ pid, /** @type {boolean | undefined} */ force) => terminatePidAsync(pid, force, deps);
+  let killed = 0;
+  for (const p of procs) {
+    if (!matchesLanguageServerTarget(p, targetIde)) continue;
+    if (await killFn(p.pid, true)) killed += 1;
+  }
+  return killed;
+}
+
+/**
  * @param {{ platform?: NodeJS.Platform, execFileSync?: typeof execFileSync, listProcesses?: () => ReturnType<typeof listProcesses>, terminatePid?: (pid: number, force?: boolean) => boolean }} [deps]
  */
 function killAcpServers(deps = {}) {
@@ -629,9 +949,39 @@ function killAcpServers(deps = {}) {
 }
 
 /**
+ * @param {{
+ *   platform?: NodeJS.Platform,
+ *   execFile?: typeof execFile,
+ *   execFileSync?: typeof execFileSync,
+ *   listProcesses?: () => ReturnType<typeof listProcesses> | Promise<ReturnType<typeof listProcesses>>,
+ *   terminatePid?: (pid: number, force?: boolean) => boolean | Promise<boolean>
+ * }} [deps]
+ */
+async function killAcpServersAsync(deps = {}) {
+  const procs = await listProcessesAsync(deps);
+  const killFn = deps.terminatePid
+    ? (/** @type {number} */ pid, /** @type {boolean | undefined} */ force) => Promise.resolve(deps.terminatePid?.(pid, force))
+    : (/** @type {number} */ pid, /** @type {boolean | undefined} */ force) => terminatePidAsync(pid, force, deps);
+  let killed = 0;
+  for (const p of procs) {
+    if (classifyProcess(p.name, p.exePath, p.argv0, p.args) === 'acp_server') {
+      if (await killFn(p.pid, true)) killed += 1;
+    }
+  }
+  return killed;
+}
+
+/**
  * @param {string | null} targetIde
  * @param {number} [timeoutMs]
- * @param {{ platform?: NodeJS.Platform, execFileSync?: typeof execFileSync, listProcesses?: () => ReturnType<typeof listProcesses>, sleep?: (ms: number) => Promise<void>, excludePids?: number[] | Set<number> }} [deps]
+ * @param {{
+ *   platform?: NodeJS.Platform,
+ *   execFile?: typeof execFile,
+ *   execFileSync?: typeof execFileSync,
+ *   listProcesses?: () => ReturnType<typeof listProcesses> | Promise<ReturnType<typeof listProcesses>>,
+ *   sleep?: (ms: number) => Promise<void>,
+ *   excludePids?: number[] | Set<number>
+ * }} [deps]
  */
 async function waitForLanguageServerRespawn(targetIde = null, timeoutMs = 15_000, deps = {}) {
   const sleepFn = deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -639,11 +989,14 @@ async function waitForLanguageServerRespawn(targetIde = null, timeoutMs = 15_000
   const excluded = deps.excludePids instanceof Set
     ? deps.excludePids
     : new Set(Array.isArray(deps.excludePids) ? deps.excludePids : []);
+  let attempt = 0;
   while (Date.now() < deadline) {
-    const procs = deps.listProcesses ? deps.listProcesses() : listProcesses(deps);
+    const procs = await listProcessesAsync(deps);
     const alive = procs.some((p) => !excluded.has(p.pid) && matchesLanguageServerTarget(p, targetIde));
     if (alive) return true;
-    await sleepFn(500);
+    const delayMs = Math.min(500, 150 + attempt * 100);
+    attempt += 1;
+    await sleepFn(delayMs);
   }
   return false;
 }
@@ -653,66 +1006,66 @@ async function waitForLanguageServerRespawn(targetIde = null, timeoutMs = 15_000
  * @param {string | null} targetIde
  * @param {{
  *   platform?: NodeJS.Platform,
- *   listProcesses?: () => ReturnType<typeof listProcesses>,
- *   terminatePid?: (pid: number, force?: boolean) => boolean,
+ *   execFile?: typeof execFile,
+ *   execFileSync?: typeof execFileSync,
+ *   listProcesses?: () => ReturnType<typeof listProcesses> | Promise<ReturnType<typeof listProcesses>>,
+ *   terminatePid?: (pid: number, force?: boolean) => boolean | Promise<boolean>,
  *   sleep?: (ms: number) => Promise<void>
  * }} [deps]
  */
 async function closeAntigravity(timeoutSec = 20, targetIde = null, deps = {}) {
   const platform = deps.platform || process.platform;
-  const listFn = deps.listProcesses || (() => listProcesses(deps));
-  const killFn = deps.terminatePid || terminatePid;
+  const listFn = () => listProcessesAsync(deps);
+  const killFn = deps.terminatePid
+    ? (/** @type {number} */ pid, /** @type {boolean | undefined} */ force) => Promise.resolve(deps.terminatePid?.(pid, force))
+    : (/** @type {number} */ pid, /** @type {boolean | undefined} */ force) => terminatePidAsync(pid, force, deps);
   const sleepFn = deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
 
-  const initial = getRunningInstances(targetIde, listFn());
+  const initial = getRunningInstances(targetIde, await listFn());
   if (initial.length === 0) {
-    killLanguageServer(targetIde, deps);
+    await killLanguageServerAsync(targetIde, deps);
     return;
   }
 
   if (platform === 'win32') {
     // On Windows, Chromium tray/helper processes ignore WM_CLOSE; force-kill PID tree like Antigravity-Manager.
-    for (const proc of initial) {
-      killFn(proc.pid, true);
-    }
+    await Promise.all(initial.map((proc) => killFn(proc.pid, true)));
     await sleepFn(300);
     const deadline = Date.now() + Math.min(Math.max(2, timeoutSec), 5) * 1000;
     while (Date.now() < deadline) {
-      const remaining = getRunningInstances(targetIde, listFn());
+      const remaining = getRunningInstances(targetIde, await listFn());
       if (remaining.length === 0) break;
-      for (const proc of remaining) {
-        killFn(proc.pid, true);
-      }
+      await Promise.all(remaining.map((proc) => killFn(proc.pid, true)));
       await sleepFn(250);
     }
-    killLanguageServer(targetIde, deps);
+    await killLanguageServerAsync(targetIde, deps);
     return;
   }
 
   for (const proc of initial) {
-    killFn(proc.pid, false);
+    await killFn(proc.pid, false);
   }
   const deadline = Date.now() + Math.max(2, timeoutSec) * 1000;
   while (Date.now() < deadline) {
-    const remaining = getRunningInstances(targetIde, listFn());
+    const remaining = getRunningInstances(targetIde, await listFn());
     if (remaining.length === 0) {
-      killLanguageServer(targetIde, deps);
+      await killLanguageServerAsync(targetIde, deps);
       return;
     }
     await sleepFn(400);
   }
-  const survivors = getRunningInstances(targetIde, listFn());
+  const survivors = getRunningInstances(targetIde, await listFn());
   for (const proc of survivors) {
-    killFn(proc.pid, true);
+    await killFn(proc.pid, true);
   }
   if (survivors.length > 0) {
     const reapDeadline = Date.now() + 2000;
     while (Date.now() < reapDeadline) {
-      if (getRunningInstances(targetIde, listFn()).length === 0) break;
+      if (getRunningInstances(targetIde, await listFn()).length === 0) break;
       await sleepFn(150);
     }
   }
-  killLanguageServer(targetIde, deps);
+  await killLanguageServerAsync(targetIde, deps);
 }
 
 /**
@@ -828,8 +1181,11 @@ module.exports = {
   closeAntigravity,
   compareSemver,
   detectAntigravityVersion,
+  detectAntigravityVersionAsync,
   detectWindowsRegistryExecutable,
+  detectWindowsRegistryExecutableAsync,
   getAntigravityExecutablePath,
+  getAntigravityExecutablePathAsync,
   getArgsFromRunningProcess,
   getLanguageServerPids,
   getMainRunningInstances,
@@ -842,9 +1198,13 @@ module.exports = {
   isManagerOrToolsProcess,
   isProcessRunningByName,
   killAcpServers,
+  killAcpServersAsync,
   killLanguageServer,
+  killLanguageServerAsync,
   listProcesses,
+  listProcessesAsync,
   sanitizeRestartArgs,
   startAntigravity,
+  terminatePidAsync,
   waitForLanguageServerRespawn
 };

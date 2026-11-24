@@ -394,10 +394,16 @@ textarea:focus-visible {
   border-color: rgba(var(--overlay-rgb), 0.22);
   background: rgba(var(--overlay-rgb), 0.055);
 }
+.agm-card:not(.has-menu-open) {
+  contain: layout style;
+}
 .agm-card.is-active {
   border-color: rgba(var(--accent-rgb), 0.55);
   background: rgba(var(--accent-rgb), 0.075);
   box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.22);
+}
+.agm-card.is-switching {
+  border-color: rgba(var(--accent-rgb), 0.48);
 }
 .agm-card.is-disabled {
   opacity: 0.84;
@@ -648,6 +654,25 @@ textarea:focus-visible {
 .agm-action-btn:disabled {
   opacity: 0.42;
   cursor: not-allowed;
+}
+.agm-action-btn.is-busy,
+.agm-action-btn.is-busy:disabled {
+  opacity: 0.9;
+  cursor: progress;
+}
+@keyframes agm-spin {
+  to { transform: rotate(360deg); }
+}
+.agm-spin {
+  animation: agm-spin 0.8s linear infinite;
+}
+:root[data-reduce-motion="on"] .agm-spin {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-reduce-motion="off"]) .agm-spin {
+    animation: none;
+  }
 }
 .agm-action-switch {
   background: rgba(var(--accent-rgb), 0.15);

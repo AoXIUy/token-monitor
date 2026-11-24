@@ -454,3 +454,136 @@ test('POSIX processManager parses spaced executable paths, isolates Classic/IDE 
   const googleAccounts = JSON.parse(fs.readFileSync(path.join(gemDir, 'google_accounts.json'), 'utf8'));
   assert.deepEqual(googleAccounts, { active: 'second@example.com', old: ['first@example.com'] });
 });
+
+test('async processManager, async keyring, lazy target exe lookup, and single-pass hot-switch avoid main-thread stalls', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-async-sw-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  // 1. listProcessesAsync runs non-blocking execFile and skips Linux [kernel_threads] readlink
+  const readlinkTargets = [];
+  const linuxProcs = await processManager.listProcessesAsync({
+    platform: 'linux',
+    execFile: (_cmd, args, _opts, cb) => {
+      if (args?.[1] === 'pid=,comm=') {
+        cb(null, '  2 kthreadd\n  701 antigravity\n', '');
+      } else {
+        cb(null, '  2 [kthreadd]\n  701 /opt/Antigravity/antigravity --reuse-window\n', '');
+      }
+    },
+    readlink: async (p) => {
+      readlinkTargets.push(p);
+      return '/opt/Antigravity/antigravity';
+    }
+  });
+  assert.deepEqual(readlinkTargets, ['/proc/701/exe']);
+  assert.equal(linuxProcs.length, 2);
+  assert.equal(linuxProcs[1].exePath, '/opt/Antigravity/antigravity');
+
+  // 2. Async Linux keyring spawns secret-tool via stdin pipe without blocking
+  const spawnedCmds = [];
+  await keyring.writeToSystemKeyringAsync(
+    { accessToken: 'ya29.async', refreshToken: '1//async-rt', expiryTimestamp: 1800000000, email: 'a@b.com' },
+    {
+      platform: 'linux',
+      spawn: (cmd, args) => {
+        let written = '';
+        spawnedCmds.push({ cmd, args });
+        const listeners = {};
+        return {
+          stderr: { setEncoding: () => {}, on: () => {} },
+          stdin: {
+            on: () => {},
+            end: (chunk) => {
+              written += String(chunk);
+              setImmediate(() => listeners.close?.(0));
+            }
+          },
+          on: (ev, fn) => { listeners[ev] = fn; },
+          kill: () => {},
+          get written() { return written; }
+        };
+      }
+    }
+  );
+  assert.equal(spawnedCmds.length, 2);
+  assert.equal(spawnedCmds[0].cmd, 'secret-tool');
+
+  // 3. Hot-switch with Classic running NEVER probes uninstalled IDE executable and injects DB only ONCE
+  const store = createAntigravityManagerStore({ baseDir: path.join(dir, 'store') });
+  const saved = store.upsertAccount(
+    {
+      email: 'fast@example.com',
+      subscriptionTier: 'ULTRA',
+      deviceProfile: {
+        machineId: 'auth0|user_fast',
+        macMachineId: 'mac-fast',
+        devDeviceId: 'dev-fast',
+        sqmId: '{SQM-FAST}'
+      }
+    },
+    {
+      accessToken: 'ya29.fast',
+      refreshToken: '1//fast-rt',
+      expiryTimestamp: Math.floor(Date.now() / 1000) + 7200
+    }
+  );
+  const exeLookups = [];
+  const asyncInjectCalls = [];
+
+  const res = await switcher.switchAccount({
+    account: saved,
+    tokenData: store.getAccountToken(saved.id),
+    targetClient: 'auto',
+    store,
+    deps: {
+      oauth: { ensureFreshToken: async (tok) => tok },
+      stateDb: {
+        getDbPath: () => path.join(dir, 'classic', 'state.vscdb'),
+        injectTokenToDbAsync: async (dbPath, payload) => {
+          asyncInjectCalls.push({ dbPath, payload });
+        }
+      },
+      deviceProfile: {
+        getStoragePath: () => path.join(dir, 'classic', 'storage.json'),
+        writeDeviceProfileAsync: async () => {}
+      },
+      keyring: {
+        writeToSystemKeyringAsync: async () => {}
+      },
+      fileCredentials: {
+        writeFileCredentialsAsync: async () => {}
+      },
+      fs: {
+        existsSync: () => true
+      },
+      processManager: {
+        listProcessesAsync: async () => [{
+          pid: 901,
+          name: 'Antigravity',
+          exePath: '/opt/Antigravity/antigravity',
+          argv0: '/opt/Antigravity/antigravity',
+          args: '/opt/Antigravity/antigravity'
+        }],
+        isAntigravityRunning: (target) => target !== 'ide',
+        getAntigravityExecutablePathAsync: async (target) => {
+          exeLookups.push(target);
+          return '/opt/Antigravity/antigravity';
+        },
+        detectAntigravityVersionAsync: async () => '1.9.0',
+        compareSemver: processManager.compareSemver,
+        getArgsFromRunningProcess: () => [],
+        getUserDataDirFromProcess: () => null,
+        getLanguageServerPids: () => [902],
+        killLanguageServerAsync: async () => 1,
+        waitForLanguageServerRespawn: async () => true
+      }
+    }
+  });
+
+  assert.equal(res.ok, true);
+  assert.equal(res.mode, 'hot');
+  assert.equal(exeLookups.includes('ide'), false, 'must not probe uninstalled IDE executable when Classic is running');
+  assert.equal(asyncInjectCalls.length, 1, 'hot-switch must write SQLite once instead of duplicating credential writes');
+  assert.equal(asyncInjectCalls[0].payload.serviceMachineId, 'mac-fast');
+  assert.equal(asyncInjectCalls[0].payload.storageServiceMachineId, 'dev-fast');
+});

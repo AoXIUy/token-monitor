@@ -69,7 +69,7 @@ function readDeviceProfile(storagePath) {
  *
  * @param {string} storagePath
  * @param {{ machineId: string, macMachineId: string, devDeviceId: string, sqmId: string }} profile
- * @param {{ sqlite?: any }} [deps]
+ * @param {{ sqlite?: any, skipDbSync?: boolean }} [deps]
  */
 function writeDeviceProfile(storagePath, profile, deps = {}) {
   if (!storagePath) throw new Error('storage.json path is empty');
@@ -106,9 +106,89 @@ function writeDeviceProfile(storagePath, profile, deps = {}) {
     throw error;
   }
 
-  const siblingDb = path.join(path.dirname(storagePath), 'state.vscdb');
-  if (fs.existsSync(siblingDb) && profile.devDeviceId) {
+  if (!deps.skipDbSync) {
+    const siblingDb = path.join(path.dirname(storagePath), 'state.vscdb');
+    if (fs.existsSync(siblingDb) && profile.devDeviceId) {
+      try {
+        stateDb.writeItemTableValue(siblingDb, 'storage.serviceMachineId', profile.devDeviceId, deps);
+      } catch (_) {}
+    }
+  }
+}
+
+/**
+ * @param {string} storagePath
+ * @returns {Promise<{ machineId: string, macMachineId: string, devDeviceId: string, sqmId: string } | null>}
+ */
+async function readDeviceProfileAsync(storagePath) {
+  try {
+    if (!storagePath) return null;
+    const rawText = (await fs.promises.readFile(storagePath, 'utf8')).replace(/^\uFEFF/, '');
+    if (!rawText.trim()) return null;
+    const json = JSON.parse(rawText);
+    const telemetry = json?.telemetry && typeof json.telemetry === 'object' ? json.telemetry : {};
+    const machineId = String(telemetry.machineId || json['telemetry.machineId'] || '').trim();
+    const macMachineId = String(telemetry.macMachineId || json['telemetry.macMachineId'] || '').trim();
+    const devDeviceId = String(telemetry.devDeviceId || json['telemetry.devDeviceId'] || '').trim();
+    const sqmId = String(telemetry.sqmId || json['telemetry.sqmId'] || '').trim();
+    if (!machineId && !macMachineId && !devDeviceId && !sqmId) return null;
+    return { machineId, macMachineId, devDeviceId, sqmId };
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Async variant of `writeDeviceProfile` using non-blocking file I/O.
+ *
+ * @param {string} storagePath
+ * @param {{ machineId: string, macMachineId: string, devDeviceId: string, sqmId: string }} profile
+ * @param {{ sqlite?: any, skipDbSync?: boolean }} [deps]
+ */
+async function writeDeviceProfileAsync(storagePath, profile, deps = {}) {
+  if (!storagePath) throw new Error('storage.json path is empty');
+  let json = {};
+  let exists = false;
+  try {
+    const rawText = (await fs.promises.readFile(storagePath, 'utf8')).replace(/^\uFEFF/, '');
+    exists = true;
+    json = rawText.trim() ? JSON.parse(rawText) : {};
+    if (!json || typeof json !== 'object' || Array.isArray(json)) {
+      throw new Error('storage.json top-level is not an object');
+    }
+  } catch (error) {
+    if (/** @type {any} */ (error)?.code !== 'ENOENT') throw error;
+  }
+  if (!exists) {
+    await fs.promises.mkdir(path.dirname(storagePath), { recursive: true });
+  }
+
+  if (!json.telemetry || typeof json.telemetry !== 'object' || Array.isArray(json.telemetry)) {
+    json.telemetry = {};
+  }
+  json.telemetry.machineId = profile.machineId;
+  json.telemetry.macMachineId = profile.macMachineId;
+  json.telemetry.devDeviceId = profile.devDeviceId;
+  json.telemetry.sqmId = profile.sqmId;
+
+  json['telemetry.machineId'] = profile.machineId;
+  json['telemetry.macMachineId'] = profile.macMachineId;
+  json['telemetry.devDeviceId'] = profile.devDeviceId;
+  json['telemetry.sqmId'] = profile.sqmId;
+
+  const tempPath = `${storagePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  try {
+    await fs.promises.writeFile(tempPath, `${JSON.stringify(json, null, 2)}\n`, 'utf8');
+    await fs.promises.rename(tempPath, storagePath);
+  } catch (error) {
+    try { await fs.promises.unlink(tempPath); } catch (_) {}
+    throw error;
+  }
+
+  if (!deps.skipDbSync && profile.devDeviceId) {
+    const siblingDb = path.join(path.dirname(storagePath), 'state.vscdb');
     try {
+      await fs.promises.access(siblingDb);
       stateDb.writeItemTableValue(siblingDb, 'storage.serviceMachineId', profile.devDeviceId, deps);
     } catch (_) {}
   }
@@ -132,5 +212,7 @@ module.exports = {
   generateDeviceProfile,
   getStoragePath,
   readDeviceProfile,
-  writeDeviceProfile
+  readDeviceProfileAsync,
+  writeDeviceProfile,
+  writeDeviceProfileAsync
 };

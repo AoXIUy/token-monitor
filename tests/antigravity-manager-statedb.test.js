@@ -151,3 +151,46 @@ test('stateDb preserves isGcpTos=false on personal accounts, recovers corrupt oa
   assert.ok(winPaths.includes('D:\\Apps\\Antigravity\\data\\user-data\\User\\globalStorage\\state.vscdb'));
   assert.ok(winPaths.includes('C:\\Users\\Alice\\AppData\\Roaming\\Antigravity\\User\\globalStorage\\state.vscdb'));
 });
+
+test('stateDb injectTokenToDbAsync writes token and machine IDs in one transaction and skips redundant fresh backups', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-db-async-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dbPath = path.join(dir, 'state.vscdb');
+
+  const initDb = new DatabaseSync(dbPath);
+  initDb.exec('CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);');
+  initDb.prepare('INSERT INTO ItemTable (key, value) VALUES (?, ?)').run('initialKey', 'v1');
+  initDb.close();
+
+  await stateDb.injectTokenToDbAsync(dbPath, {
+    accessToken: 'ya29.first',
+    refreshToken: '1//first-rt',
+    expiry: 1763942400,
+    email: 'one@example.com',
+    serviceMachineId: 'mac-id-1',
+    storageServiceMachineId: 'dev-id-1'
+  });
+
+  const backupPath = `${dbPath}.backup`;
+  assert.equal(fs.existsSync(backupPath), true);
+  const firstBackupStat = fs.statSync(backupPath);
+
+  // Immediate second switch reuses the fresh backup without re-copying state.vscdb
+  await stateDb.injectTokenToDbAsync(dbPath, {
+    accessToken: 'ya29.second',
+    refreshToken: '1//second-rt',
+    expiry: 1763942400,
+    email: 'two@example.com',
+    serviceMachineId: 'mac-id-2',
+    storageServiceMachineId: 'dev-id-2'
+  });
+  const secondBackupStat = fs.statSync(backupPath);
+  assert.equal(secondBackupStat.mtimeMs, firstBackupStat.mtimeMs);
+
+  const checkDb = new DatabaseSync(dbPath, { readOnly: true });
+  const svcMachine = checkDb.prepare('SELECT value FROM ItemTable WHERE key = ?').get('telemetry.serviceMachineId').value;
+  const storMachine = checkDb.prepare('SELECT value FROM ItemTable WHERE key = ?').get('storage.serviceMachineId').value;
+  checkDb.close();
+  assert.equal(svcMachine, 'mac-id-2');
+  assert.equal(storMachine, 'dev-id-2');
+});

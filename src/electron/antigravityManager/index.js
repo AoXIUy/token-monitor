@@ -43,24 +43,54 @@ function createAntigravityManagerService(options) {
     logger
   });
   const healthTracker = new quota.EndpointHealthTracker();
+  const REFRESH_STATE_THROTTLE_MS = 280;
   /** @type {AbortController | null} */
   let activeRefreshAbort = null;
   /** @type {AbortController | null} */
   let activeOAuthAbort = null;
   /** @type {ReturnType<typeof setTimeout> | null} */
   let hubSyncTimer = null;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let refreshStateTimer = null;
+  let lastRefreshStateEmitMs = 0;
   let switching = false;
+  /** @type {string | null} */
+  let switchingAccountId = null;
   let stopped = false;
+
+  function clearRefreshStateTimer() {
+    if (refreshStateTimer) {
+      clearTimeout(refreshStateTimer);
+      refreshStateTimer = null;
+    }
+  }
 
   /**
    * @param {boolean} [syncToHub]
    */
   function notifyStateChanged(syncToHub = true) {
+    clearRefreshStateTimer();
+    lastRefreshStateEmitMs = Date.now();
     const state = getState();
     try {
       options.onStateChanged?.(state);
     } catch (_) {}
     if (syncToHub) scheduleHubSync();
+  }
+
+  function notifyBatchRefreshStateThrottled() {
+    if (stopped) return;
+    const elapsed = Date.now() - lastRefreshStateEmitMs;
+    if (elapsed >= REFRESH_STATE_THROTTLE_MS) {
+      notifyStateChanged(false);
+      return;
+    }
+    if (refreshStateTimer) return;
+    refreshStateTimer = setTimeout(() => {
+      refreshStateTimer = null;
+      if (!stopped) notifyStateChanged(false);
+    }, REFRESH_STATE_THROTTLE_MS - elapsed);
+    refreshStateTimer.unref?.();
   }
 
   function buildSanitizedHubSnapshot() {
@@ -227,7 +257,7 @@ function createAntigravityManagerService(options) {
               currentEmail: p.item?.email || ''
             });
           } catch (_) {}
-          notifyStateChanged(false);
+          notifyBatchRefreshStateThrottled();
         },
         worker: async (acc) => {
           await refreshSingleAccountInternal(acc.id, controller.signal);
@@ -287,7 +317,7 @@ function createAntigravityManagerService(options) {
                 currentEmail: p.item?.email || ''
               });
             } catch (_) {}
-            notifyStateChanged(false);
+            notifyBatchRefreshStateThrottled();
           },
           worker: async (acc) => {
             await refreshSingleAccountInternal(acc.id, controller.signal);
@@ -307,7 +337,9 @@ function createAntigravityManagerService(options) {
     return {
       ...store.getStateForRenderer(),
       isRefreshing: scheduler.isRefreshing(),
-      lastRefreshAt: scheduler.getLastRefreshTimestamp()
+      lastRefreshAt: scheduler.getLastRefreshTimestamp(),
+      isSwitching: switching,
+      switchingAccountId
     };
   }
 
@@ -464,6 +496,9 @@ function createAntigravityManagerService(options) {
     const cfg = store.getConfig();
     const target = targetClient || cfg.defaultSwitchTarget || 'auto';
     switching = true;
+    switchingAccountId = account.id;
+    notifyStateChanged(false);
+    let switchedOk = false;
     try {
       const res = await switcher.switchAccount({
         account,
@@ -475,12 +510,14 @@ function createAntigravityManagerService(options) {
           customExecutablePaths: cfg.customExecutablePaths
         }
       });
-      notifyStateChanged(true);
+      switchedOk = Boolean(res?.ok);
       return res;
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     } finally {
       switching = false;
+      switchingAccountId = null;
+      notifyStateChanged(switchedOk);
     }
   }
 
@@ -577,6 +614,27 @@ function createAntigravityManagerService(options) {
     };
   }
 
+  async function detectActiveClientsAsync() {
+    const procs = await processManager.listProcessesAsync();
+    const procDeps = { listProcesses: () => procs };
+    const defaultDataDir = importExport.defaultManagerDataDir();
+    let defaultDataDirExists = false;
+    if (defaultDataDir) {
+      try {
+        await fs.promises.access(defaultDataDir);
+        defaultDataDirExists = true;
+      } catch (_) {}
+    }
+    return {
+      classicRunning: processManager.isAntigravityRunning('classic', procDeps),
+      ideRunning: processManager.isAntigravityRunning('ide', procDeps),
+      agyRunning: processManager.isProcessRunningByName('agy', procDeps),
+      acpRunning: processManager.isProcessRunningByName('agy_acp_server', procDeps),
+      defaultDataDir,
+      defaultDataDirExists
+    };
+  }
+
   function start() {
     scheduler.start();
     scheduleHubSync();
@@ -585,6 +643,7 @@ function createAntigravityManagerService(options) {
   function stop() {
     stopped = true;
     scheduler.stop();
+    clearRefreshStateTimer();
     if (hubSyncTimer) {
       clearTimeout(hubSyncTimer);
       hubSyncTimer = null;
@@ -616,6 +675,7 @@ function createAntigravityManagerService(options) {
     bindDeviceProfile,
     restoreOriginalDevice,
     detectActiveClients,
+    detectActiveClientsAsync,
     pushSnapshotToHubNow
   };
 }

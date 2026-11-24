@@ -220,6 +220,130 @@ function readLocalCredentialFiles(options = {}) {
   return found;
 }
 
+/**
+ * @param {string} filePath
+ * @param {unknown} value
+ */
+async function writePrivateJsonFileAsync(filePath, value) {
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  const text = `${JSON.stringify(value, null, 2)}\n`;
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  try {
+    await fs.promises.writeFile(tempPath, text, {
+      encoding: 'utf8',
+      ...(process.platform !== 'win32' ? { mode: 0o600 } : {})
+    });
+    await fs.promises.rename(tempPath, filePath);
+    if (process.platform !== 'win32') {
+      try { await fs.promises.chmod(filePath, 0o600); } catch (_) {}
+    }
+  } catch (error) {
+    try { await fs.promises.unlink(tempPath); } catch (_) {}
+    throw error;
+  }
+}
+
+/**
+ * Async variant of `writeFileCredentials` using non-blocking fs.promises.
+ *
+ * @param {{
+ *   accessToken: string,
+ *   refreshToken: string,
+ *   expiryTimestamp: number,
+ *   email?: string,
+ *   idToken?: string | null
+ * }} tokenData
+ * @param {{ syncAgyCli?: boolean, geminiDir?: string, env?: NodeJS.ProcessEnv, home?: string }} [options]
+ */
+async function writeFileCredentialsAsync(tokenData, options = {}) {
+  const geminiDir = options.geminiDir || resolveGeminiDir(options.env, options.home);
+  const agyToken = buildAgyTokenObject(tokenData);
+  const expiryMs = safeExpiryMs(tokenData.expiryTimestamp);
+
+  const writes = [
+    writePrivateJsonFileAsync(path.join(geminiDir, 'jetski-standalone-oauth-token'), agyToken),
+    writePrivateJsonFileAsync(path.join(geminiDir, 'oauth_creds.json'), {
+      access_token: String(tokenData.accessToken || ''),
+      refresh_token: String(tokenData.refreshToken || ''),
+      scope: DEFAULT_SCOPES.join(' '),
+      token_type: 'Bearer',
+      expiry_date: expiryMs,
+      ...(tokenData.idToken ? { id_token: String(tokenData.idToken) } : {})
+    })
+  ];
+  if (options.syncAgyCli) {
+    writes.push(writePrivateJsonFileAsync(path.join(geminiDir, 'antigravity-cli', 'antigravity-oauth-token'), agyToken));
+  }
+  await Promise.all(writes);
+
+  if (tokenData.email) {
+    const accountsPath = path.join(geminiDir, 'google_accounts.json');
+    const nextActive = String(tokenData.email);
+    /** @type {string[]} */
+    const prevOld = [];
+    try {
+      const rawExisting = await fs.promises.readFile(accountsPath, 'utf8');
+      const existing = JSON.parse(rawExisting);
+      if (typeof existing?.active === 'string' && existing.active && existing.active !== nextActive) {
+        prevOld.push(existing.active);
+      }
+      if (Array.isArray(existing?.old)) {
+        for (const item of existing.old) {
+          if (typeof item === 'string' && item && item !== nextActive && !prevOld.includes(item)) {
+            prevOld.push(item);
+          }
+        }
+      }
+    } catch (_) {}
+    await writePrivateJsonFileAsync(accountsPath, {
+      active: nextActive,
+      old: prevOld
+    });
+  }
+}
+
+/**
+ * Async variant of `writeAcpCredentials` using non-blocking fs.promises.
+ *
+ * @param {{
+ *   accessToken: string,
+ *   refreshToken: string,
+ *   expiryTimestamp: number,
+ *   email?: string,
+ *   projectId?: string | null,
+ *   idToken?: string | null
+ * }} tokenData
+ * @param {{ geminiDir?: string, env?: NodeJS.ProcessEnv, home?: string }} [options]
+ */
+async function writeAcpCredentialsAsync(tokenData, options = {}) {
+  const geminiDir = options.geminiDir || resolveGeminiDir(options.env, options.home);
+  const acpDir = path.join(geminiDir, 'antigravity-acp');
+  const acpFile = path.join(acpDir, 'acp_token.json');
+
+  let preservedProjectId = String(tokenData.projectId || '').trim();
+  if (!preservedProjectId) {
+    try {
+      const existing = JSON.parse(await fs.promises.readFile(acpFile, 'utf8'));
+      const existingRt = String(existing?.refresh_token || existing?.token?.refresh_token || '').trim();
+      if (existingRt && existingRt === String(tokenData.refreshToken || '').trim() && typeof existing?.project_id === 'string') {
+        preservedProjectId = existing.project_id.trim();
+      }
+    } catch (_) {}
+  }
+
+  const base = buildAgyTokenObject(tokenData);
+  const acpPayload = {
+    ...base,
+    access_token: String(tokenData.accessToken || ''),
+    refresh_token: String(tokenData.refreshToken || ''),
+    token_type: 'Bearer',
+    scopes: [...DEFAULT_SCOPES],
+    ...(preservedProjectId ? { project_id: preservedProjectId } : {})
+  };
+  await writePrivateJsonFileAsync(acpFile, acpPayload);
+  return acpFile;
+}
+
 module.exports = {
   AICODE_SCOPE,
   DEFAULT_SCOPES,
@@ -227,5 +351,7 @@ module.exports = {
   readLocalCredentialFiles,
   resolveGeminiDir,
   writeAcpCredentials,
-  writeFileCredentials
+  writeAcpCredentialsAsync,
+  writeFileCredentials,
+  writeFileCredentialsAsync
 };

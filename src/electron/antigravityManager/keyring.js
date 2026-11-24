@@ -1,7 +1,7 @@
 // @ts-check
 'use strict';
 
-const { execFileSync, spawnSync } = require('node:child_process');
+const { execFile, execFileSync, spawn, spawnSync } = require('node:child_process');
 
 const DEFAULT_SERVICE = 'gemini';
 const DEFAULT_ACCOUNT = 'antigravity';
@@ -301,6 +301,165 @@ function readFromSystemKeyring(options = {}) {
   }
 }
 
+/**
+ * @param {typeof execFile} execAsyncFn
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {import('node:child_process').ExecFileOptions} opts
+ * @returns {Promise<string>}
+ */
+function execKeyringAsync(execAsyncFn, cmd, args, opts) {
+  return new Promise((resolve, reject) => {
+    execAsyncFn(cmd, args, { ...opts, encoding: 'utf8' }, (err, stdout) => {
+      if (err) reject(err);
+      else resolve(String(stdout || ''));
+    });
+  });
+}
+
+/**
+ * @param {typeof spawn} spawnAsyncFn
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {string} input
+ * @param {number} timeoutMs
+ */
+function spawnInputAsync(spawnAsyncFn, cmd, args, input, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let stderr = '';
+    const child = spawnAsyncFn(cmd, args, { stdio: ['pipe', 'ignore', 'pipe'] });
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { child.kill('SIGKILL'); } catch (_) {}
+      reject(new Error(`${cmd} timed out`));
+    }, timeoutMs);
+    timer.unref?.();
+
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (/** @type {any} */ (err)?.code === 'ENOENT') {
+        reject(new Error(`Linux Secret Service utility '${cmd}' not found`));
+      } else {
+        reject(err);
+      }
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new Error(`Linux ${cmd} failed: ${stderr.trim() || `exit ${code}`}`));
+      } else {
+        resolve(undefined);
+      }
+    });
+    child.stdin?.on('error', () => {});
+    child.stdin?.end(input, 'utf8');
+  });
+}
+
+/**
+ * Non-blocking OS keyring write (avoids freezing Electron's main thread on macOS/Linux).
+ *
+ * @param {{
+ *   accessToken: string,
+ *   refreshToken: string,
+ *   expiryTimestamp: number,
+ *   email?: string,
+ *   idToken?: string | null
+ * }} tokenData
+ * @param {{
+ *   service?: string,
+ *   account?: string,
+ *   platform?: NodeJS.Platform,
+ *   execFile?: typeof execFile,
+ *   spawn?: typeof spawn,
+ *   execFileSync?: typeof execFileSync,
+ *   spawnSync?: typeof spawnSync,
+ *   win32Cred?: { write: (target: string, user: string, secretBuf: Buffer) => void }
+ * }} [options]
+ */
+async function writeToSystemKeyringAsync(tokenData, options = {}) {
+  const platform = options.platform || process.platform;
+  if (options.execFileSync || options.spawnSync || options.win32Cred || platform === 'win32') {
+    writeToSystemKeyring(tokenData, options);
+    return;
+  }
+
+  const service = options.service || DEFAULT_SERVICE;
+  const account = options.account || DEFAULT_ACCOUNT;
+  const payloadJson = serializeKeyringPayload(tokenData);
+  const execAsyncFn = options.execFile || execFile;
+  const spawnAsyncFn = options.spawn || spawn;
+
+  if (platform === 'darwin') {
+    const encoded = `${KEYRING_B64_PREFIX}${Buffer.from(payloadJson, 'utf8').toString('base64')}`;
+    try {
+      await execKeyringAsync(execAsyncFn, 'security', ['delete-generic-password', '-s', service, '-a', account], { timeout: 10_000 });
+    } catch (_) {}
+    await execKeyringAsync(execAsyncFn, 'security', ['add-generic-password', '-s', service, '-a', account, '-w', encoded, '-A'], { timeout: 10_000 });
+    return;
+  }
+
+  /** @param {string | null} collection */
+  const storeAsync = (collection) => {
+    const args = ['store'];
+    if (collection) {
+      args.push(`--collection=${collection}`, `--label=Password for '${account}' on '${service}'`);
+    } else {
+      args.push(`--label=${service}`);
+    }
+    args.push('service', service, 'username', account);
+    return spawnInputAsync(spawnAsyncFn, 'secret-tool', args, payloadJson, 10_000);
+  };
+
+  let loginErr = null;
+  let defaultErr = null;
+  try { await storeAsync('/org/freedesktop/secrets/collection/login'); } catch (err) { loginErr = err; }
+  try { await storeAsync(null); } catch (err) { defaultErr = err; }
+  if (loginErr && defaultErr) throw loginErr;
+}
+
+/**
+ * Non-blocking OS keyring read.
+ *
+ * @param {{
+ *   service?: string,
+ *   account?: string,
+ *   platform?: NodeJS.Platform,
+ *   execFile?: typeof execFile,
+ *   execFileSync?: typeof execFileSync,
+ *   win32Cred?: { read: (target: string) => Buffer | null }
+ * }} [options]
+ * @returns {Promise<{ refreshToken: string, email: string } | null>}
+ */
+async function readFromSystemKeyringAsync(options = {}) {
+  const platform = options.platform || process.platform;
+  if (options.execFileSync || options.win32Cred || platform === 'win32') {
+    return readFromSystemKeyring(options);
+  }
+  const service = options.service || DEFAULT_SERVICE;
+  const account = options.account || DEFAULT_ACCOUNT;
+  const execAsyncFn = options.execFile || execFile;
+
+  try {
+    if (platform === 'darwin') {
+      const out = await execKeyringAsync(execAsyncFn, 'security', ['find-generic-password', '-s', service, '-a', account, '-w'], { timeout: 10_000 });
+      return parseKeyringPayload(out);
+    }
+    const out = await execKeyringAsync(execAsyncFn, 'secret-tool', ['lookup', 'service', service, 'username', account], { timeout: 10_000 });
+    return parseKeyringPayload(out);
+  } catch (_) {
+    return null;
+  }
+}
+
 module.exports = {
   ACP_ACCOUNT,
   DEFAULT_ACCOUNT,
@@ -310,6 +469,8 @@ module.exports = {
   createWin32CredApi,
   parseKeyringPayload,
   readFromSystemKeyring,
+  readFromSystemKeyringAsync,
   serializeKeyringPayload,
-  writeToSystemKeyring
+  writeToSystemKeyring,
+  writeToSystemKeyringAsync
 };

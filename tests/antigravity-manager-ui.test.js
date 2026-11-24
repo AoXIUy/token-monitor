@@ -262,3 +262,114 @@ test('antigravityManager state pruning, progress bar reset, clipboard IPC prefer
   assert.match(js, /els\.importDialog\.addEventListener\('close',[\s\S]*cancelOAuthLogin/);
   assert.match(js, /ev\.key !== 'Escape'/);
 });
+
+test('antigravityManager reuses unchanged account card DOM nodes while preserving frosted glass and unclipped menus', () => {
+  const js = readRenderer('antigravityManager.js');
+  const css = readRenderer('antigravityManager.css');
+
+  // Frosted glass tokens & native liquid-glass rules remain intact, and .agm-card avoids paint/overflow clipping
+  assert.match(css, /background:\s*var\(--glass\)/);
+  assert.match(css, /html\.native-liquid-glass body\s*\{\s*background:\s*transparent;\s*\}/);
+  assert.match(css, /\.agm-card:not\(\.has-menu-open\)\s*\{\s*contain:\s*layout style;\s*\}/);
+  const cardRule = css.match(/\.agm-card\s*\{([^}]*)\}/)?.[1] || '';
+  assert.doesNotMatch(cardRule, /overflow:\s*hidden|contain:\s*[^;]*paint/);
+  assert.match(css, /@keyframes agm-spin/);
+
+  // Parallel boot initialization
+  assert.match(js, /Promise\.all\(\[\s*Promise\.resolve\(window\.tokenMonitor\.getNativeMaterialState/);
+
+  // Keyed cardCache reconciliation preserves unchanged card DOM references across partial updates
+  const reconcileSnippet = [
+    extractFunction(js, 'function filteredAccounts(', '\nconst SVG_NS'),
+    extractFunction(js, 'function effectiveSwitchingId(', '\nasync function deleteSingleAccount('),
+    extractFunction(js, 'function renderAccounts(', '\nfunction renderAll(')
+  ].join('\n');
+
+  const children = [];
+  const accountList = {
+    get children() { return children; },
+    get firstElementChild() { return children[0] || null; },
+    replaceChildren(...nodes) {
+      children.length = 0;
+      for (const n of nodes) children.push(n);
+    },
+    insertBefore(node, ref) {
+      const existingIdx = children.indexOf(node);
+      if (existingIdx >= 0) children.splice(existingIdx, 1);
+      if (!ref) {
+        children.push(node);
+        return node;
+      }
+      const refIdx = children.indexOf(ref);
+      if (refIdx >= 0) children.splice(refIdx, 0, node);
+      else children.push(node);
+      return node;
+    }
+  };
+
+  let createdCount = 0;
+  const ctx = {
+    Date: { now: () => 1763942400000 },
+    Math,
+    Object,
+    Array,
+    Set,
+    Map,
+    cardCache: new Map(),
+    state: {
+      locale: 'zh-CN',
+      search: '',
+      filter: 'all',
+      selectedIds: new Set(),
+      expandedModels: new Set(),
+      openMoreId: '',
+      confirmDeleteId: '',
+      switchBestBusy: false,
+      switchingId: '',
+      refreshingIds: new Set(),
+      manager: {
+        activeAccounts: { classic: 'a1' },
+        accounts: [
+          { id: 'a1', email: 'one@example.com', subscriptionTier: 'ULTRA', quota: { lastUpdatedAt: 100, groups: [], models: [] } },
+          { id: 'a2', email: 'two@example.com', subscriptionTier: 'PRO', quota: { lastUpdatedAt: 100, groups: [], models: [] } }
+        ]
+      }
+    },
+    els: {
+      selectAllInput: { disabled: false, checked: false },
+      accountList
+    },
+    t: (k) => k,
+    isAbnormalAccount: () => false,
+    positionOpenMoreMenu: () => {},
+    renderAccountCard: (acc) => {
+      createdCount += 1;
+      const node = {
+        id: acc.id,
+        rev: createdCount,
+        classList: { contains: () => false },
+        remove() {
+          const i = children.indexOf(node);
+          if (i >= 0) children.splice(i, 1);
+        }
+      };
+      return node;
+    }
+  };
+  vm.runInNewContext(reconcileSnippet, ctx);
+
+  ctx.renderAccounts();
+  assert.equal(createdCount, 2);
+  const firstA1 = children[0];
+  const firstA2 = children[1];
+
+  // Updating only a2's quota rebuilds ONLY a2 and keeps a1's exact live DOM element untouched
+  ctx.state.manager.accounts[1] = {
+    ...ctx.state.manager.accounts[1],
+    quota: { lastUpdatedAt: 200, groups: [], models: [] }
+  };
+  ctx.renderAccounts();
+  assert.equal(createdCount, 3);
+  assert.equal(children[0], firstA1, 'unchanged card DOM node must be preserved');
+  assert.notEqual(children[1], firstA2, 'updated card DOM node must be replaced');
+});

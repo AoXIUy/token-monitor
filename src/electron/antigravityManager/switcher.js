@@ -160,6 +160,169 @@ function applyAccountCredentials(account, tokenData, { isIde, effectiveTarget, a
 }
 
 /**
+ * Async variant of `applyAccountCredentials` that consolidates SQLite writes into a single
+ * transaction and runs file/keyring/backup I/O without blocking Electron's main thread.
+ *
+ * @param {Record<string, any>} account
+ * @param {Record<string, any>} tokenData
+ * @param {{
+ *   isIde: boolean,
+ *   effectiveTarget: 'classic' | 'ide' | null,
+ *   activeExePath: string | null,
+ *   deps?: Record<string, any>
+ * }} ctx
+ */
+async function applyAccountCredentialsAsync(account, tokenData, { isIde, effectiveTarget, activeExePath, deps = {} }) {
+  const pm = deps.processManager || processManager;
+  const sdb = deps.stateDb || stateDb;
+  const dp = deps.deviceProfile || deviceProfile;
+  const kr = deps.keyring || keyring;
+  const fc = deps.fileCredentials || fileCredentials;
+  const fsApi = deps.fs || require('node:fs');
+
+  const isTargetIde = isIde
+    || effectiveTarget === 'ide'
+    || (effectiveTarget !== 'classic' && Boolean(activeExePath && processManager.isAntigravityIdePath(activeExePath)));
+
+  const dbPath = sdb.getDbPath(effectiveTarget, deps);
+  const storagePath = dp.getStoragePath(effectiveTarget, deps);
+  const hasAsyncInject = typeof sdb.injectTokenToDbAsync === 'function';
+
+  /** @param {string} p */
+  const pathExists = async (p) => {
+    if (!p) return false;
+    if (deps.fs?.existsSync) return Boolean(deps.fs.existsSync(p));
+    try {
+      await fsApi.promises.access(p);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const writeKeyringSafe = async () => {
+    const payload = {
+      accessToken: tokenData.accessToken,
+      refreshToken: tokenData.refreshToken,
+      expiryTimestamp: tokenData.expiryTimestamp,
+      email: account.email,
+      idToken: tokenData.idToken
+    };
+    if (typeof kr.writeToSystemKeyringAsync === 'function') {
+      await kr.writeToSystemKeyringAsync(payload, deps);
+    } else {
+      kr.writeToSystemKeyring(payload, deps);
+    }
+  };
+
+  const writeFilesSafe = async () => {
+    const payload = {
+      accessToken: tokenData.accessToken,
+      refreshToken: tokenData.refreshToken,
+      expiryTimestamp: tokenData.expiryTimestamp,
+      email: account.email,
+      idToken: tokenData.idToken
+    };
+    const fileOpts = { ...deps, syncAgyCli: false };
+    try {
+      if (typeof fc.writeFileCredentialsAsync === 'function') {
+        await fc.writeFileCredentialsAsync(payload, fileOpts);
+      } else {
+        fc.writeFileCredentials(payload, fileOpts);
+      }
+    } catch (_) {}
+  };
+
+  /** @param {boolean} includeStorageMachineId */
+  const injectDb = async (includeStorageMachineId) => {
+    const dbPayload = {
+      accessToken: tokenData.accessToken,
+      refreshToken: tokenData.refreshToken,
+      expiry: tokenData.expiryTimestamp,
+      email: account.email,
+      isGcpTos: tokenData.isGcpTos,
+      projectId: tokenData.projectId,
+      idToken: tokenData.idToken,
+      oauthClientKey: tokenData.oauthClientKey,
+      ...(hasAsyncInject && account.deviceProfile?.macMachineId
+        ? { serviceMachineId: account.deviceProfile.macMachineId }
+        : {}),
+      ...(hasAsyncInject && includeStorageMachineId && account.deviceProfile?.devDeviceId
+        ? { storageServiceMachineId: account.deviceProfile.devDeviceId }
+        : {})
+    };
+    if (hasAsyncInject) {
+      await sdb.injectTokenToDbAsync(dbPath, dbPayload, deps);
+    } else {
+      sdb.injectTokenToDb(dbPath, dbPayload, deps);
+      if (account.deviceProfile?.macMachineId && typeof sdb.writeServiceMachineId === 'function') {
+        try { sdb.writeServiceMachineId(dbPath, account.deviceProfile.macMachineId, deps); } catch (_) {}
+      }
+    }
+  };
+
+  if (isTargetIde) {
+    if (account.deviceProfile && storagePath) {
+      try {
+        if (typeof dp.writeDeviceProfileAsync === 'function') {
+          await dp.writeDeviceProfileAsync(storagePath, account.deviceProfile, { ...deps, skipDbSync: hasAsyncInject });
+        } else {
+          dp.writeDeviceProfile(storagePath, account.deviceProfile, { ...deps, skipDbSync: hasAsyncInject });
+        }
+      } catch (_) {}
+    }
+
+    await injectDb(Boolean(account.deviceProfile && storagePath));
+
+    await Promise.all([
+      writeKeyringSafe().catch(() => {}),
+      writeFilesSafe()
+    ]);
+    return;
+  }
+
+  // Classic desktop target: >= 2.0.0 uses keyring (+ file fallback), < 2.0.0 uses SQLite.
+  const version = typeof pm.detectAntigravityVersionAsync === 'function'
+    ? await pm.detectAntigravityVersionAsync(activeExePath)
+    : pm.detectAntigravityVersion(activeExePath);
+  const dbExists = await pathExists(dbPath);
+  const useKeyring = version
+    ? pm.compareSemver(version, '2.0.0') >= 0
+    : !dbExists;
+  const willInjectClassicDb = !useKeyring || dbExists;
+
+  if (account.deviceProfile && storagePath) {
+    try {
+      const skipDbSync = hasAsyncInject && willInjectClassicDb;
+      if (typeof dp.writeDeviceProfileAsync === 'function') {
+        await dp.writeDeviceProfileAsync(storagePath, account.deviceProfile, { ...deps, skipDbSync });
+      } else {
+        dp.writeDeviceProfile(storagePath, account.deviceProfile, { ...deps, skipDbSync });
+      }
+    } catch (_) {}
+  }
+
+  if (useKeyring) {
+    await writeKeyringSafe();
+    if (dbExists) {
+      try {
+        await injectDb(Boolean(account.deviceProfile && storagePath));
+      } catch (_) {}
+    }
+  } else {
+    await injectDb(Boolean(account.deviceProfile && storagePath));
+  }
+
+  if (!hasAsyncInject && account.deviceProfile?.macMachineId && dbExists && typeof sdb.writeServiceMachineId === 'function') {
+    try {
+      sdb.writeServiceMachineId(dbPath, account.deviceProfile.macMachineId, deps);
+    } catch (_) {}
+  }
+
+  await writeFilesSafe();
+}
+
+/**
  * Switch account for Classic, IDE, AGY CLI, ACP, or Auto.
  *
  * @param {{
@@ -203,13 +366,15 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', store,
    * @param {'classic' | 'ide' | null} profileTarget
    * @param {Record<string, any>} profileDeps
    */
-  const ensureDeviceProfile = (profileTarget, profileDeps) => {
+  const ensureDeviceProfile = async (profileTarget, profileDeps) => {
     if (activeAccount.deviceProfile) return;
     try {
       const candidates = profileTarget === 'ide' ? ['ide', 'classic'] : ['classic', 'ide'];
       for (const candidate of candidates) {
         const storagePath = dp.getStoragePath(candidate, profileDeps);
-        const original = dp.readDeviceProfile(storagePath);
+        const original = typeof dp.readDeviceProfileAsync === 'function'
+          ? await dp.readDeviceProfileAsync(storagePath)
+          : dp.readDeviceProfile(storagePath);
         if (original) {
           store.saveOriginalDeviceProfileIfMissing(original);
           break;
@@ -224,23 +389,26 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', store,
 
   // 3a. AGY CLI target
   if (normalizedTarget === 'agy') {
-    ensureDeviceProfile('classic', deps);
-    kr.writeToSystemKeyring({
+    await ensureDeviceProfile('classic', deps);
+    const credPayload = {
       accessToken: freshToken.accessToken,
       refreshToken: freshToken.refreshToken,
       expiryTimestamp: freshToken.expiryTimestamp,
       email: activeAccount.email,
       idToken: freshToken.idToken
-    }, deps);
-    fc.writeFileCredentials({
-      accessToken: freshToken.accessToken,
-      refreshToken: freshToken.refreshToken,
-      expiryTimestamp: freshToken.expiryTimestamp,
-      email: activeAccount.email,
-      idToken: freshToken.idToken
-    }, { ...deps, syncAgyCli: true });
+    };
+    await Promise.all([
+      typeof kr.writeToSystemKeyringAsync === 'function'
+        ? kr.writeToSystemKeyringAsync(credPayload, deps)
+        : Promise.resolve().then(() => kr.writeToSystemKeyring(credPayload, deps)),
+      typeof fc.writeFileCredentialsAsync === 'function'
+        ? fc.writeFileCredentialsAsync(credPayload, { ...deps, syncAgyCli: true })
+        : Promise.resolve().then(() => fc.writeFileCredentials(credPayload, { ...deps, syncAgyCli: true }))
+    ]);
 
-    const stored = kr.readFromSystemKeyring(deps);
+    const stored = typeof kr.readFromSystemKeyringAsync === 'function'
+      ? await kr.readFromSystemKeyringAsync(deps)
+      : kr.readFromSystemKeyring(deps);
     if (!stored || stored.refreshToken !== freshToken.refreshToken) {
       throw new Error('Could not verify AGY CLI keyring credential write');
     }
@@ -250,77 +418,116 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', store,
 
   // 3b. ACP IDE Plugin target
   if (normalizedTarget === 'acp' || normalizedTarget === 'plugin' || normalizedTarget === 'ide-plugin') {
-    ensureDeviceProfile('classic', deps);
-    try {
-      kr.writeToSystemKeyring({
-        accessToken: freshToken.accessToken,
-        refreshToken: freshToken.refreshToken,
-        expiryTimestamp: freshToken.expiryTimestamp,
-        email: activeAccount.email,
-        idToken: freshToken.idToken
-      }, { ...deps, account: kr.ACP_ACCOUNT });
-    } catch (_) {}
-
-    fc.writeAcpCredentials({
+    await ensureDeviceProfile('classic', deps);
+    const acpKeyringOpts = { ...deps, account: kr.ACP_ACCOUNT };
+    const acpKeyringPayload = {
       accessToken: freshToken.accessToken,
       refreshToken: freshToken.refreshToken,
       expiryTimestamp: freshToken.expiryTimestamp,
       email: activeAccount.email,
-      projectId: freshToken.projectId,
       idToken: freshToken.idToken
-    }, deps);
+    };
+    const acpFilePayload = {
+      ...acpKeyringPayload,
+      projectId: freshToken.projectId
+    };
+    await Promise.all([
+      (typeof kr.writeToSystemKeyringAsync === 'function'
+        ? kr.writeToSystemKeyringAsync(acpKeyringPayload, acpKeyringOpts)
+        : Promise.resolve().then(() => kr.writeToSystemKeyring(acpKeyringPayload, acpKeyringOpts))
+      ).catch(() => {}),
+      typeof fc.writeAcpCredentialsAsync === 'function'
+        ? fc.writeAcpCredentialsAsync(acpFilePayload, deps)
+        : Promise.resolve().then(() => fc.writeAcpCredentials(acpFilePayload, deps))
+    ]);
 
-    const killedAcp = pm.killAcpServers(deps);
+    const killedAcp = typeof pm.killAcpServersAsync === 'function'
+      ? await pm.killAcpServersAsync(deps)
+      : pm.killAcpServers(deps);
     store.setActiveAccount('acp', activeAccount.id);
     return { ok: true, target: 'acp', mode: 'acp', restartedProcesses: killedAcp, accountId: activeAccount.id };
   }
 
-  // 3c. Desktop Classic / IDE target
+  // 3c. Desktop Classic / IDE target (lazy executable lookup avoids scanning uninstalled variants)
   const explicitTarget = normalizedTarget === 'ide' ? 'ide' : (normalizedTarget === 'classic' ? 'classic' : null);
-  const initialProcs = !deps.listProcesses && typeof pm.listProcesses === 'function'
-    ? pm.listProcesses(deps)
+  const initialProcs = !deps.listProcesses
+    ? (typeof pm.listProcessesAsync === 'function'
+        ? await pm.listProcessesAsync(deps)
+        : (typeof pm.listProcesses === 'function' ? pm.listProcesses(deps) : null))
     : null;
   const snapshotDeps = initialProcs ? { ...deps, listProcesses: () => initialProcs } : deps;
+
+  /** @param {string | null} t */
+  const resolveExe = async (t) => (typeof pm.getAntigravityExecutablePathAsync === 'function'
+    ? await pm.getAntigravityExecutablePathAsync(t, snapshotDeps)
+    : pm.getAntigravityExecutablePath(t, snapshotDeps));
+
   const classicRunning = pm.isAntigravityRunning(null, snapshotDeps);
   const ideRunning = pm.isAntigravityRunning('ide', snapshotDeps);
-  const classicExe = pm.getAntigravityExecutablePath('classic', snapshotDeps);
-  const ideExe = pm.getAntigravityExecutablePath('ide', snapshotDeps);
 
-  const { isIde, effectiveTarget } = resolveEffectiveTarget(explicitTarget, {
-    classicRunning,
-    ideRunning,
-    hasClassicExe: Boolean(classicExe),
-    ideExePath: ideExe
-  });
+  /** @type {boolean} */
+  let isIde;
+  /** @type {'classic' | 'ide' | null} */
+  let effectiveTarget;
+  /** @type {string | null} */
+  let activeExePath;
 
-  const activeExePath = pm.getAntigravityExecutablePath(effectiveTarget, snapshotDeps);
+  if (explicitTarget === 'ide') {
+    isIde = true;
+    effectiveTarget = 'ide';
+    activeExePath = await resolveExe('ide');
+  } else if (explicitTarget === 'classic') {
+    isIde = false;
+    effectiveTarget = 'classic';
+    activeExePath = await resolveExe('classic');
+  } else if (classicRunning) {
+    isIde = false;
+    effectiveTarget = null;
+    activeExePath = await resolveExe(null);
+  } else if (ideRunning) {
+    isIde = true;
+    effectiveTarget = 'ide';
+    activeExePath = await resolveExe('ide');
+  } else {
+    const classicExe = await resolveExe('classic');
+    const ideExe = classicExe ? null : await resolveExe('ide');
+    ({ isIde, effectiveTarget } = resolveEffectiveTarget(null, {
+      classicRunning: false,
+      ideRunning: false,
+      hasClassicExe: Boolean(classicExe),
+      ideExePath: ideExe
+    }));
+    activeExePath = isIde ? ideExe : classicExe;
+  }
+
   const activeArgs = pm.getArgsFromRunningProcess(effectiveTarget, snapshotDeps);
   const runningUserDataDir = typeof pm.getUserDataDirFromProcess === 'function'
     ? pm.getUserDataDirFromProcess(effectiveTarget, snapshotDeps)
     : null;
-  const running = pm.isAntigravityRunning(effectiveTarget, snapshotDeps);
+  const running = effectiveTarget === 'ide'
+    ? ideRunning
+    : (effectiveTarget === 'classic' ? classicRunning : pm.isAntigravityRunning(effectiveTarget, snapshotDeps));
   const credDeps = {
     ...deps,
     ...(runningUserDataDir ? { userDataDir: runningUserDataDir } : {}),
     ...(activeExePath ? { executablePath: activeExePath } : {})
   };
-  ensureDeviceProfile(isIde ? 'ide' : 'classic', credDeps);
+  await ensureDeviceProfile(isIde ? 'ide' : 'classic', credDeps);
 
   let hotSwitched = false;
   let launched = false;
 
   if (running) {
     try {
-      // Pre-write credentials before killing language_server so supervisor respawns with new account
-      applyAccountCredentials(activeAccount, freshToken, { isIde, effectiveTarget, activeExePath, deps: credDeps });
+      // Pre-write credentials once before killing language_server so supervisor respawns with new account
+      await applyAccountCredentialsAsync(activeAccount, freshToken, { isIde, effectiveTarget, activeExePath, deps: credDeps });
       const previousLsPids = typeof pm.getLanguageServerPids === 'function'
         ? pm.getLanguageServerPids(effectiveTarget, snapshotDeps)
         : [];
-      const killedLs = pm.killLanguageServer(effectiveTarget, deps);
+      const killedLs = typeof pm.killLanguageServerAsync === 'function'
+        ? await pm.killLanguageServerAsync(effectiveTarget, snapshotDeps)
+        : pm.killLanguageServer(effectiveTarget, snapshotDeps);
       if (killedLs > 0) {
-        try {
-          applyAccountCredentials(activeAccount, freshToken, { isIde, effectiveTarget, activeExePath, deps: credDeps });
-        } catch (_) {}
         const respawned = await pm.waitForLanguageServerRespawn(
           effectiveTarget,
           deps.respawnTimeoutMs || 15_000,
@@ -339,10 +546,8 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', store,
   if (!hotSwitched) {
     if (running) {
       await pm.closeAntigravity(20, effectiveTarget, deps);
-      applyAccountCredentials(activeAccount, freshToken, { isIde, effectiveTarget, activeExePath, deps: credDeps });
-    } else {
-      applyAccountCredentials(activeAccount, freshToken, { isIde, effectiveTarget, activeExePath, deps: credDeps });
     }
+    await applyAccountCredentialsAsync(activeAccount, freshToken, { isIde, effectiveTarget, activeExePath, deps: credDeps });
 
     try {
       pm.startAntigravity(effectiveTarget, activeExePath, activeArgs, deps);
@@ -407,6 +612,7 @@ function pickBestAccount(accounts) {
 
 module.exports = {
   applyAccountCredentials,
+  applyAccountCredentialsAsync,
   pickBestAccount,
   resolveEffectiveTarget,
   switchAccount

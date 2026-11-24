@@ -253,6 +253,8 @@ test('service switchAccountTo enforces single-flight lock against concurrent swi
   const id = service.getState().accounts[0].id;
 
   const first = service.switchAccountTo(id, 'classic');
+  assert.equal(service.getState().isSwitching, true);
+  assert.equal(service.getState().switchingAccountId, id);
   const second = await service.switchAccountTo(id, 'classic');
   assert.equal(second.ok, false);
   assert.match(second.error, /already in progress/i);
@@ -260,4 +262,49 @@ test('service switchAccountTo enforces single-flight lock against concurrent swi
   releaseFetch();
   const firstRes = await first;
   assert.equal(firstRes.ok, false);
+  assert.equal(service.getState().isSwitching, false);
+  assert.equal(service.getState().switchingAccountId, null);
+});
+
+test('service throttles intermediate batch refresh state pushes instead of emitting per-account full snapshots', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-svc-throttle-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  let statePushCount = 0;
+  let progressPushCount = 0;
+
+  const service = createAntigravityManagerService({
+    baseDir: path.join(dir, 'mgr'),
+    fetch: async (url) => {
+      if (String(url).includes('loadCodeAssist')) {
+        return new Response(JSON.stringify({ currentTier: { id: 'pro-tier' } }), { status: 200 });
+      }
+      if (String(url).includes('fetchAvailableModels')) {
+        return new Response(JSON.stringify({ models: {} }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ groups: [] }), { status: 200 });
+    },
+    onStateChanged: () => { statePushCount += 1; },
+    onRefreshProgress: () => { progressPushCount += 1; }
+  });
+  t.after(() => service.stop());
+
+  const seedDir = path.join(dir, 'seed');
+  fs.mkdirSync(path.join(seedDir, 'accounts'), { recursive: true });
+  const nowSec = Math.floor(Date.now() / 1000) + 7200;
+  for (let i = 0; i < 8; i += 1) {
+    fs.writeFileSync(path.join(seedDir, 'accounts', `a${i}.json`), JSON.stringify({
+      email: `u${i}@example.com`,
+      token: { access_token: `ya29.${i}`, refresh_token: `1//rt-${i}`, expiry_timestamp: nowSec }
+    }));
+  }
+  service.importDataDir(seedDir);
+  service.updateConfig({ refreshSlideDelaySecs: 0, refreshConcurrency: 4 });
+  statePushCount = 0;
+  progressPushCount = 0;
+
+  const res = await service.refreshAccounts();
+  assert.equal(res.ok, true);
+  assert.equal(progressPushCount, 8, 'lightweight progress banner still updates per account');
+  assert.ok(statePushCount <= 4, `expected throttled full state pushes (<= 4), got ${statePushCount}`);
 });

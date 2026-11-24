@@ -192,8 +192,10 @@ function extractOAuthStateFromDb(dbPath, deps = {}) {
   }
 }
 
+const BACKUP_FRESH_MS = 60_000;
+
 /**
- * Inject OAuth token and email into state.vscdb (new unified format), preserving unrelated topic entries.
+ * Execute the SQLite ItemTable transaction for OAuth token + optional machine IDs.
  *
  * @param {string} dbPath
  * @param {{
@@ -204,11 +206,13 @@ function extractOAuthStateFromDb(dbPath, deps = {}) {
  *   isGcpTos?: boolean,
  *   projectId?: string | null,
  *   idToken?: string | null,
- *   oauthClientKey?: string | null
+ *   oauthClientKey?: string | null,
+ *   serviceMachineId?: string | null,
+ *   storageServiceMachineId?: string | null
  * }} payload
- * @param {{ sqlite?: any, createBackup?: boolean }} [deps]
+ * @param {{ sqlite?: any }} [deps]
  */
-function injectTokenToDb(dbPath, payload, deps = {}) {
+function runInjectTokenTransaction(dbPath, payload, deps = {}) {
   const sqlite = deps.sqlite || getSqlite();
   if (!sqlite || typeof sqlite.DatabaseSync !== 'function') {
     throw new Error('node:sqlite is unavailable in this runtime');
@@ -221,17 +225,6 @@ function injectTokenToDb(dbPath, payload, deps = {}) {
     else if (clientKey === 'antigravity_enterprise' || clientKey === 'antigravity_personal') isGcpTos = false;
   }
 
-  if (deps.createBackup !== false && fs.existsSync(dbPath)) {
-    const backupTmp = `${dbPath}.backup.${process.pid}.${Date.now()}.tmp`;
-    try {
-      fs.copyFileSync(dbPath, backupTmp);
-      fs.renameSync(backupTmp, `${dbPath}.backup`);
-    } catch (_) {
-      try { fs.unlinkSync(backupTmp); } catch (_) {}
-    }
-  }
-
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new sqlite.DatabaseSync(dbPath);
   let inTx = false;
   try {
@@ -288,6 +281,12 @@ function injectTokenToDb(dbPath, payload, deps = {}) {
     upsert.run('agy.onboarding.lastLoginIsGcpTos', isGcpTos ? 'true' : 'false');
     upsert.run('jetski.onboarding.lastLoginUsername', payload.email);
     upsert.run('jetski.onboarding.lastLoginIsGcpTos', isGcpTos ? 'true' : 'false');
+    if (payload.storageServiceMachineId) {
+      upsert.run('storage.serviceMachineId', String(payload.storageServiceMachineId));
+    }
+    if (payload.serviceMachineId) {
+      upsert.run('telemetry.serviceMachineId', String(payload.serviceMachineId));
+    }
     db.prepare('DELETE FROM ItemTable WHERE key = ?').run('jetskiStateSync.agentManagerInitState');
 
     db.exec('COMMIT;');
@@ -302,6 +301,104 @@ function injectTokenToDb(dbPath, payload, deps = {}) {
   } finally {
     try { db.close(); } catch (_) {}
   }
+}
+
+/**
+ * Inject OAuth token and email into state.vscdb (new unified format), preserving unrelated topic entries.
+ *
+ * @param {string} dbPath
+ * @param {{
+ *   accessToken: string,
+ *   refreshToken: string,
+ *   expiry: number,
+ *   email: string,
+ *   isGcpTos?: boolean,
+ *   projectId?: string | null,
+ *   idToken?: string | null,
+ *   oauthClientKey?: string | null,
+ *   serviceMachineId?: string | null,
+ *   storageServiceMachineId?: string | null
+ * }} payload
+ * @param {{ sqlite?: any, createBackup?: boolean }} [deps]
+ */
+function injectTokenToDb(dbPath, payload, deps = {}) {
+  const sqlite = deps.sqlite || getSqlite();
+  if (!sqlite || typeof sqlite.DatabaseSync !== 'function') {
+    throw new Error('node:sqlite is unavailable in this runtime');
+  }
+
+  if (deps.createBackup !== false && fs.existsSync(dbPath)) {
+    const backupTmp = `${dbPath}.backup.${process.pid}.${Date.now()}.tmp`;
+    try {
+      fs.copyFileSync(dbPath, backupTmp);
+      fs.renameSync(backupTmp, `${dbPath}.backup`);
+    } catch (_) {
+      try { fs.unlinkSync(backupTmp); } catch (_) {}
+    }
+  }
+
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  return runInjectTokenTransaction(dbPath, payload, deps);
+}
+
+/**
+ * Non-blocking backup + single-transaction token & machineId injection for UI switches.
+ * Offloads large `state.vscdb` file copies to libuv's threadpool and skips redundant
+ * copies when a fresh backup (< 60s old) already exists.
+ *
+ * @param {string} dbPath
+ * @param {{
+ *   accessToken: string,
+ *   refreshToken: string,
+ *   expiry: number,
+ *   email: string,
+ *   isGcpTos?: boolean,
+ *   projectId?: string | null,
+ *   idToken?: string | null,
+ *   oauthClientKey?: string | null,
+ *   serviceMachineId?: string | null,
+ *   storageServiceMachineId?: string | null
+ * }} payload
+ * @param {{ sqlite?: any, createBackup?: boolean, forceBackup?: boolean }} [deps]
+ */
+async function injectTokenToDbAsync(dbPath, payload, deps = {}) {
+  const sqlite = deps.sqlite || getSqlite();
+  if (!sqlite || typeof sqlite.DatabaseSync !== 'function') {
+    throw new Error('node:sqlite is unavailable in this runtime');
+  }
+
+  if (deps.createBackup !== false) {
+    let dbExists = false;
+    try {
+      await fs.promises.access(dbPath);
+      dbExists = true;
+    } catch (_) {}
+
+    if (dbExists) {
+      const backupPath = `${dbPath}.backup`;
+      let shouldCopy = deps.forceBackup === true;
+      if (!shouldCopy) {
+        try {
+          const st = await fs.promises.stat(backupPath);
+          shouldCopy = Date.now() - st.mtimeMs >= BACKUP_FRESH_MS;
+        } catch (_) {
+          shouldCopy = true;
+        }
+      }
+      if (shouldCopy) {
+        const backupTmp = `${dbPath}.backup.${process.pid}.${Date.now()}.tmp`;
+        try {
+          await fs.promises.copyFile(dbPath, backupTmp);
+          await fs.promises.rename(backupTmp, backupPath);
+        } catch (_) {
+          try { await fs.promises.unlink(backupTmp); } catch (_) {}
+        }
+      }
+    }
+  }
+
+  await fs.promises.mkdir(path.dirname(dbPath), { recursive: true });
+  return runInjectTokenTransaction(dbPath, payload, deps);
 }
 
 /**
@@ -340,6 +437,7 @@ module.exports = {
   getAllCandidateDbPaths,
   getDbPath,
   injectTokenToDb,
+  injectTokenToDbAsync,
   writeItemTableValue,
   writeServiceMachineId
 };

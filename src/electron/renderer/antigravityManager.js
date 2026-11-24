@@ -21,11 +21,19 @@ const state = {
   confirmDeleteId: '',
   batchDeleteConfirm: false,
   toastTimer: null,
+  searchTimer: null,
+  rafStateId: 0,
+  pendingPushedState: null,
+  stateRevision: 0,
   oauthBusy: false,
   importBusy: false,
   switchBestBusy: false,
+  switchingId: '',
+  refreshingIds: new Set(),
   refreshClickBusy: false
 };
+
+const cardCache = new Map();
 
 let nativeMaterialState = glassRenderingApi?.normalizeNativeMaterialState?.() || { type: 'transparent', reducedTransparency: false, highContrast: false };
 let nativeMaterialRevision = 0;
@@ -273,11 +281,11 @@ function iconSwitch() {
   ], 12);
 }
 
-function iconRefresh() {
+function iconRefresh(extraClass = '') {
   return makeSvgIcon([
     ['path', { d: 'M21 12a9 9 0 1 1-2.64-6.36' }],
     ['polyline', { points: '21 3 21 9 15 9' }]
-  ], 12);
+  ], 12, extraClass);
 }
 
 function iconPower() {
@@ -450,7 +458,9 @@ function renderSummaryAndControls() {
     ? t('agManager.refreshing')
     : (selectedCount > 0 ? t('agManager.refreshSelected', { count: selectedCount }) : t('agManager.refreshAll'));
   els.cancelRefreshBtn.classList.toggle('hidden', mgr.isRefreshing !== true);
-  els.switchBestBtn.disabled = state.switchBestBusy || !hasSwitchable;
+  const switchingBest = state.switchBestBusy || (mgr.isSwitching === true && !state.switchingId);
+  els.switchBestBtn.disabled = Boolean(state.switchBestBusy || state.switchingId || mgr.isSwitching || !hasSwitchable);
+  els.switchBestBtn.textContent = switchingBest ? t('agManager.switching') : t('agManager.switchBest');
   els.exportBtn.disabled = accounts.length === 0;
 
   if (selectedCount === 0) state.batchDeleteConfirm = false;
@@ -665,9 +675,74 @@ function renderQuotaGroups(acc, hasStatusMessage = false) {
   return empty;
 }
 
+function effectiveSwitchingId() {
+  return state.switchingId || state.manager?.switchingAccountId || '';
+}
+
+function isAnySwitchInFlight() {
+  return Boolean(state.switchBestBusy || state.switchingId || state.manager?.isSwitching);
+}
+
+function buildCardSignature(acc, activeSlots) {
+  const groups = Array.isArray(acc?.quota?.groups) ? acc.quota.groups : [];
+  const models = Array.isArray(acc?.quota?.models) ? acc.quota.models : [];
+  const groupsKey = groups.map((g) => (
+    `${g?.displayName || ''}:${(Array.isArray(g?.buckets) ? g.buckets : []).map((b) => (
+      `${b?.bucketId || ''}|${b?.window || ''}|${b?.remainingFraction ?? ''}|${b?.resetTime || ''}`
+    )).join(';')}`
+  )).join('/');
+  const modelsKey = models.map((m) => (
+    `${m?.name || ''}|${m?.displayName || ''}|${m?.percentage ?? ''}|${m?.resetTime || ''}`
+  )).join('/');
+  const minuteBucket = Math.floor(Date.now() / 60000);
+  const switchingId = effectiveSwitchingId();
+  return [
+    state.locale,
+    minuteBucket,
+    acc.id,
+    acc.email || '',
+    acc.name || '',
+    acc.subscriptionTier || '',
+    acc.disabled ? 1 : 0,
+    acc.disabledReason || '',
+    acc.banned ? 1 : 0,
+    acc.banInfo?.message || '',
+    acc.validationBlocked ? 1 : 0,
+    acc.validationMessage || '',
+    acc.hasToken === false ? 0 : 1,
+    acc.hasDeviceProfile ? 1 : 0,
+    acc.lastUsedAt || 0,
+    acc.quota?.lastUpdatedAt || 0,
+    acc.quota?.isForbidden ? 1 : 0,
+    acc.quota?.forbiddenReason || '',
+    activeSlots.join(','),
+    state.selectedIds.has(acc.id) ? 1 : 0,
+    state.expandedModels.has(acc.id) ? 1 : 0,
+    state.openMoreId === acc.id ? 1 : 0,
+    state.confirmDeleteId === acc.id ? 1 : 0,
+    switchingId === acc.id ? 1 : 0,
+    isAnySwitchInFlight() ? 1 : 0,
+    state.refreshingIds.has(acc.id) ? 1 : 0,
+    groupsKey,
+    modelsKey
+  ].join('\x1f');
+}
+
+function syncCachedCardSignature(accountId) {
+  const cached = cardCache.get(accountId);
+  if (!cached) return;
+  const acc = (state.manager?.accounts || []).find((a) => a.id === accountId);
+  if (!acc) return;
+  const activeSlots = Object.entries(state.manager?.activeAccounts || {})
+    .filter(([, id]) => id === acc.id)
+    .map(([slot]) => slot);
+  cached.sig = buildCardSignature(acc, activeSlots);
+}
+
 async function deleteSingleAccount(acc) {
   state.confirmDeleteId = '';
   state.openMoreId = '';
+  const revBefore = state.stateRevision;
   try {
     const res = await agmApi().deleteAccounts([acc.id]);
     if (res && res.ok === false) {
@@ -675,11 +750,13 @@ async function deleteSingleAccount(acc) {
       return;
     }
     state.selectedIds.delete(acc.id);
+    cardCache.delete(acc.id);
     showToast(t('agManager.toast.deletedCount', { count: 1 }));
   } catch (err) {
     showToast(err?.message || t('agManager.toast.actionFailed'), true);
   } finally {
-    await loadState();
+    if (state.stateRevision === revBefore) await loadState();
+    else renderAll();
   }
 }
 
@@ -688,9 +765,11 @@ function renderAccountCard(acc, activeAccounts) {
     .filter(([, id]) => id === acc.id)
     .map(([slot]) => slot);
   const isMenuOpen = state.openMoreId === acc.id;
+  const isSwitchingThis = effectiveSwitchingId() === acc.id;
+  const isRefreshingThis = state.refreshingIds.has(acc.id);
 
   const card = document.createElement('article');
-  card.className = `agm-card${activeSlots.length > 0 ? ' is-active' : ''}${acc.disabled ? ' is-disabled' : ''}${isMenuOpen ? ' has-menu-open' : ''}`;
+  card.className = `agm-card${activeSlots.length > 0 ? ' is-active' : ''}${acc.disabled ? ' is-disabled' : ''}${isMenuOpen ? ' has-menu-open' : ''}${isSwitchingThis ? ' is-switching' : ''}`;
   card.dataset.accountId = acc.id;
 
   const head = document.createElement('div');
@@ -708,6 +787,7 @@ function renderAccountCard(acc, activeAccounts) {
     if (checkbox.checked) state.selectedIds.add(acc.id);
     else state.selectedIds.delete(acc.id);
     state.batchDeleteConfirm = false;
+    syncCachedCardSignature(acc.id);
     renderSummaryAndControls();
     const visible = filteredAccounts();
     els.selectAllInput.checked = visible.length > 0 && visible.every((item) => state.selectedIds.has(item.id));
@@ -850,13 +930,16 @@ function renderAccountCard(acc, activeAccounts) {
 
   const switchBtn = document.createElement('button');
   switchBtn.type = 'button';
-  switchBtn.className = 'agm-action-btn agm-action-switch';
+  switchBtn.className = `agm-action-btn agm-action-switch${isSwitchingThis ? ' is-busy' : ''}`;
   const switchLabel = document.createElement('span');
-  switchLabel.textContent = t('agManager.switchAccount');
-  switchBtn.append(iconSwitch(), switchLabel);
-  switchBtn.disabled = !acc.hasToken;
+  switchLabel.textContent = isSwitchingThis ? t('agManager.switching') : t('agManager.switchAccount');
+  switchBtn.append(isSwitchingThis ? iconRefresh('agm-spin') : iconSwitch(), switchLabel);
+  switchBtn.disabled = !acc.hasToken || isAnySwitchInFlight();
   switchBtn.addEventListener('click', async () => {
-    switchBtn.disabled = true;
+    if (isAnySwitchInFlight()) return;
+    state.switchingId = acc.id;
+    renderAll();
+    const revBefore = state.stateRevision;
     try {
       const res = await agmApi().switchAccount(acc.id, els.targetClient.value);
       if (res?.ok) {
@@ -867,19 +950,24 @@ function renderAccountCard(acc, activeAccounts) {
     } catch (err) {
       showToast(err?.message || t('agManager.toast.switchFailed'), true);
     } finally {
-      await loadState();
+      state.switchingId = '';
+      if (state.stateRevision === revBefore) await loadState();
+      else renderAll();
     }
   });
 
   const refreshBtn = document.createElement('button');
   refreshBtn.type = 'button';
-  refreshBtn.className = 'agm-action-btn';
+  refreshBtn.className = `agm-action-btn${isRefreshingThis ? ' is-busy' : ''}`;
   const refreshLabel = document.createElement('span');
-  refreshLabel.textContent = t('agManager.refreshOne');
-  refreshBtn.append(iconRefresh(), refreshLabel);
-  refreshBtn.disabled = !acc.hasToken;
+  refreshLabel.textContent = isRefreshingThis ? t('agManager.refreshing') : t('agManager.refreshOne');
+  refreshBtn.append(iconRefresh(isRefreshingThis ? 'agm-spin' : ''), refreshLabel);
+  refreshBtn.disabled = !acc.hasToken || isRefreshingThis;
   refreshBtn.addEventListener('click', async () => {
-    refreshBtn.disabled = true;
+    if (state.refreshingIds.has(acc.id)) return;
+    state.refreshingIds.add(acc.id);
+    renderAccounts();
+    const revBefore = state.stateRevision;
     try {
       const res = await agmApi().refreshAccount(acc.id);
       if (!res?.ok) showToast(res?.error || t('agManager.toast.refreshFailed'), true);
@@ -887,7 +975,9 @@ function renderAccountCard(acc, activeAccounts) {
     } catch (err) {
       showToast(err?.message || t('agManager.toast.refreshFailed'), true);
     } finally {
-      await loadState();
+      state.refreshingIds.delete(acc.id);
+      if (state.stateRevision === revBefore) await loadState();
+      else renderAll();
     }
   });
 
@@ -899,6 +989,7 @@ function renderAccountCard(acc, activeAccounts) {
   toggleDisableBtn.append(iconPower(), toggleLabel);
   toggleDisableBtn.addEventListener('click', async () => {
     toggleDisableBtn.disabled = true;
+    const revBefore = state.stateRevision;
     try {
       const res = await agmApi().setAccountDisabled(acc.id, !acc.disabled);
       if (res && res.ok === false) {
@@ -907,7 +998,8 @@ function renderAccountCard(acc, activeAccounts) {
     } catch (err) {
       showToast(err?.message || t('agManager.toast.actionFailed'), true);
     } finally {
-      await loadState();
+      if (state.stateRevision === revBefore) await loadState();
+      else renderAll();
     }
   });
 
@@ -1059,7 +1151,37 @@ function renderAccounts() {
     return;
   }
   const active = state.manager?.activeAccounts || {};
-  els.accountList.replaceChildren(...list.map((acc) => renderAccountCard(acc, active)));
+  const nextCards = list.map((acc) => {
+    const activeSlots = Object.entries(active)
+      .filter(([, id]) => id === acc.id)
+      .map(([slot]) => slot);
+    const sig = buildCardSignature(acc, activeSlots);
+    const cached = cardCache.get(acc.id);
+    if (cached && cached.sig === sig) {
+      return cached.el;
+    }
+    const el = renderAccountCard(acc, active);
+    cardCache.set(acc.id, { sig, el });
+    return el;
+  });
+
+  if (els.accountList.firstElementChild?.classList?.contains('agm-empty')) {
+    els.accountList.replaceChildren();
+  }
+  const nextSet = new Set(nextCards);
+  for (const child of Array.from(els.accountList.children)) {
+    if (!nextSet.has(child)) {
+      child.remove();
+    }
+  }
+  for (let i = 0; i < nextCards.length; i += 1) {
+    const desired = nextCards[i];
+    const currentAtIdx = els.accountList.children[i];
+    if (currentAtIdx !== desired) {
+      els.accountList.insertBefore(desired, currentAtIdx || null);
+    }
+  }
+
   els.selectAllInput.checked = list.every((acc) => state.selectedIds.has(acc.id));
   if (state.openMoreId) positionOpenMoreMenu();
 }
@@ -1138,12 +1260,23 @@ function openDeviceDialog(acc) {
 
 function applyManagerState(nextState) {
   state.manager = nextState;
+  state.stateRevision = (state.stateRevision || 0) + 1;
   const validIds = new Set((state.manager?.accounts || []).map((a) => a.id));
   for (const id of [...state.selectedIds]) {
     if (!validIds.has(id)) state.selectedIds.delete(id);
   }
   for (const id of [...state.expandedModels]) {
     if (!validIds.has(id)) state.expandedModels.delete(id);
+  }
+  if (state.refreshingIds) {
+    for (const id of [...state.refreshingIds]) {
+      if (!validIds.has(id)) state.refreshingIds.delete(id);
+    }
+  }
+  if (typeof cardCache !== 'undefined') {
+    for (const id of [...cardCache.keys()]) {
+      if (!validIds.has(id)) cardCache.delete(id);
+    }
   }
   if (state.openMoreId && !validIds.has(state.openMoreId)) state.openMoreId = '';
   if (state.confirmDeleteId && !validIds.has(state.confirmDeleteId)) state.confirmDeleteId = '';
@@ -1155,12 +1288,28 @@ function applyManagerState(nextState) {
 }
 
 async function loadState() {
+  if (state.rafStateId) {
+    cancelAnimationFrame(state.rafStateId);
+    state.rafStateId = 0;
+    state.pendingPushedState = null;
+  }
   try {
     const nextState = await agmApi().getState();
     applyManagerState(nextState);
   } catch (err) {
     showToast(err?.message || t('agManager.toast.actionFailed'), true);
   }
+}
+
+function schedulePushedManagerState(nextState) {
+  state.pendingPushedState = nextState;
+  if (state.rafStateId) return;
+  state.rafStateId = requestAnimationFrame(() => {
+    state.rafStateId = 0;
+    const pending = state.pendingPushedState;
+    state.pendingPushedState = null;
+    if (pending) applyManagerState(pending);
+  });
 }
 
 async function persistConfigPatch(patch) {
@@ -1212,8 +1361,10 @@ function wireEvents() {
   });
 
   els.switchBestBtn.addEventListener('click', async () => {
+    if (isAnySwitchInFlight()) return;
     state.switchBestBusy = true;
-    els.switchBestBtn.disabled = true;
+    renderAll();
+    const revBefore = state.stateRevision;
     try {
       const res = await agmApi().switchBestAccount(els.targetClient.value);
       if (res?.ok) {
@@ -1225,13 +1376,15 @@ function wireEvents() {
       showToast(err?.message || t('agManager.toast.switchFailed'), true);
     } finally {
       state.switchBestBusy = false;
-      await loadState();
+      if (state.stateRevision === revBefore) await loadState();
+      else renderAll();
     }
   });
 
   els.refreshNowBtn.addEventListener('click', async () => {
     state.refreshClickBusy = true;
     renderSummaryAndControls();
+    const revBefore = state.stateRevision;
     try {
       const ids = state.selectedIds.size > 0 ? Array.from(state.selectedIds) : [];
       const res = ids.length > 0 ? await agmApi().refreshAccounts(ids) : await agmApi().refreshAll();
@@ -1245,7 +1398,8 @@ function wireEvents() {
     } finally {
       state.refreshClickBusy = false;
       hideProgressBar();
-      await loadState();
+      if (state.stateRevision === revBefore) await loadState();
+      else renderAll();
     }
   });
 
@@ -1351,8 +1505,21 @@ function wireEvents() {
   });
 
   els.searchInput.addEventListener('input', () => {
-    state.search = els.searchInput.value;
-    renderAccounts();
+    const nextSearch = els.searchInput.value;
+    if (state.searchTimer) {
+      clearTimeout(state.searchTimer);
+      state.searchTimer = null;
+    }
+    if (!nextSearch) {
+      state.search = '';
+      renderAccounts();
+      return;
+    }
+    state.searchTimer = setTimeout(() => {
+      state.searchTimer = null;
+      state.search = els.searchInput.value;
+      renderAccounts();
+    }, 100);
   });
 
   for (const chip of els.filterChips) {
@@ -1647,7 +1814,7 @@ function wireEvents() {
   });
 
   registerCleanup(agmApi().onState?.((nextState) => {
-    applyManagerState(nextState);
+    schedulePushedManagerState(nextState);
   }));
   registerCleanup(agmApi().onRefreshProgress?.((p) => {
     if (!p || !p.total) return;
@@ -1678,15 +1845,16 @@ async function boot() {
     }));
   }
   const rev = nativeMaterialRevision;
-  try {
-    const initialMat = await window.tokenMonitor.getNativeMaterialState?.();
-    if (rev === nativeMaterialRevision && initialMat) {
-      nativeMaterialState = glassRenderingApi.normalizeNativeMaterialState(initialMat);
-    }
-  } catch (_) {}
+  const [initialMat, fetchedSettings, initialManagerState] = await Promise.all([
+    Promise.resolve(window.tokenMonitor.getNativeMaterialState?.()).catch(() => null),
+    Promise.resolve(window.tokenMonitor.getSettings?.()).catch(() => ({})),
+    Promise.resolve(agmApi()?.getState?.()).catch(() => null)
+  ]);
+  if (rev === nativeMaterialRevision && initialMat) {
+    nativeMaterialState = glassRenderingApi.normalizeNativeMaterialState(initialMat);
+  }
 
-  let settings = {};
-  try { settings = await window.tokenMonitor.getSettings(); } catch (_) {}
+  const settings = fetchedSettings || {};
   state.settings = settings;
   state.locale = i18n.resolveLocale(settings.locale || settings.language, navigator.languages);
   state.flat = settings.dashboardFlat === true;
@@ -1713,6 +1881,15 @@ async function boot() {
       clearTimeout(state.toastTimer);
       state.toastTimer = null;
     }
+    if (state.searchTimer) {
+      clearTimeout(state.searchTimer);
+      state.searchTimer = null;
+    }
+    if (state.rafStateId) {
+      cancelAnimationFrame(state.rafStateId);
+      state.rafStateId = 0;
+      state.pendingPushedState = null;
+    }
     if (state.oauthBusy) void agmApi()?.cancelOAuthLogin?.();
     for (const fn of cleanupFns.splice(0)) {
       try { fn(); } catch (_) {}
@@ -1722,7 +1899,8 @@ async function boot() {
   applyAppearance(settings);
   applyTranslations();
   wireEvents();
-  await loadState();
+  if (initialManagerState) applyManagerState(initialManagerState);
+  else await loadState();
   agmApi().windowReady();
 }
 
