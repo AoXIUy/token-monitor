@@ -61,10 +61,12 @@ function blockingWriteFs() {
       if (!blockWrites || !filename.endsWith('.tmp')) return handle;
       return new Proxy(handle, {
         get(target, property, receiver) {
-          if (property === 'sync' && !blocked) {
+          if (property === 'sync') {
             return async (...syncArgs) => {
-              blocked = true;
-              await writeGate;
+              if (!blocked) {
+                blocked = true;
+                await writeGate;
+              }
               return target.sync(...syncArgs);
             };
           }
