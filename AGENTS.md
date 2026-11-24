@@ -7,12 +7,15 @@ This file provides shared project guidance for coding agents that load it. Read 
 ```bash
 npm start          # launch the Electron widget (= npm run widget / npm run dev)
 npm run hub        # start the Node hub on port 17321
+npm run mcp        # start the standalone stdio MCP server for usage reports & queries
 npm run agent      # start the headless collector→hub agent
 npm run agent:once # one-shot collect+post, then exit (useful for cron/launchd)
 npm test           # run the node:test suite (node --test "tests/**/*.test.js")
 npm run lint       # ESLint flat config (eslint.config.js)
 npm run typecheck  # opt-in JavaScript type checking (no emit)
 npm run verify     # lint + typecheck + test (single local entry point)
+npm run sync:worker      # vendor src/shared/ closure into worker/src/shared/
+npm run update:hub-build # update src/shared/hubBuildRegistry.json and run sync:worker
 ```
 
 Automated verification is `npm run verify`; CI (`.github/workflows/ci.yml`) runs lint + typecheck + test on push/PR across Node 22 & 24. The toolchain (ESLint 10 + the node:test glob) needs Node 22.13+ and DSH session decoding needs `zlib.zstdDecompressSync` (Node 22.15+), which is why `engines.node` is `>=22.15.0`.
@@ -31,6 +34,8 @@ To dry-run the agent without posting: `npm run agent:once -- --dry-run`.
 | adding or renaming a limits provider | [Limits-provider checklist](docs/providers/README.md#adding-a-limits-provider) |
 | watch roots, event handling or targeted refreshes | [Watching](docs/architecture.md#watching), [partition invariants](docs/providers/README.md#partition-invariants), and the matching provider note's source rules |
 | the device wire shape or Hub endpoints | `docs/API.md` |
+| this fork's Node-Hub-only extensions (online conversations, realtime rates, approval alerts, reports & MCP, AI analysis & OpenClaw WeChat, Antigravity Account Manager snapshots) | `docs/architecture.md#entry-points-and-the-worker-boundary`, `docs/API.md`, and the matching guide (`docs/session-conversations.md`, `docs/session-realtime.md`, `docs/approval-alerts.md`, `docs/reports-mcp.md`, `docs/openclaw-wechat.md`) |
+| this fork's desktop release packaging, versioning, or GitHub release workflow | `docs/releasing-fork.md` |
 
 Before changing runtime behavior, identify the relevant entry point, authoritative implementation, and affected callers. Scale investigation to the task; resolve any mismatch with documented contracts before editing.
 
@@ -52,6 +57,10 @@ Each line is a constraint that a change elsewhere has broken before, or would br
 - **Public stats stay public.** In the Worker, the subscription version stamp and sync-settings revisions are added by `statsWithSubscriptionVersion()` on authenticated paths only; folding them into `getStats()` leaks through the unauthenticated public route. The Node hub has no public route, so its `getStats()` sets both directly. → `docs/architecture.md` (Subscriptions)
 - **Balance quotas.** Key money display off `windows[].metric === 'credits'` through `limits/balanceDisplay.js`, never a provider whitelist; display-only percentages stay out of the wire shape. → `docs/architecture.md` (Balance quotas)
 - **Compatibility surfaces.** Settings keys, env vars, CLI flags, Hub endpoints and the wire shape have external users. Treat changes as breaking and plan the migration.
+- **Node-Hub-only fork extensions and Hub build closure.** Online conversations, approval alerts, usage reports & `/api/mcp`, AI analysis & OpenClaw integrations, unified `/api/query/*`, and Antigravity Account Manager snapshots run only on Node Hub / Desktop Local Bridge — never add them to Cloudflare Worker. Every module statically imported by `src/hub/server.js` outside `CORE_SOURCE_FILES` must be registered in `scripts/hub-build-manifest.js` (`NODE_RUNTIME_SOURCE_FILES`), followed by `npm run update:hub-build`; `tests/shared/hubBuild.test.js` enforces the exact dependency closure.
+- **Packaged Electron assets (`build.files`).** Runtime assets loaded by the packaged desktop app (such as `src/mcp/**/*`, `plugins/quota-alerts/evaluator.cjs`, and `skills/openclaw-token-monitor/**/*`) must be explicitly included in `package.json` → `build.files`. Local `npm start` reads from the worktree and hides missing `app.asar` entries.
+- **Antigravity Account Manager isolation.** The standalone Account Manager (`src/electron/antigravityManager/`, `src/electron/renderer/antigravityManager.*`) stays independent from the usage/limits collectors; OAuth tokens, system keyring entries, encrypted `tokens.enc`, and device profiles never leave the desktop host. Only sanitized, credential-free pool snapshots (`src/shared/antigravityManagerProtocol.js`, ≤ 512 KiB) publish to `PUT /api/antigravity-manager/snapshot` and must never enter `DeviceRecord`, Worker, or public stats.
+- **Fork release template and updater assertions.** `tests/shared/appUpdater.test.js` and `tests/shared/releaseArtifactNames.test.js` assert that `src/shared/appUpdater.js` derives `AoXIUy/token-monitor` from `package.json` → `repository.url` and that `.github/RELEASE_TEMPLATE.md` carries 5 aligned `<!-- app-update-notes:<locale>:start/end -->` blocks (`en`, `zh`, `zh-TW`, `ko`, `ja` with matching categories/item counts and no trailing PR references) plus one `Full Changelog` link matching `AoXIUy/token-monitor/compare/v<prev>...v<version>`.
 
 ## Conventions
 
@@ -93,3 +102,54 @@ Never add an AI `Co-Authored-By` trailer. **Do** keep the genuine human `Co-auth
 ### Authoring GitHub content via `gh`
 
 Write PR/issue bodies and comments to a file and pass it, rather than inline heredocs: `gh issue comment --body-file <path>`, `gh api -X PATCH … -F body=@<path>`. Inline `--body "$(cat <<EOF … EOF)"` mangles backtick escaping and renders as a literal `` \` `` in GitHub markdown. Same spirit for prose: write paragraphs as continuous lines and let GitHub wrap them — don't hard-wrap at 80 columns.
+
+## Fork workflow (`AoXIUy/token-monitor`)
+
+### Repository topology and version lines
+
+- `origin` is [AoXIUy/token-monitor](https://github.com/AoXIUy/token-monitor) (the maintained fork); `upstream` is [Javis603/token-monitor](https://github.com/Javis603/token-monitor) (the official upstream). The companion read-only Android client lives in [AoXIUy/token-monitor-For-Android](https://github.com/AoXIUy/token-monitor-For-Android) (sibling workspace `../token-monitor-For-Android`).
+- Treat `upstream` as a **one-way sync** into `origin/main`. Never push fork branches or tags to `upstream` or open upstream PRs for fork changes unless the user explicitly asks.
+- Fork versions (`v0.91.0` onward) advance monotonically on `origin` for both fork features and upstream merges, so the fork version stays strictly higher than official upstream tags. Never reset `package.json` or `worker/package.json` back to an official upstream tag's version during a merge. Keep the original MIT copyright notice.
+
+### Syncing official upstream releases
+
+1. Verify `git remote -v`, branch (`main`), and a clean worktree, then fetch both remotes and tags:
+   ```bash
+   git fetch upstream --tags
+   git fetch origin --tags
+   ```
+2. Inspect the delta between the last merged upstream tag and the target official tag (`git log --oneline <prev-upstream-tag>..<target-upstream-tag>`), reviewing changes to `src/shared/`, Hub/Worker wire contracts, collectors, providers, and renderer surfaces.
+3. Merge the official tag onto `main` with a merge commit (preserving upstream commit history):
+   ```bash
+   git merge --no-ff <target-upstream-tag> -m "chore(upstream): merge official vX.Y.Z"
+   ```
+4. Protect fork-owned files and extensions during conflict resolution:
+   - `package.json`: keep the current fork `version` (until the release commit), `repository`/`homepage`/`bugs` pointing to `AoXIUy/token-monitor`, fork scripts (`mcp`, `dist:linux:appimage`), fork `build.files` (`src/mcp/**/*`, `plugins/quota-alerts/evaluator.cjs`, `skills/openclaw-token-monitor/**/*`), `build.publish` (`AoXIUy/token-monitor`), `build.win.verifyUpdateCodeSignature: false` (no SignPath `publisherName`), `build.linux` (`deb` target + fork `maintainer`), and `build.appImage`.
+   - `worker/package.json` and lockfiles: keep the fork version line; never hand-edit `worker/src/shared/`.
+   - `src/shared/appUpdater.js`: preserve dynamic repo resolution from `package.json` → `repository.url`.
+   - `.github/workflows/release.yml`, `.github/RELEASE_TEMPLATE.md`, the fork summary banner in `README.md`, and `AGENTS.md`: preserve fork release automation and guidance.
+   - `scripts/hub-build-manifest.js`, `src/hub/server.js`, `src/electron/main.js`, `src/electron/preload.js`, `src/electron/renderer/*`, and `src/shared/providers/antigravity/*`: retain all fork subsystems (online conversations, live session rates, approval alerts, reports & MCP, AI analysis & OpenClaw bridge/provisioner, Antigravity Account Manager, `<root>/daemon/*.json` PID discovery, and `antigravity/sessionActivity.js`).
+5. Run `npm run update:hub-build` once after all Hub/shared changes settle (updates `src/shared/hubBuildRegistry.json` and syncs `worker/src/shared/`). Confirm `npm run sync:worker && git diff --exit-code worker/src/shared` is clean.
+6. Run `npm run verify` and `git diff --check`. When plugin or Electron renderer surfaces changed, also run `npm run verify:plugins` or targeted UI verification scripts as appropriate.
+
+### Desktop fork versioning and GitHub release procedure
+
+Read `docs/releasing-fork.md` before preparing or repairing a release. This fork publishes unsigned **Windows x64** (`Token-Monitor-Setup-<version>.exe` installer + `Token-Monitor-<version>.exe` portable), **Linux amd64** `.deb` (`Token-Monitor-<version>-amd64.deb`), and **Linux x86_64** `.AppImage` (`Token-Monitor-<version>-x86_64.AppImage`). It does not publish macOS artifacts or use SignPath/Apple signing secrets.
+
+1. Fetch `origin/main` and tags, inspect published GitHub Releases on `AoXIUy/token-monitor`, and pick the next unused stable `major.minor.patch` version (patch for fixes, minor for compatible features or upstream syncs). Never move or delete an existing tag or overwrite a published release.
+2. Land feature/upstream-sync commits first, then prepare a dedicated release commit (`chore(release): prepare <version>`) updating these files together:
+   - `package.json` and `package-lock.json` (`version`)
+   - `worker/package.json` and `worker/package-lock.json` (kept aligned with root `version`; product version is excluded from the Worker build hash)
+   - `README.md` (update the fork banner link to the new release notes)
+   - `docs/releases/<version>.md` (reviewed EN + ZH notes containing `<!-- app-update-notes:en:start/end -->` and `<!-- app-update-notes:zh:start/end -->` blocks and `AoXIUy/token-monitor` download links)
+   - `.github/RELEASE_TEMPLATE.md` (update download links, `Full Changelog` range `v<prev>...v<version>`, and all 5 localized `app-update-notes` blocks so `appUpdater.test.js` and `releaseArtifactNames.test.js` pass)
+3. Run `npm run verify` and `git diff --check`, commit, and push `main`.
+4. Trigger **exactly one** release route: **Actions → Release → Run workflow → main** (`workflow_dispatch`), or create and push the matching `v<version>` tag at that exact commit. Manual releases must run from `main`.
+5. Wait for `.github/workflows/release.yml` to finish. It verifies version/tag/notes and runs `npm run verify` on Node 22 & 24, bundles vendored `tokscale`, builds Windows x64, Linux `.deb`, and Linux `.AppImage` on separate runners (isolating Debian `package-type` from AppImage), merges `latest-linux.yml` via `scripts/merge-linux-updater-metadata.js`, checks unsigned Windows executables, Debian package identity, packaged `app-update.yml`/`app.asar` updater repo (`AoXIUy/token-monitor`), and artifact names, generates `SHA256SUMS` and `release-metadata.json`, uploads everything to a source-matched draft, verifies every asset size, and publishes as latest.
+6. After publication, verify the public release page and assets: tag, `release-metadata.json` commit SHA, `SHA256SUMS`, `latest.yml` / `latest-linux.yml`, and downloadable installers. Static/CI checks do not replace real Windows/Linux desktop acceptance when UI/OS behavior changed.
+
+### Coordinating with the Android client (`AoXIUy/token-monitor-For-Android`)
+
+- Whenever this repo merges an official upstream tag or adds/modifies read-only Hub endpoints (`GET /api/stats`, `/api/subscriptions`, `/api/sync/settings/*`, `/api/session-conversations`, `/api/approval-alerts`, `/api/reports*`, `/api/antigravity-manager`) or shared calculation modules under `src/shared/`, assess the follow-up adaptation needed in `../token-monitor-For-Android`.
+- Keep shared display/calculation modules consumed by Android (`clientCatalog.js`, `compactTokens.js`, `currency.js`, `deviceKind.js`, `limits/balanceDisplay.js`, `limits/windowLabels.js`, `limits/windowText.js`, `limits/historyModel.js`, `sessionActivityProviders.js`, `sessionLive.js`, `sessionRealtime.js`) free of Node/Electron built-ins and compatible with both browser globals and CommonJS.
+- Preserve backward compatibility on Hub read endpoints and keep the Android boundary strictly read-only (`GET`-only, zero raw secrets or write mutations); optional fork endpoints must degrade cleanly (such as HTTP `404` on older Hubs or Cloudflare Worker).
