@@ -2,7 +2,7 @@
    <strong>EN</strong> | <a href="./README.zh-CN.md">简</a> | <a href="./README.zh-TW.md">繁</a> | <a href="./README.ko.md">KO</a> | <a href="./README.ja.md">JA</a> | <a href="./README.pt-BR.md">PT</a>
 </p>
 
-> This fork adds [online Antigravity / Codex conversations for Android](docs/session-conversations.md) (read only when requested and never persisted by the Hub), [live session output rates](docs/session-realtime.md), optional non-blocking [Codex / Antigravity approval alerts](docs/approval-alerts.md) for Android, [daily/weekly/monthly usage & project analysis reports with MCP integration](docs/reports-mcp.md), and [third-party AI API report analysis & deep bidirectional OpenClaw integration](docs/openclaw-wechat.md) (event-driven pushes, expanded data queries, MCP tools/resources/prompts, and Desktop `local`-mode loopback bridge). See [release setup](docs/releasing-fork.md) and [0.104.0 notes](docs/releases/0.104.0.md).
+> **AI-Assisted Project:** This maintained fork ([AoXIUy/token-monitor](https://github.com/AoXIUy/token-monitor)) is built on top of the official upstream [Javis603/token-monitor](https://github.com/Javis603/token-monitor) through AI-assisted design and development, with human review and automated test verification. It adds a standalone [Antigravity Account Manager](src/electron/antigravityManager/index.js) with sanitized Hub snapshot sync for the companion Android client [AoXIUy/token-monitor-For-Android](https://github.com/AoXIUy/token-monitor-For-Android), [online Antigravity / Codex conversations for Android](docs/session-conversations.md) (read only when requested and never persisted by the Hub), [live session output rates](docs/session-realtime.md), optional non-blocking [Codex / Antigravity approval alerts](docs/approval-alerts.md) for Android, [daily/weekly/monthly usage & project analysis reports with MCP integration](docs/reports-mcp.md), and [third-party AI API report analysis & deep bidirectional OpenClaw integration](docs/openclaw-wechat.md) (event-driven pushes, expanded data queries, MCP tools/resources/prompts, and Desktop `local`-mode loopback bridge). See [release setup](docs/releasing-fork.md) and [0.104.0 notes](docs/releases/0.104.0.md).
 
 <div align="center">
     <img src=".github/assets/app.png" alt="Token Monitor logo" width="120">
@@ -21,6 +21,7 @@
     <img src="https://img.shields.io/badge/Linux-x64-64748b?style=flat-square&logo=linux&logoColor=white" alt="Linux x64" />
     <a href="https://discord.gg/HmdNVVvw5P"><img src="https://img.shields.io/discord/1344259784219689031?color=5865F2&label=Discord&logo=discord&logoColor=white&style=flat-square" alt="Discord"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-A855F7?style=flat-square" alt="License: MIT" /></a>
+    <img src="https://img.shields.io/badge/AI--Assisted-Project-8B5CF6?style=flat-square" alt="AI-Assisted Project" />
 </p>
 
 <p align="center">
@@ -490,10 +491,15 @@ Token Monitor processes usage logs locally and sends no analytics or telemetry t
 
 Issues and PRs are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md); project conventions, architecture notes, and the command reference live in [AGENTS.md](AGENTS.md).
 
-## Acknowledgments
+## Acknowledgments & Referenced Open-Source Projects
 
+- [Javis603/token-monitor](https://github.com/Javis603/token-monitor) — Official upstream desktop app, collectors, Hub/Worker sync protocol, and shared modules.
 - [tokscale](https://github.com/junhoyeo/tokscale) for log parsing and token accounting.
 - [CodexBar](https://github.com/steipete/CodexBar) for AI Tool Limits research.
+- [lbjlaq/Antigravity-Manager](https://github.com/lbjlaq/Antigravity-Manager) — Reference for the standalone Antigravity Account Manager (quota polling, 403/validation classification, Classic / IDE / AGY CLI / ACP account switching, isolated device fingerprint profiles, and `~/.antigravity_tools` / JSON import-export compatibility).
+- [farion1231/cc-switch](https://github.com/farion1231/cc-switch) — Reference for Antigravity (`agy.rs`) and Codex (`codex.rs`) local transcript/rollout parsing format (without bundling its runtime dependencies or reading its credentials).
+- [openclaw/openclaw](https://github.com/openclaw/openclaw) — OpenClaw Gateway, WeChat channel plugin (`@tencent-weixin/openclaw-weixin`), Skills, and MCP ecosystem for bidirectional WeChat notifications and queries.
+- [AoXIUy/token-monitor-For-Android](https://github.com/AoXIUy/token-monitor-For-Android) — Companion read-only Android client for this fork.
 - [Code signing policy](docs/code-signing.md): Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
 
 ## License

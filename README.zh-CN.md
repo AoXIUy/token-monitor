@@ -1,6 +1,9 @@
 <p align="right">
    <a href="./README.md">EN</a> | <strong>简</strong> | <a href="./README.zh-TW.md">繁</a> | <a href="./README.ko.md">KO</a> | <a href="./README.ja.md">JA</a> | <a href="./README.pt-BR.md">PT</a>
 </p>
+
+> **AI 辅助开发项目（AI-Assisted Project）：** 本维护分支（[AoXIUy/token-monitor](https://github.com/AoXIUy/token-monitor)）基于官方上游 [Javis603/token-monitor](https://github.com/Javis603/token-monitor)，由 AI 辅助设计与开发、并经人工审阅与自动化测试验证。本分支新增了独立 [Antigravity 账号管理](src/electron/antigravityManager/index.js) 与面向配套安卓只读客户端 [AoXIUy/token-monitor-For-Android](https://github.com/AoXIUy/token-monitor-For-Android) 的 Hub 脱敏快照同步、[安卓端在线 Antigravity / Codex 对话查询](docs/session-conversations.md)（仅在请求时读取且 Hub 不持久化）、[实时会话输出速率](docs/session-realtime.md)、可选非阻塞式 [Codex / Antigravity 审批提醒](docs/approval-alerts.md)、[日/周/月项目分析报告与 MCP 集成](docs/reports-mcp.md)，以及[第三方 AI API 报告分析与 OpenClaw 微信双向集成](docs/openclaw-wechat.md)（事件主动推送、扩展数据查询、MCP 工具/资源/提示词与桌面端 `local` 模式回环桥接）。详见[分支发布说明](docs/releasing-fork.md)与 [0.104.0 更新日志](docs/releases/0.104.0.md)。
+
 <div align="center">
     <img src=".github/assets/app.png" alt="Token Monitor logo" width="120">
     <h1>Token Monitor</h1>
@@ -18,6 +21,7 @@
     <img src="https://img.shields.io/badge/Linux-x64-64748b?style=flat-square&logo=linux&logoColor=white" alt="Linux x64" />
     <a href="https://discord.gg/HmdNVVvw5P"><img src="https://img.shields.io/discord/1344259784219689031?color=5865F2&label=Discord&logo=discord&logoColor=white&style=flat-square" alt="Discord"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-A855F7?style=flat-square" alt="许可证：MIT" /></a>
+    <img src="https://img.shields.io/badge/AI--Assisted-AI%20%E8%BE%85%E5%8A%A9%E5%BC%80%E5%8F%91-8B5CF6?style=flat-square" alt="AI 辅助开发项目" />
 </p>
 
 <p align="center">
@@ -491,10 +495,15 @@ Token Monitor 在本地处理使用日志，不会向项目维护者发送分析
 
 欢迎提交 Issue 和 PR。请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)；项目规范、架构说明和命令参考都在 [AGENTS.md](AGENTS.md) 中。
 
-## 致谢
+## 致谢与参考开源项目
 
+- [Javis603/token-monitor](https://github.com/Javis603/token-monitor) — 官方上游桌面应用、采集器、Hub / Worker 同步协议与共享计算模块。
 - [tokscale](https://github.com/junhoyeo/tokscale) 提供日志解析与 Token 计算。
 - [CodexBar](https://github.com/steipete/CodexBar) 提供 AI 工具额度的研究参考。
+- [lbjlaq/Antigravity-Manager](https://github.com/lbjlaq/Antigravity-Manager) — 独立 Antigravity 账号管理器的重要参考（配额轮询、403 / 验证状态分类、Classic / IDE / AGY CLI / ACP 账号切换、独立设备指纹档案及 `~/.antigravity_tools` / JSON 导入导出兼容）。
+- [farion1231/cc-switch](https://github.com/farion1231/cc-switch) — Antigravity（`agy.rs`）与 Codex（`codex.rs`）本地对话/rollout 日志解析格式参考（不引入其运行时依赖，也不读取其凭据）。
+- [openclaw/openclaw](https://github.com/openclaw/openclaw) — OpenClaw Gateway、微信通道插件（`@tencent-weixin/openclaw-weixin`）、Skills 与 MCP 生态，用于微信双向通知与用量追问。
+- [AoXIUy/token-monitor-For-Android](https://github.com/AoXIUy/token-monitor-For-Android) — 本分支配套的 Android 只读客户端。
 - [代码签名政策](docs/code-signing.md)： 免费代码签名由 [SignPath.io](https://signpath.io/) 提供，证书由 [SignPath Foundation](https://signpath.org/) 提供。
 
 ## 许可证
