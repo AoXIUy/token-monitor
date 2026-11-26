@@ -7,6 +7,7 @@ const keyring = require('./keyring');
 const fileCredentials = require('./fileCredentials');
 const deviceProfile = require('./deviceProfile');
 const processManager = require('./processManager');
+const autoSwitch = require('./autoSwitch');
 
 /**
  * Target environment resolver matching Antigravity-Manager integration.rs.
@@ -571,43 +572,15 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', store,
 }
 
 /**
- * Score and pick the best available account (Gemini + Claude average remaining fraction, tier tiebreaker).
+ * Score and pick the best available account (supports automatic quota scoring and custom weight priority).
  * @param {Array<Record<string, any>>} accounts
+ * @param {Parameters<typeof autoSwitch.selectReplacementAccount>[1]} [options]
  */
-function pickBestAccount(accounts) {
-  const candidates = (Array.isArray(accounts) ? accounts : []).filter((a) => (
-    a && a.hasToken !== false && !a.disabled && !a.banned && !a.validationBlocked && !a.quota?.isForbidden
-  ));
-  if (candidates.length === 0) return null;
-
-  /** @type {Record<string, number>} */
-  const tierRank = { ULTRA: 4, PRO: 3, ENTERPRISE: 2, FREE: 1, UNKNOWN: 0 };
-
-  /** @param {Record<string, any>} acc */
-  function scoreAccount(acc) {
-    const groups = Array.isArray(acc?.quota?.groups) ? acc.quota.groups : [];
-    const models = Array.isArray(acc?.quota?.models) ? acc.quota.models : [];
-    if (groups.length > 0) {
-      const vals = groups.flatMap((/** @type {any} */ g) => {
-        const buckets = Array.isArray(g?.buckets) ? g.buckets : [];
-        if (buckets.length === 0) return [];
-        const minRf = Math.min(...buckets.map((/** @type {any} */ b) => Number(b?.remainingFraction ?? 0)));
-        return [Math.max(0, Math.min(1, minRf)) * 100];
-      });
-      if (vals.length > 0) return vals.reduce((/** @type {number} */ s, /** @type {number} */ v) => s + v, 0) / vals.length;
-    }
-    if (models.length > 0) {
-      const avg = models.reduce((/** @type {number} */ s, /** @type {any} */ m) => s + Number(m?.percentage || 0), 0) / models.length;
-      return avg;
-    }
-    return 0;
+function pickBestAccount(accounts, options) {
+  if (!options) {
+    return autoSwitch.selectReplacementAccount(accounts, { skipExhaustedCheck: true });
   }
-
-  return [...candidates].sort((a, b) => {
-    const diff = scoreAccount(b) - scoreAccount(a);
-    if (Math.abs(diff) > 0.01) return diff;
-    return (tierRank[b.subscriptionTier] || 0) - (tierRank[a.subscriptionTier] || 0);
-  })[0];
+  return autoSwitch.selectReplacementAccount(accounts, options);
 }
 
 module.exports = {

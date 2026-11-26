@@ -88,7 +88,7 @@ test('antigravityManager.html exposes proper import label, localized aria-labels
   const html = readRenderer('antigravityManager.html');
   assert.match(html, /id="agmOpenImportBtn"[^>]*data-i18n="agManager\.openImport"/);
   assert.match(html, /id="agmTokenPasteInput"[^>]*data-i18n-placeholder="agManager\.tokenPastePlaceholder"/);
-  for (const id of ['agmThemeToggle', 'agmMinBtn', 'agmCloseBtn', 'agmTargetClient', 'agmRefreshMenuBtn', 'agmRefreshPopover', 'agmSearchInput', 'agmFilterChips', 'agmCloseImportDialog', 'agmCloseDeviceDialog']) {
+  for (const id of ['agmThemeToggle', 'agmMinBtn', 'agmCloseBtn', 'agmTargetClient', 'agmAutoSwitchMenuBtn', 'agmAutoSwitchPopover', 'agmRefreshMenuBtn', 'agmRefreshPopover', 'agmSearchInput', 'agmFilterChips', 'agmCloseImportDialog', 'agmCloseDeviceDialog']) {
     assert.match(html, new RegExp(`id="${id}"[^>]*data-i18n-aria-label="agManager\\.aria\\.`));
   }
   const tabMatches = [...html.matchAll(/role="tab"[^>]*aria-selected="(true|false)"[^>]*aria-controls="agmImportTab/g)];
@@ -372,4 +372,16 @@ test('antigravityManager reuses unchanged account card DOM nodes while preservin
   assert.equal(createdCount, 3);
   assert.equal(children[0], firstA1, 'unchanged card DOM node must be preserved');
   assert.notEqual(children[1], firstA2, 'updated card DOM node must be replaced');
+
+  // Updating account weight or selectionMode invalidates card signature cleanly
+  const secondA2 = children[1];
+  ctx.state.manager.accounts[0] = { ...ctx.state.manager.accounts[0], weight: 85 };
+  ctx.renderAccounts();
+  assert.equal(createdCount, 4);
+  assert.notEqual(children[0], firstA1, 'weight change must rebuild affected card');
+  assert.equal(children[1], secondA2, 'unaffected card stays cached');
+
+  ctx.state.manager.config = { selectionMode: 'weighted' };
+  ctx.renderAccounts();
+  assert.equal(createdCount, 6, 'toggling selectionMode rebuilds cards to render inline weight controls');
 });

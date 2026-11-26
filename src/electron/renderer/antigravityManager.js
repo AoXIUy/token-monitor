@@ -30,7 +30,8 @@ const state = {
   switchBestBusy: false,
   switchingId: '',
   refreshingIds: new Set(),
-  refreshClickBusy: false
+  refreshClickBusy: false,
+  lastAutoSwitchSeenAt: null
 };
 
 const cardCache = new Map();
@@ -48,6 +49,15 @@ const els = {
   runtimeMeta: document.getElementById('agmRuntimeMeta'),
   targetClient: document.getElementById('agmTargetClient'),
   switchBestBtn: document.getElementById('agmSwitchBestBtn'),
+  autoSwitchWrap: document.getElementById('agmAutoSwitchWrap'),
+  autoSwitchMenuBtn: document.getElementById('agmAutoSwitchMenuBtn'),
+  autoSwitchBtnLabel: document.getElementById('agmAutoSwitchBtnLabel'),
+  autoSwitchPopover: document.getElementById('agmAutoSwitchPopover'),
+  autoSwitchEnabledInput: document.getElementById('agmAutoSwitchEnabledInput'),
+  selectionModeSelect: document.getElementById('agmSelectionModeSelect'),
+  autoSwitchScopeSelect: document.getElementById('agmAutoSwitchScopeSelect'),
+  autoSwitchThresholdInput: document.getElementById('agmAutoSwitchThresholdInput'),
+  autoSwitchCooldownInput: document.getElementById('agmAutoSwitchCooldownInput'),
   refreshSplit: document.getElementById('agmRefreshSplit'),
   refreshNowBtn: document.getElementById('agmRefreshNowBtn'),
   refreshNowLabel: document.getElementById('agmRefreshNowLabel'),
@@ -427,6 +437,14 @@ function renderSummaryAndControls() {
   } else {
     metaParts.push(t('agManager.autoRefreshOff'));
   }
+  const autoSwitchOn = cfg.autoSwitchEnabled === true;
+  const selectionMode = cfg.selectionMode === 'weighted' ? 'weighted' : 'auto';
+  if (autoSwitchOn) {
+    metaParts.push(selectionMode === 'weighted' ? t('agManager.autoSwitchMetaWeighted') : t('agManager.autoSwitchMetaAuto'));
+  }
+  if (mgr.lastAutoSwitch?.ok && mgr.lastAutoSwitch?.toEmail) {
+    metaParts.push(t('agManager.lastAutoSwitchMeta', { email: mgr.lastAutoSwitch.toEmail }));
+  }
   if (mgr.lastRefreshAt > 0) {
     metaParts.push(`${t('agManager.lastRefresh')}: ${new Date(mgr.lastRefreshAt * 1000).toLocaleTimeString()}`);
   }
@@ -442,7 +460,35 @@ function renderSummaryAndControls() {
   }
   els.runtimeMeta.textContent = metaParts.join(' · ');
 
+  const latestAuto = mgr.lastAutoSwitch || null;
+  const latestAutoAt = Number(latestAuto?.at || 0);
+  if (state.lastAutoSwitchSeenAt === null) {
+    state.lastAutoSwitchSeenAt = latestAutoAt;
+  } else if (latestAutoAt > state.lastAutoSwitchSeenAt) {
+    state.lastAutoSwitchSeenAt = latestAutoAt;
+    if (latestAuto?.ok) {
+      showToast(t('agManager.toast.autoSwitchOk', {
+        trigger: latestAuto.triggerLabel || 'Quota',
+        email: latestAuto.toEmail || '',
+        target: latestAuto.target || 'auto'
+      }));
+    } else if (latestAuto?.error) {
+      showToast(t('agManager.toast.autoSwitchFailed', { error: latestAuto.error }), true);
+    }
+  }
+
   els.targetClient.value = cfg.defaultSwitchTarget || 'auto';
+  els.autoSwitchMenuBtn.classList.toggle('is-enabled', autoSwitchOn);
+  els.autoSwitchBtnLabel.textContent = autoSwitchOn ? t('agManager.autoSwitchBtnOn') : t('agManager.autoSwitchBtn');
+  els.autoSwitchEnabledInput.checked = autoSwitchOn;
+  els.selectionModeSelect.value = selectionMode;
+  els.autoSwitchScopeSelect.value = cfg.autoSwitchScope || 'primary';
+  if (document.activeElement !== els.autoSwitchThresholdInput) {
+    els.autoSwitchThresholdInput.value = String(cfg.autoSwitchThresholdPercent ?? 0);
+  }
+  if (document.activeElement !== els.autoSwitchCooldownInput) {
+    els.autoSwitchCooldownInput.value = String(cfg.autoSwitchCooldownSeconds || 180);
+  }
   els.startupRefreshInput.checked = cfg.startupRefresh === true;
   els.autoRefreshInput.checked = cfg.autoRefresh === true;
   if (document.activeElement !== els.intervalInput) els.intervalInput.value = String(cfg.refreshIntervalMinutes || 10);
@@ -458,8 +504,8 @@ function renderSummaryAndControls() {
     ? t('agManager.refreshing')
     : (selectedCount > 0 ? t('agManager.refreshSelected', { count: selectedCount }) : t('agManager.refreshAll'));
   els.cancelRefreshBtn.classList.toggle('hidden', mgr.isRefreshing !== true);
-  const switchingBest = state.switchBestBusy || (mgr.isSwitching === true && !state.switchingId);
-  els.switchBestBtn.disabled = Boolean(state.switchBestBusy || state.switchingId || mgr.isSwitching || !hasSwitchable);
+  const switchingBest = state.switchBestBusy || mgr.isAutoSwitching === true || (mgr.isSwitching === true && !state.switchingId);
+  els.switchBestBtn.disabled = Boolean(state.switchBestBusy || state.switchingId || mgr.isSwitching || mgr.isAutoSwitching || !hasSwitchable);
   els.switchBestBtn.textContent = switchingBest ? t('agManager.switching') : t('agManager.switchBest');
   els.exportBtn.disabled = accounts.length === 0;
 
@@ -680,7 +726,7 @@ function effectiveSwitchingId() {
 }
 
 function isAnySwitchInFlight() {
-  return Boolean(state.switchBestBusy || state.switchingId || state.manager?.isSwitching);
+  return Boolean(state.switchBestBusy || state.switchingId || state.manager?.isSwitching || state.manager?.isAutoSwitching);
 }
 
 function buildCardSignature(acc, activeSlots) {
@@ -703,6 +749,8 @@ function buildCardSignature(acc, activeSlots) {
     acc.email || '',
     acc.name || '',
     acc.subscriptionTier || '',
+    acc.weight ?? 50,
+    state.manager?.config?.selectionMode || 'auto',
     acc.disabled ? 1 : 0,
     acc.disabledReason || '',
     acc.banned ? 1 : 0,
@@ -859,6 +907,55 @@ function renderAccountCard(acc, activeAccounts) {
   if (tier === 'ULTRA') pills.appendChild(makePill('◆ ULTRA', 'tier-ultra', true));
   else if (tier === 'PRO') pills.appendChild(makePill('◆ PRO', 'tier-pro', true));
   else pills.appendChild(makePill(tier, 'muted', true));
+
+  const rawWeight = Number(acc.weight);
+  const accountWeight = Number.isFinite(rawWeight) ? Math.max(1, Math.min(100, Math.round(rawWeight))) : 50;
+  if (state.manager?.config?.selectionMode === 'weighted') {
+    const weightControl = document.createElement('label');
+    weightControl.className = 'agm-weight-control';
+    const weightPrefix = document.createElement('span');
+    weightPrefix.className = 'agm-weight-prefix';
+    weightPrefix.textContent = t('agManager.weightLabel');
+    const weightInput = document.createElement('input');
+    weightInput.type = 'number';
+    weightInput.className = 'agm-weight-input';
+    weightInput.min = '1';
+    weightInput.max = '100';
+    weightInput.step = '1';
+    weightInput.value = String(accountWeight);
+    weightInput.setAttribute('aria-label', t('agManager.aria.accountWeight', { email: acc.email || acc.id }));
+    weightInput.addEventListener('click', (ev) => ev.stopPropagation());
+    weightInput.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        weightInput.blur();
+      }
+    });
+    weightInput.addEventListener('change', async () => {
+      const parsed = Number(weightInput.value);
+      const clamped = Number.isFinite(parsed) ? Math.max(1, Math.min(100, Math.round(parsed))) : accountWeight;
+      weightInput.value = String(clamped);
+      if (clamped === accountWeight) return;
+      const revBefore = state.stateRevision;
+      try {
+        const res = await agmApi().setAccountWeight(acc.id, clamped);
+        if (res?.ok) {
+          showToast(t('agManager.toast.weightSaved', { email: acc.email || acc.id, weight: clamped }));
+        } else {
+          showToast(res?.error || t('agManager.toast.actionFailed'), true);
+        }
+      } catch (err) {
+        showToast(err?.message || t('agManager.toast.actionFailed'), true);
+      } finally {
+        if (state.stateRevision === revBefore) await loadState();
+        else renderAll();
+      }
+    });
+    weightControl.append(weightPrefix, weightInput);
+    pills.appendChild(weightControl);
+  } else if (accountWeight !== 50) {
+    pills.appendChild(makePill(t('agManager.weightBadge', { weight: accountWeight }), 'violet', true));
+  }
 
   if (acc.hasDeviceProfile) {
     pills.appendChild(makePill(t('agManager.isolatedBadge'), 'muted', true));
@@ -1137,6 +1234,15 @@ function positionRefreshPopover() {
   }
 }
 
+function positionAutoSwitchPopover() {
+  if (!els.autoSwitchPopover || els.autoSwitchPopover.classList.contains('hidden')) return;
+  els.autoSwitchPopover.classList.add('align-left');
+  const rect = els.autoSwitchPopover.getBoundingClientRect();
+  if (rect.right > window.innerWidth - 14) {
+    els.autoSwitchPopover.classList.remove('align-left');
+  }
+}
+
 function renderAccounts() {
   const list = filteredAccounts();
   els.selectAllInput.disabled = list.length === 0;
@@ -1317,7 +1423,7 @@ async function persistConfigPatch(patch) {
     const res = await agmApi().updateConfig(patch);
     if (res?.ok && state.manager) {
       state.manager.config = res.config;
-      renderSummaryAndControls();
+      renderAll();
     } else if (res && res.ok === false) {
       showToast(res.error || t('agManager.toast.actionFailed'), true);
     }
@@ -1344,6 +1450,14 @@ function closeRefreshPopover({ restoreFocus = false } = {}) {
   els.refreshPopover.classList.add('hidden');
   els.refreshMenuBtn.setAttribute('aria-expanded', 'false');
   if (restoreFocus) els.refreshMenuBtn.focus();
+  return true;
+}
+
+function closeAutoSwitchPopover({ restoreFocus = false } = {}) {
+  if (!els.autoSwitchPopover || els.autoSwitchPopover.classList.contains('hidden')) return false;
+  els.autoSwitchPopover.classList.add('hidden');
+  els.autoSwitchMenuBtn.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) els.autoSwitchMenuBtn.focus();
   return true;
 }
 
@@ -1409,15 +1523,27 @@ function wireEvents() {
 
   els.refreshMenuBtn.addEventListener('click', (ev) => {
     ev.stopPropagation();
+    closeAutoSwitchPopover();
     const isHidden = els.refreshPopover.classList.toggle('hidden');
     els.refreshMenuBtn.setAttribute('aria-expanded', String(!isHidden));
     if (!isHidden) positionRefreshPopover();
+  });
+
+  els.autoSwitchMenuBtn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    closeRefreshPopover();
+    const isHidden = els.autoSwitchPopover.classList.toggle('hidden');
+    els.autoSwitchMenuBtn.setAttribute('aria-expanded', String(!isHidden));
+    if (!isHidden) positionAutoSwitchPopover();
   });
 
   const onDocumentClick = (ev) => {
     const targetEl = ev.target instanceof Element ? ev.target : null;
     if (!els.refreshSplit.contains(ev.target)) {
       closeRefreshPopover();
+    }
+    if (els.autoSwitchWrap && !els.autoSwitchWrap.contains(ev.target)) {
+      closeAutoSwitchPopover();
     }
     let shouldRenderCards = false;
     if (state.openMoreId && !targetEl?.closest?.('.agm-more-wrap')) {
@@ -1439,6 +1565,10 @@ function wireEvents() {
 
   const onDocumentKeyDown = (ev) => {
     if (ev.key !== 'Escape') return;
+    if (closeAutoSwitchPopover({ restoreFocus: true })) {
+      ev.preventDefault();
+      return;
+    }
     if (closeRefreshPopover({ restoreFocus: true })) {
       ev.preventDefault();
       return;
@@ -1471,10 +1601,33 @@ function wireEvents() {
 
   const onWindowResize = () => {
     positionRefreshPopover();
+    positionAutoSwitchPopover();
     if (state.openMoreId) positionOpenMoreMenu();
   };
   window.addEventListener('resize', onWindowResize);
   registerCleanup(() => window.removeEventListener('resize', onWindowResize));
+
+  els.autoSwitchEnabledInput.addEventListener('change', () => {
+    void persistConfigPatch({ autoSwitchEnabled: els.autoSwitchEnabledInput.checked });
+  });
+  els.selectionModeSelect.addEventListener('change', () => {
+    void persistConfigPatch({ selectionMode: els.selectionModeSelect.value });
+  });
+  els.autoSwitchScopeSelect.addEventListener('change', () => {
+    void persistConfigPatch({ autoSwitchScope: els.autoSwitchScopeSelect.value });
+  });
+  els.autoSwitchThresholdInput.addEventListener('change', () => {
+    const parsed = Number(els.autoSwitchThresholdInput.value);
+    const val = Number.isFinite(parsed) ? Math.max(0, Math.min(50, Math.round(parsed))) : 0;
+    els.autoSwitchThresholdInput.value = String(val);
+    void persistConfigPatch({ autoSwitchThresholdPercent: val });
+  });
+  els.autoSwitchCooldownInput.addEventListener('change', () => {
+    const parsed = Number(els.autoSwitchCooldownInput.value);
+    const val = Number.isFinite(parsed) ? Math.max(30, Math.min(3600, Math.round(parsed))) : 180;
+    els.autoSwitchCooldownInput.value = String(val);
+    void persistConfigPatch({ autoSwitchCooldownSeconds: val });
+  });
 
   els.startupRefreshInput.addEventListener('change', () => {
     void persistConfigPatch({ startupRefresh: els.startupRefreshInput.checked });
@@ -1603,6 +1756,7 @@ function wireEvents() {
   // Import and device dialogs
   els.openImportBtn.addEventListener('click', () => {
     closeRefreshPopover();
+    closeAutoSwitchPopover();
     els.importDialog.showModal();
   });
   els.closeImportDialog.addEventListener('click', () => els.importDialog.close());

@@ -5,6 +5,12 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { normalizeSubscriptionTier } = require('../../shared/antigravityManagerProtocol');
+const {
+  DEFAULT_ACCOUNT_WEIGHT,
+  VALID_AUTO_SWITCH_SCOPES,
+  VALID_SELECTION_MODES,
+  normalizeAccountWeight
+} = require('./autoSwitch');
 
 const DEFAULT_CONFIG = Object.freeze({
   startupRefresh: false,
@@ -14,6 +20,11 @@ const DEFAULT_CONFIG = Object.freeze({
   refreshSlideDelaySecs: 0.2,
   syncToHub: true,
   defaultSwitchTarget: 'auto',
+  autoSwitchEnabled: false,
+  autoSwitchScope: 'primary',
+  autoSwitchThresholdPercent: 0,
+  selectionMode: 'auto',
+  autoSwitchCooldownSeconds: 180,
   customExecutablePaths: { classic: '', ide: '', cli: '' }
 });
 
@@ -84,6 +95,10 @@ function normalizeConfig(raw) {
   const concurrencyRaw = Number(src.refreshConcurrency);
   const slideRaw = Number(src.refreshSlideDelaySecs);
   const targetRaw = typeof src.defaultSwitchTarget === 'string' ? src.defaultSwitchTarget.trim().toLowerCase() : 'auto';
+  const scopeRaw = typeof src.autoSwitchScope === 'string' ? src.autoSwitchScope.trim().toLowerCase() : 'primary';
+  const thresholdRaw = Number(src.autoSwitchThresholdPercent);
+  const modeRaw = typeof src.selectionMode === 'string' ? src.selectionMode.trim().toLowerCase() : 'auto';
+  const cooldownRaw = Number(src.autoSwitchCooldownSeconds);
   const customPathsRaw = src.customExecutablePaths && typeof src.customExecutablePaths === 'object' ? src.customExecutablePaths : {};
 
   return {
@@ -94,6 +109,11 @@ function normalizeConfig(raw) {
     refreshSlideDelaySecs: Number.isFinite(slideRaw) ? Math.max(0, Math.min(10, Math.round(slideRaw * 100) / 100)) : DEFAULT_CONFIG.refreshSlideDelaySecs,
     syncToHub: src.syncToHub !== false,
     defaultSwitchTarget: VALID_SWITCH_TARGETS.has(targetRaw) ? targetRaw : 'auto',
+    autoSwitchEnabled: src.autoSwitchEnabled === true,
+    autoSwitchScope: VALID_AUTO_SWITCH_SCOPES.has(scopeRaw) ? scopeRaw : DEFAULT_CONFIG.autoSwitchScope,
+    autoSwitchThresholdPercent: Number.isFinite(thresholdRaw) ? Math.max(0, Math.min(50, Math.round(thresholdRaw))) : DEFAULT_CONFIG.autoSwitchThresholdPercent,
+    selectionMode: VALID_SELECTION_MODES.has(modeRaw) ? modeRaw : DEFAULT_CONFIG.selectionMode,
+    autoSwitchCooldownSeconds: Number.isFinite(cooldownRaw) ? Math.max(30, Math.min(3600, Math.round(cooldownRaw))) : DEFAULT_CONFIG.autoSwitchCooldownSeconds,
     customExecutablePaths: {
       classic: typeof customPathsRaw.classic === 'string' ? customPathsRaw.classic.trim() : '',
       ide: typeof customPathsRaw.ide === 'string' ? customPathsRaw.ide.trim() : '',
@@ -172,6 +192,7 @@ function sanitizeAccountMeta(raw) {
     email,
     name: typeof raw?.name === 'string' ? raw.name.trim() : '',
     subscriptionTier,
+    weight: normalizeAccountWeight(raw?.weight, DEFAULT_ACCOUNT_WEIGHT),
     disabled: raw?.disabled === true,
     disabledReason: typeof raw?.disabledReason === 'string' ? raw.disabledReason : '',
     disabledAt: optionalPositiveNumber(raw?.disabledAt),
@@ -411,6 +432,7 @@ function createAntigravityManagerStore({ baseDir, safeStorage = null, logger = c
       id: existing?.id || incomingId || `agm-${crypto.randomUUID()}`,
       email: emailNorm || existing?.email || '',
       name: incomingName || existing?.name || '',
+      weight: meta?.weight !== undefined ? meta.weight : (existing?.weight ?? DEFAULT_ACCOUNT_WEIGHT),
       quota: meta?.quota !== undefined ? meta.quota : (existing?.quota || null),
       deviceProfile: meta?.deviceProfile !== undefined ? meta.deviceProfile : (existing?.deviceProfile || null),
       deviceVersions: meta?.deviceVersions !== undefined ? meta.deviceVersions : (existing?.deviceVersions || []),
@@ -531,6 +553,22 @@ function createAntigravityManagerStore({ baseDir, safeStorage = null, logger = c
     return getAccount(id);
   }
 
+  /**
+   * @param {string} id
+   * @param {unknown} weight
+   */
+  function setAccountWeight(id, weight) {
+    const idx = accountsDoc.accounts.findIndex((a) => a.id === id);
+    if (idx < 0) return null;
+    const current = accountsDoc.accounts[idx];
+    accountsDoc.accounts[idx] = sanitizeAccountMeta({
+      ...current,
+      weight: normalizeAccountWeight(weight, current.weight)
+    });
+    saveAccountsDoc();
+    return getAccount(id);
+  }
+
   function getOriginalDeviceProfile() {
     return readJsonSafe(originalDeviceFile, null);
   }
@@ -568,6 +606,7 @@ function createAntigravityManagerStore({ baseDir, safeStorage = null, logger = c
     saveAccountToken,
     deleteAccounts,
     setActiveAccount,
+    setAccountWeight,
     updateAccountQuota,
     getOriginalDeviceProfile,
     saveOriginalDeviceProfileIfMissing,

@@ -12,6 +12,7 @@ const switcher = require('./switcher');
 const importExport = require('./importExport');
 const deviceProfile = require('./deviceProfile');
 const processManager = require('./processManager');
+const autoSwitch = require('./autoSwitch');
 const {
   AG_MANAGER_SNAPSHOT_PATH,
   sanitizeAntigravityManagerSnapshot
@@ -28,6 +29,10 @@ const {
  *   openExternal?: (url: string) => unknown,
  *   getDeviceIdentity?: () => { deviceId: string, hostname: string },
  *   getHubSyncTarget?: () => { mode: string, hubUrl?: string, secret?: string, embeddedHub?: any } | null,
+ *   isLocalAntigravityBusy?: () => boolean,
+ *   onAutoSwitchCompleted?: (result: any) => void,
+ *   nowMs?: () => number,
+ *   switcherDeps?: Record<string, any>,
  *   onStateChanged?: (state: any) => void,
  *   onRefreshProgress?: (progress: any) => void,
  *   onImportProgress?: (progress: any) => void,
@@ -37,6 +42,8 @@ const {
  */
 function createAntigravityManagerService(options) {
   const logger = options.logger || console;
+  const nowMsFn = options.nowMs || Date.now;
+  const nowSecFn = () => Math.floor(nowMsFn() / 1000);
   const store = createAntigravityManagerStore({
     baseDir: options.baseDir,
     safeStorage: options.safeStorage || null,
@@ -56,7 +63,40 @@ function createAntigravityManagerService(options) {
   let switching = false;
   /** @type {string | null} */
   let switchingAccountId = null;
+  let autoSwitchInFlight = false;
+  /** @type {unknown} */
+  let pendingAutoSwitchLimits = null;
+  let lastAutoSwitchAttemptMs = 0;
+  let lastAutoSwitchWasEmptyPool = false;
+  /** @type {Record<string, any> | null} */
+  let lastAutoSwitch = null;
+  /** @type {Array<() => void>} */
+  const refreshWaiters = [];
   let stopped = false;
+
+  function resolveRefreshWaiters() {
+    while (refreshWaiters.length > 0) {
+      const next = refreshWaiters.shift();
+      try { next?.(); } catch (_) {}
+    }
+  }
+
+  /**
+   * @returns {Promise<void>}
+   */
+  function waitForActiveRefresh() {
+    if (!scheduler.isRefreshing()) return Promise.resolve();
+    return new Promise((resolve) => {
+      refreshWaiters.push(() => resolve());
+    });
+  }
+
+  function resetEmptyPoolBackoff() {
+    if (lastAutoSwitchWasEmptyPool) {
+      lastAutoSwitchWasEmptyPool = false;
+      lastAutoSwitchAttemptMs = 0;
+    }
+  }
 
   function clearRefreshStateTimer() {
     if (refreshStateTimer) {
@@ -188,6 +228,8 @@ function createAntigravityManagerService(options) {
       fetch: options.fetch,
       healthTracker,
       signal,
+      nowMs: nowMsFn,
+      nowSec: nowSecFn,
       onTokenRefreshed: (updated) => {
         store.saveAccountToken(accountId, updated);
       }
@@ -269,6 +311,7 @@ function createAntigravityManagerService(options) {
     } finally {
       if (activeRefreshAbort === controller) activeRefreshAbort = null;
       scheduler.releaseLock();
+      resolveRefreshWaiters();
       notifyStateChanged(true);
     }
   }
@@ -295,6 +338,7 @@ function createAntigravityManagerService(options) {
     getConfig: () => store.getConfig(),
     getAccountCount: () => store.listAccounts().filter((a) => !a.disabled && !a.banned && a.hasToken).length,
     onRefreshStateChange: (isNowRefreshing) => {
+      if (!isNowRefreshing) resolveRefreshWaiters();
       notifyStateChanged(!isNowRefreshing);
     },
     onRefreshAll: async () => {
@@ -329,6 +373,7 @@ function createAntigravityManagerService(options) {
       }
     },
     logger,
+    nowSec: nowSecFn,
     pollMs: options.schedulerOptions?.pollMs,
     startupDelayMs: options.schedulerOptions?.startupDelayMs
   });
@@ -339,7 +384,9 @@ function createAntigravityManagerService(options) {
       isRefreshing: scheduler.isRefreshing(),
       lastRefreshAt: scheduler.getLastRefreshTimestamp(),
       isSwitching: switching,
-      switchingAccountId
+      switchingAccountId,
+      isAutoSwitching: autoSwitchInFlight,
+      lastAutoSwitch
     };
   }
 
@@ -348,6 +395,7 @@ function createAntigravityManagerService(options) {
    */
   function updateConfig(patch) {
     const updated = store.updateConfig(patch);
+    resetEmptyPoolBackoff();
     notifyStateChanged(true);
     return { ok: true, config: updated };
   }
@@ -375,6 +423,7 @@ function createAntigravityManagerService(options) {
         disabledAt: null
       }, token);
       if (!saved?.id) return { ok: false, error: 'Failed to store OAuth account' };
+      resetEmptyPoolBackoff();
       try {
         await refreshSingleAccountInternal(saved.id);
       } catch (_) {}
@@ -409,6 +458,7 @@ function createAntigravityManagerService(options) {
         try { options.onImportProgress?.(p); } catch (_) {}
       }
     });
+    if (result.accountIds.length > 0) resetEmptyPoolBackoff();
     notifyStateChanged(true);
     if (opts.refreshAfterImport && result.accountIds.length > 0) {
       await refreshAccounts(result.accountIds);
@@ -422,6 +472,7 @@ function createAntigravityManagerService(options) {
   function importDataDir(dirPath) {
     const targetDir = dirPath || importExport.defaultManagerDataDir();
     const res = importExport.importFromManagerDataDir(targetDir, { store });
+    if (res.imported > 0) resetEmptyPoolBackoff();
     notifyStateChanged(true);
     return { ok: true, ...res };
   }
@@ -435,6 +486,7 @@ function createAntigravityManagerService(options) {
       store,
       fetch: options.fetch
     });
+    if (saved?.id) resetEmptyPoolBackoff();
     if (opts.refreshAfterImport !== false && saved?.id) {
       try { await refreshSingleAccountInternal(saved.id); } catch (_) {}
     }
@@ -450,6 +502,7 @@ function createAntigravityManagerService(options) {
         try { options.onImportProgress?.(p); } catch (_) {}
       }
     });
+    if (result.accountIds.length > 0) resetEmptyPoolBackoff();
     notifyStateChanged(true);
     if (result.accountIds.length > 0) {
       await refreshAccounts(result.accountIds);
@@ -469,6 +522,7 @@ function createAntigravityManagerService(options) {
         try { options.onImportProgress?.(p); } catch (_) {}
       }
     });
+    if (result.accountIds.length > 0) resetEmptyPoolBackoff();
     notifyStateChanged(true);
     if (result.accountIds.length > 0) {
       await refreshAccounts(result.accountIds);
@@ -506,6 +560,8 @@ function createAntigravityManagerService(options) {
         targetClient: target,
         store,
         deps: {
+          nowSec: nowSecFn,
+          ...(options.switcherDeps || {}),
           fetch: options.fetch,
           customExecutablePaths: cfg.customExecutablePaths
         }
@@ -525,9 +581,192 @@ function createAntigravityManagerService(options) {
    * @param {string} [targetClient]
    */
   async function switchBestAccount(targetClient) {
-    const best = switcher.pickBestAccount(store.listAccounts());
+    const cfg = store.getConfig();
+    const target = targetClient || cfg.defaultSwitchTarget || 'auto';
+    const active = store.getActiveAccounts();
+    const activeIdForTarget = target === 'classic' || target === 'ide' || target === 'agy' || target === 'acp'
+      ? active[target]
+      : null;
+    const allAccounts = store.listAccounts();
+    let best = switcher.pickBestAccount(allAccounts, {
+      selectionMode: cfg.selectionMode,
+      thresholdPercent: cfg.autoSwitchThresholdPercent,
+      scope: cfg.autoSwitchScope,
+      ...(activeIdForTarget ? { excludeIds: [activeIdForTarget] } : {})
+    });
+    if (!best && activeIdForTarget) {
+      best = switcher.pickBestAccount(allAccounts, {
+        selectionMode: cfg.selectionMode,
+        thresholdPercent: cfg.autoSwitchThresholdPercent,
+        scope: cfg.autoSwitchScope
+      });
+    }
+    if (!best) {
+      best = switcher.pickBestAccount(allAccounts);
+    }
     if (!best) return { ok: false, error: 'No eligible active account found' };
-    return await switchAccountTo(best.id, targetClient);
+    return await switchAccountTo(best.id, target);
+  }
+
+  /**
+   * @param {ReturnType<typeof autoSwitch.evaluateLocalQuotaTrigger>} evalRes
+   */
+  async function runAutoSwitchFlow(evalRes) {
+    if (stopped || autoSwitchInFlight || switching) {
+      return { ok: false, skipped: 'busy' };
+    }
+    autoSwitchInFlight = true;
+    pendingAutoSwitchLimits = null;
+    notifyStateChanged(false);
+
+    const initialCfg = store.getConfig();
+    const targetClient = autoSwitch.resolveSwitchTargetForTrigger(
+      initialCfg.defaultSwitchTarget,
+      evalRes.sourceDetail
+    );
+
+    try {
+      if (scheduler.isRefreshing()) {
+        await waitForActiveRefresh();
+      } else {
+        const nowSec = Math.floor(nowMsFn() / 1000);
+        const lastSec = scheduler.getLastRefreshTimestamp();
+        const candidates = store.listAccounts().filter((a) => !a.disabled && !a.banned && a.hasToken);
+        const hasUnfetchedCandidate = candidates.some((a) => !a.quota?.lastUpdatedAt);
+        if (candidates.length > 0 && (lastSec <= 0 || nowSec - lastSec >= 15 || hasUnfetchedCandidate)) {
+          await refreshAccounts([]);
+        }
+      }
+
+      if (stopped) return { ok: false, skipped: 'stopped' };
+      const freshCfg = store.getConfig();
+      if (!freshCfg.autoSwitchEnabled) {
+        return { ok: false, skipped: 'disabled' };
+      }
+
+      const active = store.getActiveAccounts();
+      /** @type {string[]} */
+      const excludeIds = [];
+      if (evalRes.accountEmail) {
+        const matched = store.findAccountByEmail(evalRes.accountEmail);
+        if (matched?.id) excludeIds.push(matched.id);
+      } else {
+        const slot = targetClient === 'ide'
+          ? 'ide'
+          : (targetClient === 'agy' ? 'agy' : (targetClient === 'acp' ? 'acp' : 'classic'));
+        const slotId = active[slot];
+        if (slotId) excludeIds.push(slotId);
+      }
+
+      const best = autoSwitch.selectReplacementAccount(store.listAccounts(), {
+        selectionMode: freshCfg.selectionMode,
+        thresholdPercent: freshCfg.autoSwitchThresholdPercent,
+        scope: freshCfg.autoSwitchScope,
+        excludeIds,
+        excludeEmails: evalRes.accountEmail ? [evalRes.accountEmail] : [],
+        excludeAccountKeys: evalRes.accountKey ? [evalRes.accountKey] : [],
+        preferredFamilies: evalRes.exhaustedFamilies,
+        requireVerifiedQuota: true
+      });
+
+      if (!best) {
+        const emptyRecord = {
+          at: nowMsFn(),
+          fromEmail: evalRes.accountEmail || '',
+          toEmail: '',
+          target: targetClient,
+          mode: '',
+          triggerLabel: evalRes.triggerLabel,
+          ok: false,
+          error: 'No eligible unexhausted account in pool'
+        };
+        lastAutoSwitch = emptyRecord;
+        lastAutoSwitchAttemptMs = nowMsFn();
+        lastAutoSwitchWasEmptyPool = true;
+        try { options.onAutoSwitchCompleted?.(emptyRecord); } catch (_) {}
+        return { ok: false, error: emptyRecord.error, lastAutoSwitch: emptyRecord };
+      }
+
+      lastAutoSwitchAttemptMs = nowMsFn();
+      lastAutoSwitchWasEmptyPool = false;
+      /** @type {any} */
+      const switchRes = await switchAccountTo(best.id, targetClient);
+      const record = {
+        at: nowMsFn(),
+        fromEmail: evalRes.accountEmail || '',
+        toEmail: best.email || best.id,
+        target: String(switchRes?.target || targetClient),
+        mode: String(switchRes?.mode || ''),
+        triggerLabel: evalRes.triggerLabel,
+        ok: Boolean(switchRes?.ok),
+        ...(switchRes?.error ? { error: String(switchRes.error) } : {})
+      };
+      lastAutoSwitch = record;
+      try { options.onAutoSwitchCompleted?.(record); } catch (_) {}
+      return { ...switchRes, account: best, lastAutoSwitch: record };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      const errRecord = {
+        at: nowMsFn(),
+        fromEmail: evalRes.accountEmail || '',
+        toEmail: '',
+        target: targetClient,
+        mode: '',
+        triggerLabel: evalRes.triggerLabel,
+        ok: false,
+        error: errMsg
+      };
+      lastAutoSwitch = errRecord;
+      lastAutoSwitchAttemptMs = nowMsFn();
+      try { options.onAutoSwitchCompleted?.(errRecord); } catch (_) {}
+      return { ok: false, error: errMsg, lastAutoSwitch: errRecord };
+    } finally {
+      autoSwitchInFlight = false;
+      notifyStateChanged(false);
+    }
+  }
+
+  /**
+   * Evaluate a read-only local Antigravity RPC limits snapshot and trigger auto-switch when exhausted.
+   * @param {unknown} limits
+   */
+  async function onLocalLimitsUpdated(limits) {
+    if (stopped) return { triggered: false, skipped: 'stopped' };
+    const cfg = store.getConfig();
+    if (!cfg.autoSwitchEnabled) {
+      pendingAutoSwitchLimits = null;
+      return { triggered: false, skipped: 'disabled' };
+    }
+    const evalRes = autoSwitch.evaluateLocalQuotaTrigger(limits, cfg);
+    if (!evalRes.triggered) {
+      pendingAutoSwitchLimits = null;
+      return { triggered: false, skipped: 'within_quota' };
+    }
+    if (autoSwitchInFlight || switching) {
+      return { triggered: true, skipped: 'in_flight' };
+    }
+    const now = nowMsFn();
+    const baseCooldownMs = Math.max(30, Number(cfg.autoSwitchCooldownSeconds || 180)) * 1000;
+    const effectiveCooldownMs = lastAutoSwitchWasEmptyPool
+      ? Math.max(baseCooldownMs, 300_000)
+      : baseCooldownMs;
+    if (lastAutoSwitchAttemptMs > 0 && now - lastAutoSwitchAttemptMs < effectiveCooldownMs) {
+      return { triggered: true, skipped: 'cooldown' };
+    }
+    if (!evalRes.hardExhausted && options.isLocalAntigravityBusy?.() === true) {
+      pendingAutoSwitchLimits = limits;
+      return { triggered: true, skipped: 'session_busy' };
+    }
+    const outcome = await runAutoSwitchFlow(evalRes);
+    return { triggered: true, ...outcome };
+  }
+
+  function onLocalActivityChanged() {
+    if (stopped || !pendingAutoSwitchLimits) return null;
+    if (options.isLocalAntigravityBusy?.() === true) return null;
+    const queued = pendingAutoSwitchLimits;
+    pendingAutoSwitchLimits = null;
+    return onLocalLimitsUpdated(queued);
   }
 
   /**
@@ -553,8 +792,21 @@ function createAntigravityManagerService(options) {
       disabledReason: nextDisabled ? 'Manually disabled' : '',
       disabledAt: nextDisabled ? Math.floor(Date.now() / 1000) : null
     });
+    if (!nextDisabled) resetEmptyPoolBackoff();
     notifyStateChanged(true);
     return { ok: true, account: store.getAccount(id) };
+  }
+
+  /**
+   * @param {string} id
+   * @param {unknown} weight
+   */
+  function setAccountWeight(id, weight) {
+    const updated = store.setAccountWeight(id, weight);
+    if (!updated) return { ok: false, error: 'Account not found' };
+    resetEmptyPoolBackoff();
+    notifyStateChanged(false);
+    return { ok: true, account: updated };
   }
 
   function resolveExistingDesktopStoragePath() {
@@ -642,7 +894,9 @@ function createAntigravityManagerService(options) {
 
   function stop() {
     stopped = true;
+    pendingAutoSwitchLimits = null;
     scheduler.stop();
+    resolveRefreshWaiters();
     clearRefreshStateTimer();
     if (hubSyncTimer) {
       clearTimeout(hubSyncTimer);
@@ -670,8 +924,11 @@ function createAntigravityManagerService(options) {
     exportJson,
     switchAccountTo,
     switchBestAccount,
+    onLocalLimitsUpdated,
+    onLocalActivityChanged,
     deleteAccounts,
     setAccountDisabled,
+    setAccountWeight,
     bindDeviceProfile,
     restoreOriginalDevice,
     detectActiveClients,

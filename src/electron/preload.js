@@ -193,6 +193,7 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
     exportAccounts: (ids) => ipcRenderer.invoke('antigravityManager:exportAccounts', ids),
     deleteAccounts: (ids) => ipcRenderer.invoke('antigravityManager:deleteAccounts', ids),
     setAccountDisabled: (id, disabled) => ipcRenderer.invoke('antigravityManager:setAccountDisabled', id, disabled),
+    setAccountWeight: (id, weight) => ipcRenderer.invoke('antigravityManager:setAccountWeight', id, weight),
     bindDeviceProfile: (id, mode) => ipcRenderer.invoke('antigravityManager:bindDeviceProfile', id, mode),
     restoreOriginalDevice: () => ipcRenderer.invoke('antigravityManager:restoreOriginalDevice'),
     onState: (callback) => {

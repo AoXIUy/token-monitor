@@ -1300,6 +1300,9 @@ let settingsLimitsRevision = 0;
 let settingsLimitsPushQueued = false;
 function updateSettingsLocalLimits(limits) {
   settingsLocalLimits = { deviceId: settings.deviceId, limits, revision: ++settingsLimitsRevision };
+  if (typeof antigravityManagerService !== 'undefined' && antigravityManagerService) {
+    void Promise.resolve(antigravityManagerService.onLocalLimitsUpdated?.(limits)).catch(() => {});
+  }
   if (settingsLimitsPushQueued) return;
   settingsLimitsPushQueued = true;
   // Limit rows commit before probe-finish. Send the result and the final probe
@@ -5115,6 +5118,9 @@ function publishLocalSessionActivity(patch) {
   pluginRuntime?.publishStats(activityStats, latestStats);
   updateEdgeDockCells(activityStats);
   if (typeof openclawBridgeInstance !== 'undefined') openclawBridgeInstance?.onLocalSessionActivity(visiblePatch);
+  if (typeof antigravityManagerService !== 'undefined' && antigravityManagerService && visiblePatch?.liveActivity?.antigravity?.status !== 'running') {
+    void Promise.resolve(antigravityManagerService.onLocalActivityChanged?.()).catch(() => {});
+  }
   sendPush({ event: 'session-activity', data: { patch: visiblePatch, snapshot } });
 }
 
@@ -8264,6 +8270,15 @@ function ensureAntigravityManagerService() {
       }
       return null;
     },
+    isLocalAntigravityBusy: () => lastCollectedDevice?.liveActivity?.antigravity?.status === 'running',
+    onAutoSwitchCompleted: (result) => {
+      if (result?.ok) {
+        const timer = setTimeout(() => {
+          void refreshLimitProvider('antigravity');
+        }, 2500);
+        timer.unref?.();
+      }
+    },
     onStateChanged: (nextState) => {
       if (antigravityManagerWindow && !antigravityManagerWindow.isDestroyed()) {
         try { antigravityManagerWindow.webContents.send('antigravityManager:state', nextState); } catch (_) {}
@@ -10832,6 +10847,7 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('antigravityManager:deleteAccounts', (_event, ids) => ensureAntigravityManagerService().deleteAccounts(Array.isArray(ids) ? ids : []));
   ipcMain.handle('antigravityManager:setAccountDisabled', (_event, id, disabled) => ensureAntigravityManagerService().setAccountDisabled(id, disabled));
+  ipcMain.handle('antigravityManager:setAccountWeight', (_event, id, weight) => ensureAntigravityManagerService().setAccountWeight(id, weight));
   ipcMain.handle('antigravityManager:bindDeviceProfile', (_event, id, mode) => ensureAntigravityManagerService().bindDeviceProfile(id, mode));
   ipcMain.handle('antigravityManager:restoreOriginalDevice', () => ensureAntigravityManagerService().restoreOriginalDevice());
   app.on('activate', () => {

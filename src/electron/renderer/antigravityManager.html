@@ -38,6 +38,47 @@
           </select>
         </label>
         <button id="agmSwitchBestBtn" class="agm-btn agm-btn-accent" type="button" data-i18n="agManager.switchBest">Switch Best</button>
+        <div class="agm-autoswitch-wrap" id="agmAutoSwitchWrap">
+          <button id="agmAutoSwitchMenuBtn" class="agm-btn agm-btn-autoswitch" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="agmAutoSwitchPopover" data-i18n-aria-label="agManager.aria.autoSwitchMenu" aria-label="Auto-switch settings">
+            <span id="agmAutoSwitchBtnLabel" data-i18n="agManager.autoSwitchBtn">Auto-Switch</span>
+            <span aria-hidden="true">▾</span>
+          </button>
+          <div id="agmAutoSwitchPopover" class="agm-popover align-left hidden" role="dialog" data-i18n-aria-label="agManager.aria.autoSwitchPopover" aria-label="Quota limit auto-switch settings">
+            <div class="agm-popover-title" data-i18n="agManager.autoSwitchTitle">Quota Limit Auto-Switch</div>
+            <label class="agm-toggle-row">
+              <span class="agm-toggle-text">
+                <strong data-i18n="agManager.autoSwitchEnable">Auto-switch on 5h / weekly limit</strong>
+                <small data-i18n="agManager.autoSwitchEnableDesc">When local Antigravity hits a 5-hour or weekly quota limit, refresh the pool and switch to the best eligible account.</small>
+              </span>
+              <input id="agmAutoSwitchEnabledInput" type="checkbox" />
+            </label>
+            <label class="agm-field">
+              <span data-i18n="agManager.selectionMode">Selection strategy</span>
+              <select id="agmSelectionModeSelect" class="agm-select">
+                <option value="auto" data-i18n="agManager.selectionMode.auto">Auto best (quota + tier)</option>
+                <option value="weighted" data-i18n="agManager.selectionMode.weighted">Custom account weights</option>
+              </select>
+            </label>
+            <label class="agm-field">
+              <span data-i18n="agManager.autoSwitchScope">Monitored quota pools</span>
+              <select id="agmAutoSwitchScopeSelect" class="agm-select">
+                <option value="primary" data-i18n="agManager.autoSwitchScope.primary">Primary (Gemini / Claude·GPT)</option>
+                <option value="any" data-i18n="agManager.autoSwitchScope.any">Any pool (incl. Argon)</option>
+                <option value="all" data-i18n="agManager.autoSwitchScope.all">All pools exhausted</option>
+              </select>
+            </label>
+            <div class="agm-field-grid agm-field-grid-2">
+              <label class="agm-field">
+                <span data-i18n="agManager.autoSwitchThreshold">Trigger at remaining (%)</span>
+                <input id="agmAutoSwitchThresholdInput" type="number" min="0" max="50" value="0" />
+              </label>
+              <label class="agm-field">
+                <span data-i18n="agManager.autoSwitchCooldown">Cooldown (s)</span>
+                <input id="agmAutoSwitchCooldownInput" type="number" min="30" max="3600" step="10" value="180" />
+              </label>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="agm-toolbar-group agm-toolbar-right">
