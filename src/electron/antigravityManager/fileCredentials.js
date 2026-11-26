@@ -27,6 +27,15 @@ function resolveGeminiDir(env = process.env, home = os.homedir()) {
 }
 
 /**
+ * Parse JSON text while stripping a leading UTF-8 BOM (common on Windows).
+ * @param {string} raw
+ * @returns {any}
+ */
+function parseJsonWithBom(raw) {
+  return JSON.parse(String(raw || '').replace(/^\uFEFF/, ''));
+}
+
+/**
  * @param {string} filePath
  * @param {unknown} value
  */
@@ -125,7 +134,7 @@ function writeFileCredentials(tokenData, options = {}) {
     const prevOld = [];
     try {
       if (fs.existsSync(accountsPath)) {
-        const existing = JSON.parse(fs.readFileSync(accountsPath, 'utf8'));
+        const existing = parseJsonWithBom(fs.readFileSync(accountsPath, 'utf8'));
         if (typeof existing?.active === 'string' && existing.active && existing.active !== nextActive) {
           prevOld.push(existing.active);
         }
@@ -167,7 +176,7 @@ function writeAcpCredentials(tokenData, options = {}) {
   let preservedProjectId = String(tokenData.projectId || '').trim();
   if (!preservedProjectId && fs.existsSync(acpFile)) {
     try {
-      const existing = JSON.parse(fs.readFileSync(acpFile, 'utf8'));
+      const existing = parseJsonWithBom(fs.readFileSync(acpFile, 'utf8'));
       const existingRt = String(existing?.refresh_token || existing?.token?.refresh_token || '').trim();
       if (existingRt && existingRt === String(tokenData.refreshToken || '').trim() && typeof existing?.project_id === 'string') {
         preservedProjectId = existing.project_id.trim();
@@ -206,7 +215,39 @@ function readLocalCredentialFiles(options = {}) {
   for (const item of candidates) {
     try {
       if (!fs.existsSync(item.file)) continue;
-      const parsed = JSON.parse(fs.readFileSync(item.file, 'utf8'));
+      const parsed = parseJsonWithBom(fs.readFileSync(item.file, 'utf8'));
+      const rt = String(parsed?.token?.refresh_token || parsed?.refresh_token || '').trim();
+      if (!rt) continue;
+      found.push({
+        source: item.source,
+        refreshToken: rt,
+        email: String(parsed?.id_token_email || parsed?.email || '').trim().toLowerCase(),
+        projectId: String(parsed?.project_id || '').trim()
+      });
+    } catch (_) {}
+  }
+  return found;
+}
+
+/**
+ * Non-blocking variant of `readLocalCredentialFiles` using fs.promises.
+ * @param {{ geminiDir?: string, env?: NodeJS.ProcessEnv, home?: string }} [options]
+ * @returns {Promise<Array<{ source: string, refreshToken: string, email: string, projectId: string }>>}
+ */
+async function readLocalCredentialFilesAsync(options = {}) {
+  const geminiDir = options.geminiDir || resolveGeminiDir(options.env, options.home);
+  const candidates = [
+    { source: 'standalone-file', file: path.join(geminiDir, 'jetski-standalone-oauth-token') },
+    { source: 'cli-file', file: path.join(geminiDir, 'antigravity-cli', 'antigravity-oauth-token') },
+    { source: 'acp-file', file: path.join(geminiDir, 'antigravity-acp', 'acp_token.json') },
+    { source: 'oauth-creds', file: path.join(geminiDir, 'oauth_creds.json') }
+  ];
+  /** @type {Array<{ source: string, refreshToken: string, email: string, projectId: string }>} */
+  const found = [];
+  for (const item of candidates) {
+    try {
+      const raw = await fs.promises.readFile(item.file, 'utf8');
+      const parsed = parseJsonWithBom(raw);
       const rt = String(parsed?.token?.refresh_token || parsed?.refresh_token || '').trim();
       if (!rt) continue;
       found.push({
@@ -283,7 +324,7 @@ async function writeFileCredentialsAsync(tokenData, options = {}) {
     const prevOld = [];
     try {
       const rawExisting = await fs.promises.readFile(accountsPath, 'utf8');
-      const existing = JSON.parse(rawExisting);
+      const existing = parseJsonWithBom(rawExisting);
       if (typeof existing?.active === 'string' && existing.active && existing.active !== nextActive) {
         prevOld.push(existing.active);
       }
@@ -323,7 +364,7 @@ async function writeAcpCredentialsAsync(tokenData, options = {}) {
   let preservedProjectId = String(tokenData.projectId || '').trim();
   if (!preservedProjectId) {
     try {
-      const existing = JSON.parse(await fs.promises.readFile(acpFile, 'utf8'));
+      const existing = parseJsonWithBom(await fs.promises.readFile(acpFile, 'utf8'));
       const existingRt = String(existing?.refresh_token || existing?.token?.refresh_token || '').trim();
       if (existingRt && existingRt === String(tokenData.refreshToken || '').trim() && typeof existing?.project_id === 'string') {
         preservedProjectId = existing.project_id.trim();
@@ -349,6 +390,7 @@ module.exports = {
   DEFAULT_SCOPES,
   buildAgyTokenObject,
   readLocalCredentialFiles,
+  readLocalCredentialFilesAsync,
   resolveGeminiDir,
   writeAcpCredentials,
   writeAcpCredentialsAsync,

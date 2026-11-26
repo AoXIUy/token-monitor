@@ -322,18 +322,17 @@ function loadWinCredApi(deps = {}) {
 }
 
 function decodeWindowsCredentialBlob(api, pointer, size) {
-  if (!pointer || !size) return '';
-  let buffer;
-  try {
-    buffer = Buffer.from(new Uint8Array(api.koffi.view(pointer, size)));
-  } catch (_) {
-    buffer = Buffer.from(api.koffi.decode(pointer, 'uint8_t', size));
-  }
+  if (!pointer || !(size > 0)) return '';
+  // Never call `koffi.view()` here: Electron's V8 Sandbox forbids external ArrayBuffers
+  // (`napi_no_external_buffers_allowed`), causing Koffi's CreateView to trigger an uncatchable SIGABRT.
+  const decoded = api.koffi.decode(pointer, 'uint8_t', size);
+  if (!decoded) return '';
+  const buffer = Buffer.from(decoded);
   const utf8 = buffer.toString('utf8').replace(/\0+$/g, '').trim();
   const utf16 = size % 2 === 0 ? buffer.toString('utf16le').replace(/\0+$/g, '').trim() : '';
-  if (/^\s*[{[]/.test(utf8) || utf8.includes('accessToken')) return utf8;
-  if (/^\s*[{[]/.test(utf16) || utf16.includes('accessToken')) return utf16;
-  return utf8 || utf16;
+  if (!utf8.includes('\0') && (/^\s*[{[]/.test(utf8) || utf8.includes('accessToken'))) return utf8;
+  if (!utf16.includes('\0') && (/^\s*[{[]/.test(utf16) || utf16.includes('accessToken'))) return utf16;
+  return (!utf8.includes('\0') ? utf8 : '') || utf16 || utf8;
 }
 
 function readWindowsCredentialSecret(_service, targets, deps = {}) {

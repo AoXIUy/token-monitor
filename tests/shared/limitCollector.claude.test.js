@@ -2643,3 +2643,76 @@ test('the prepaid TTL follows the limits refresh interval at twice its length', 
   await fetchClaudeLimits(options, deps);
   assert.equal(requests.filter((url) => url.includes('/prepaid/credits')).length, 1);
 });
+
+test('Claude Windows Credential Manager reader decodes via koffi.decode and never calls koffi.view', async () => {
+  for (const encoding of ['utf8', 'utf16le']) {
+    const payload = JSON.stringify({
+      claudeAiOauth: {
+        accessToken: `wincred-${encoding}-token`,
+        refreshToken: `wincred-${encoding}-refresh`,
+        expiresAt: Date.parse('2026-06-12T00:00:00Z'),
+        subscriptionType: 'max',
+        rateLimitTier: 'default_claude_max_5x'
+      }
+    });
+    const rawBytes = Buffer.from(encoding === 'utf16le' ? `${payload}\0` : payload, encoding);
+    const credSentinel = { ptr: 'cred' };
+    const blobSentinel = { ptr: 'blob' };
+    let viewCalled = 0;
+    let decodeBlobCalls = 0;
+    let freed = 0;
+
+    const provider = await fetchClaudeLimits({}, {
+      platform: 'win32',
+      now: () => Date.parse('2026-06-11T00:00:00Z'),
+      claudeCredentialPath: 'C:\\Users\\Javis\\.claude\\.credentials.json',
+      stat: async () => {
+        const error = new Error('missing');
+        error.code = 'ENOENT';
+        throw error;
+      },
+      winCredApi: {
+        CREDENTIALW: 'CREDENTIALW',
+        koffi: {
+          view: () => {
+            viewCalled += 1;
+            throw new Error('koffi.view must never be called (aborts Electron V8 Sandbox)');
+          },
+          decode: (ptr, type, size) => {
+            if (ptr === credSentinel && type === 'CREDENTIALW') {
+              return { CredentialBlob: blobSentinel, CredentialBlobSize: rawBytes.length };
+            }
+            if (ptr === blobSentinel && type === 'uint8_t' && size === rawBytes.length) {
+              decodeBlobCalls += 1;
+              return new Uint8Array(rawBytes);
+            }
+            throw new Error(`unexpected decode call: ${String(type)}`);
+          }
+        },
+        CredReadW: (_target, _type, _flags, out) => {
+          out[0] = credSentinel;
+          return true;
+        },
+        CredFree: (ptr) => {
+          assert.equal(ptr, credSentinel);
+          freed += 1;
+        }
+      },
+      fetch: async (url, options) => {
+        assert.equal(options.headers.authorization, `Bearer wincred-${encoding}-token`);
+        return {
+          ok: true,
+          json: async () => (url.endsWith('/api/oauth/profile')
+            ? DEFAULT_CLAUDE_PROFILE
+            : { five_hour: { utilization: 18, resets_at: '2026-06-11T05:00:00Z' } })
+        };
+      }
+    });
+
+    assert.equal(provider.status, 'ok');
+    assert.equal(provider.source, 'oauth');
+    assert.equal(viewCalled, 0);
+    assert.equal(decodeBlobCalls, 1);
+    assert.equal(freed, 1);
+  }
+});

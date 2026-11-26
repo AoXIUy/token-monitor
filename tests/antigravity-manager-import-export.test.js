@@ -191,3 +191,141 @@ test('importExport rejects path traversal, normalizes Rust quota timestamps, pre
     { refreshToken: '1//mixed-2' }
   ]);
 });
+
+test('fileCredentials strips leading UTF-8 BOM when reading local credential files (sync and async)', async (t) => {
+  const fileCredentials = require('../src/electron/antigravityManager/fileCredentials');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-fc-bom-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  fs.mkdirSync(path.join(dir, 'antigravity-acp'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'jetski-standalone-oauth-token'),
+    `\uFEFF${JSON.stringify({ token: { refresh_token: '1//bom-standalone' }, id_token_email: 'BomUser@Example.com' })}`,
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(dir, 'antigravity-acp', 'acp_token.json'),
+    `\uFEFF${JSON.stringify({ refresh_token: '1//bom-acp', email: 'acp@example.com', project_id: 'proj-bom' })}`,
+    'utf8'
+  );
+
+  const expected = [
+    { source: 'standalone-file', refreshToken: '1//bom-standalone', email: 'bomuser@example.com', projectId: '' },
+    { source: 'acp-file', refreshToken: '1//bom-acp', email: 'acp@example.com', projectId: 'proj-bom' }
+  ];
+  assert.deepEqual(fileCredentials.readLocalCredentialFiles({ geminiDir: dir }), expected);
+  assert.deepEqual(await fileCredentials.readLocalCredentialFilesAsync({ geminiDir: dir }), expected);
+});
+
+test('scanAndImportLocalAccounts aggregates keyring, stateDb, and fileCredentials and isolates per-source failures', async (t) => {
+  const stateDb = require('../src/electron/antigravityManager/stateDb');
+  const fileCredentials = require('../src/electron/antigravityManager/fileCredentials');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-scan-local-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const dbPath = path.join(dir, 'state.vscdb');
+  stateDb.injectTokenToDb(dbPath, {
+    accessToken: 'ya29.db',
+    refreshToken: '1//db-rt',
+    expiry: 1800000000,
+    email: 'db@example.com',
+    isGcpTos: true,
+    projectId: 'proj-db'
+  }, { createBackup: false });
+
+  const geminiDir = path.join(dir, '.gemini');
+  fs.mkdirSync(geminiDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(geminiDir, 'jetski-standalone-oauth-token'),
+    `\uFEFF${JSON.stringify({ token: { refresh_token: '1//file-rt' }, id_token_email: 'file@example.com' })}`,
+    'utf8'
+  );
+
+  const mockOAuth = {
+    BUILTIN_GCP_CLIENT_KEY: 'antigravity_gcp',
+    refreshAccessToken: async (rt) => ({
+      accessToken: `ya29.${rt}`,
+      refreshToken: rt,
+      expiresIn: 3600,
+      expiryTimestamp: 1800000000,
+      idToken: '',
+      oauthClientKey: 'antigravity_enterprise'
+    }),
+    fetchUserInfo: async (accessToken) => {
+      const tag = accessToken.replace('ya29.1//', '');
+      return { email: `${tag}@example.com`, name: tag };
+    }
+  };
+
+  // 1. Multi-source scan deduplicates shared tokens and uses async readers when available
+  const store1 = createAntigravityManagerStore({ baseDir: path.join(dir, 'store1') });
+  let usedAsyncKeyring = false;
+  const fullRes = await importExport.scanAndImportLocalAccounts({
+    store: store1,
+    oauth: mockOAuth,
+    geminiDir,
+    keyring: {
+      DEFAULT_ACCOUNT: 'antigravity',
+      ACP_ACCOUNT: 'antigravity-acp',
+      readFromSystemKeyringAsync: async ({ account }) => {
+        usedAsyncKeyring = true;
+        if (account === 'antigravity') return { refreshToken: '1//kr-rt', email: 'kr@example.com' };
+        return { refreshToken: '1//db-rt', email: 'dup@example.com' };
+      }
+    },
+    stateDb: {
+      getAllAntigravityDbPaths: () => [dbPath, path.join(dir, 'missing.vscdb')],
+      extractOAuthStateFromDb: (p, d) => stateDb.extractOAuthStateFromDb(p, d)
+    },
+    fileCredentials
+  });
+  assert.equal(usedAsyncKeyring, true);
+  assert.equal(fullRes.total, 3);
+  assert.equal(fullRes.success, 3);
+  assert.equal(fullRes.failed, 0);
+  const emails1 = store1.listAccounts().map((a) => a.email).sort();
+  assert.deepEqual(emails1, ['db-rt@example.com', 'file-rt@example.com', 'kr-rt@example.com']);
+
+  // 2. Per-source error isolation: throwing keyring does not prevent stateDb + fileCredentials import
+  const store2 = createAntigravityManagerStore({ baseDir: path.join(dir, 'store2') });
+  const isolatedRes = await importExport.scanAndImportLocalAccounts({
+    store: store2,
+    oauth: mockOAuth,
+    geminiDir,
+    keyring: {
+      DEFAULT_ACCOUNT: 'antigravity',
+      ACP_ACCOUNT: 'antigravity-acp',
+      readFromSystemKeyring: () => { throw new Error('keyring unavailable'); }
+    },
+    stateDb: {
+      getAllAntigravityDbPaths: () => [dbPath],
+      extractOAuthStateFromDb: (p, d) => stateDb.extractOAuthStateFromDb(p, d)
+    },
+    fileCredentials
+  });
+  assert.equal(isolatedRes.total, 2);
+  assert.equal(isolatedRes.success, 2);
+  assert.deepEqual(store2.listAccounts().map((a) => a.email).sort(), ['db-rt@example.com', 'file-rt@example.com']);
+
+  // 3. Throwing DB path discovery and throwing fileCredentials still allow keyring accounts through
+  const store3 = createAntigravityManagerStore({ baseDir: path.join(dir, 'store3') });
+  const isolatedRes2 = await importExport.scanAndImportLocalAccounts({
+    store: store3,
+    oauth: mockOAuth,
+    keyring: {
+      DEFAULT_ACCOUNT: 'antigravity',
+      ACP_ACCOUNT: 'antigravity-acp',
+      readFromSystemKeyring: ({ account }) => (account === 'antigravity' ? { refreshToken: '1//only-kr', email: 'only@example.com' } : null)
+    },
+    stateDb: {
+      getAllAntigravityDbPaths: () => { throw new Error('db root failed'); },
+      extractOAuthStateFromDb: () => { throw new Error('should not be called'); }
+    },
+    fileCredentials: {
+      readLocalCredentialFilesAsync: async () => { throw new Error('fs failed'); }
+    }
+  });
+  assert.equal(isolatedRes2.total, 1);
+  assert.equal(isolatedRes2.success, 1);
+  assert.deepEqual(store3.listAccounts().map((a) => a.email), ['only-kr@example.com']);
+});

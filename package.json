@@ -62,6 +62,7 @@
     "asarUnpack": [
       "node_modules/@tokscale/**/*",
       "node_modules/tokscale/**/*",
+      "node_modules/@koromix/**/*",
       "node_modules/koffi/**/*"
     ],
     "mac": {

@@ -245,7 +245,8 @@ function parseWin32CredentialBuffer(rawBuf) {
  *   account?: string,
  *   platform?: NodeJS.Platform,
  *   execFileSync?: typeof execFileSync,
- *   win32Cred?: { read: (target: string) => Buffer | null }
+ *   win32Cred?: { read: (target: string) => Buffer | null },
+ *   win32CredApi?: any
  * }} [options]
  * @returns {{ refreshToken: string, email: string } | null}
  */
@@ -271,19 +272,18 @@ function readFromSystemKeyring(options = {}) {
         const buf = options.win32Cred.read(target);
         return buf ? parseWin32CredentialBuffer(buf) : null;
       }
-      const api = getWin32CredApi();
+      const api = options.win32CredApi || getWin32CredApi();
       const outPtr = [null];
       const ok = api.CredReadW(target, 1, 0, outPtr);
       if (!ok || !outPtr[0]) return null;
       try {
         const cred = api.koffi.decode(outPtr[0], api.CREDENTIALW);
-        if (!cred?.CredentialBlob || !cred.CredentialBlobSize) return null;
-        let rawBuf;
-        try {
-          rawBuf = Buffer.from(new Uint8Array(api.koffi.view(cred.CredentialBlob, cred.CredentialBlobSize)));
-        } catch (_) {
-          rawBuf = Buffer.from(api.koffi.decode(cred.CredentialBlob, 'uint8_t', cred.CredentialBlobSize));
-        }
+        if (!cred?.CredentialBlob || !(cred.CredentialBlobSize > 0)) return null;
+        // Never call `koffi.view()` here: Electron's V8 Sandbox forbids external ArrayBuffers
+        // (`napi_no_external_buffers_allowed`), causing Koffi's CreateView to trigger an uncatchable SIGABRT.
+        const decoded = api.koffi.decode(cred.CredentialBlob, 'uint8_t', cred.CredentialBlobSize);
+        if (!decoded) return null;
+        const rawBuf = Buffer.from(decoded);
         return parseWin32CredentialBuffer(rawBuf);
       } finally {
         api.CredFree(outPtr[0]);
@@ -435,13 +435,14 @@ async function writeToSystemKeyringAsync(tokenData, options = {}) {
  *   platform?: NodeJS.Platform,
  *   execFile?: typeof execFile,
  *   execFileSync?: typeof execFileSync,
- *   win32Cred?: { read: (target: string) => Buffer | null }
+ *   win32Cred?: { read: (target: string) => Buffer | null },
+ *   win32CredApi?: any
  * }} [options]
  * @returns {Promise<{ refreshToken: string, email: string } | null>}
  */
 async function readFromSystemKeyringAsync(options = {}) {
   const platform = options.platform || process.platform;
-  if (options.execFileSync || options.win32Cred || platform === 'win32') {
+  if (options.execFileSync || options.win32Cred || options.win32CredApi || platform === 'win32') {
     return readFromSystemKeyring(options);
   }
   const service = options.service || DEFAULT_SERVICE;

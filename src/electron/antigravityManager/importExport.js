@@ -445,18 +445,40 @@ async function scanAndImportLocalAccounts(deps) {
   /** @type {Map<string, { email?: string, refreshToken: string, isGcpTos?: boolean, projectId?: string | null }>} */
   const foundByRt = new Map();
 
-  for (const acc of [kr.DEFAULT_ACCOUNT, kr.ACP_ACCOUNT]) {
-    const res = kr.readFromSystemKeyring({ ...deps, account: acc });
-    if (res?.refreshToken && !foundByRt.has(res.refreshToken)) {
-      foundByRt.set(res.refreshToken, { email: res.email, refreshToken: res.refreshToken });
-    }
+  const keyringAccounts = [
+    kr.DEFAULT_ACCOUNT || keyring.DEFAULT_ACCOUNT,
+    kr.ACP_ACCOUNT || keyring.ACP_ACCOUNT
+  ];
+  for (const acc of keyringAccounts) {
+    try {
+      const krOpts = { ...deps, account: acc };
+      const res = typeof kr.readFromSystemKeyringAsync === 'function'
+        ? await kr.readFromSystemKeyringAsync(krOpts)
+        : kr.readFromSystemKeyring(krOpts);
+      if (res?.refreshToken && !foundByRt.has(res.refreshToken)) {
+        foundByRt.set(res.refreshToken, { email: res.email, refreshToken: res.refreshToken });
+      }
+    } catch (_) {}
   }
 
-  for (const dbPath of sdb.getAllAntigravityDbPaths(deps)) {
-    if (!fs.existsSync(dbPath)) continue;
+  /** @type {string[]} */
+  let dbPaths = [];
+  try {
+    const candidatePaths = sdb.getAllAntigravityDbPaths(deps);
+    dbPaths = Array.isArray(candidatePaths) ? candidatePaths : [];
+  } catch (_) {}
+
+  for (const dbPath of dbPaths) {
     try {
-      const state = sdb.extractOAuthStateFromDb(dbPath, deps);
-      if (state.refreshToken && !foundByRt.has(state.refreshToken)) {
+      await fs.promises.access(dbPath);
+    } catch (_) {
+      continue;
+    }
+    try {
+      const state = typeof sdb.extractOAuthStateFromDbAsync === 'function'
+        ? await sdb.extractOAuthStateFromDbAsync(dbPath, deps)
+        : sdb.extractOAuthStateFromDb(dbPath, deps);
+      if (state?.refreshToken && !foundByRt.has(state.refreshToken)) {
         foundByRt.set(state.refreshToken, {
           refreshToken: state.refreshToken,
           isGcpTos: state.isGcpTos,
@@ -466,15 +488,20 @@ async function scanAndImportLocalAccounts(deps) {
     } catch (_) {}
   }
 
-  for (const fileEntry of fc.readLocalCredentialFiles(deps)) {
-    if (fileEntry.refreshToken && !foundByRt.has(fileEntry.refreshToken)) {
-      foundByRt.set(fileEntry.refreshToken, {
-        email: fileEntry.email,
-        refreshToken: fileEntry.refreshToken,
-        projectId: fileEntry.projectId || null
-      });
+  try {
+    const fileEntries = typeof fc.readLocalCredentialFilesAsync === 'function'
+      ? await fc.readLocalCredentialFilesAsync(deps)
+      : fc.readLocalCredentialFiles(deps);
+    for (const fileEntry of Array.isArray(fileEntries) ? fileEntries : []) {
+      if (fileEntry?.refreshToken && !foundByRt.has(fileEntry.refreshToken)) {
+        foundByRt.set(fileEntry.refreshToken, {
+          email: fileEntry.email,
+          refreshToken: fileEntry.refreshToken,
+          projectId: fileEntry.projectId || null
+        });
+      }
     }
-  }
+  } catch (_) {}
 
   return await batchImportRefreshTokens(Array.from(foundByRt.values()), deps);
 }

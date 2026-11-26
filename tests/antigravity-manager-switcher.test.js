@@ -587,3 +587,110 @@ test('async processManager, async keyring, lazy target exe lookup, and single-pa
   assert.equal(asyncInjectCalls[0].payload.serviceMachineId, 'mac-fast');
   assert.equal(asyncInjectCalls[0].payload.storageServiceMachineId, 'dev-fast');
 });
+
+test('Windows keyring CredReadW decodes UTF-8 and UTF-16LE blobs via koffi.decode and never calls koffi.view', async () => {
+  const realKoffi = require('koffi');
+  const FILETIME = realKoffi.struct({ dwLowDateTime: 'uint32_t', dwHighDateTime: 'uint32_t' });
+  const CREDENTIALW = realKoffi.struct({
+    Flags: 'uint32_t',
+    Type: 'uint32_t',
+    TargetName: 'str16',
+    Comment: 'void *',
+    LastWritten: FILETIME,
+    CredentialBlobSize: 'uint32_t',
+    CredentialBlob: 'uint8_t *',
+    Persist: 'uint32_t',
+    AttributeCount: 'uint32_t',
+    Attributes: 'void *',
+    TargetAlias: 'void *',
+    UserName: 'str16'
+  });
+
+  const makeApi = (blobBuf) => {
+    const rawStruct = Buffer.alloc(realKoffi.sizeof(CREDENTIALW));
+    realKoffi.encode(rawStruct, CREDENTIALW, {
+      Flags: 0,
+      Type: 1,
+      TargetName: 'gemini:antigravity',
+      Comment: null,
+      LastWritten: { dwLowDateTime: 0, dwHighDateTime: 0 },
+      CredentialBlobSize: blobBuf ? blobBuf.length : 0,
+      CredentialBlob: blobBuf || null,
+      Persist: 2,
+      AttributeCount: 0,
+      Attributes: null,
+      TargetAlias: null,
+      UserName: 'antigravity'
+    });
+    let viewCalled = 0;
+    let freedPtr = null;
+    let decodedBlobCalls = 0;
+    const api = {
+      CREDENTIALW,
+      koffi: {
+        view: () => {
+          viewCalled += 1;
+          throw new Error('koffi.view must never be called (aborts Electron V8 Sandbox)');
+        },
+        decode: (...args) => {
+          if (args[1] === 'uint8_t') decodedBlobCalls += 1;
+          return realKoffi.decode(...args);
+        }
+      },
+      CredReadW: (target, type, flags, outPtr) => {
+        assert.equal(target, 'gemini:antigravity');
+        assert.equal(type, 1);
+        assert.equal(flags, 0);
+        outPtr[0] = rawStruct;
+        return 1;
+      },
+      CredFree: (ptr) => {
+        freedPtr = ptr;
+      }
+    };
+    return {
+      api,
+      get viewCalled() { return viewCalled; },
+      get freedPtr() { return freedPtr; },
+      get decodedBlobCalls() { return decodedBlobCalls; },
+      rawStruct
+    };
+  };
+
+  // UTF-8 JSON credential
+  const utf8Blob = Buffer.from(keyring.serializeKeyringPayload({
+    accessToken: 'ya29.utf8',
+    refreshToken: '1//win-utf8-rt',
+    expiryTimestamp: 1800000000,
+    email: 'utf8@example.com'
+  }), 'utf8');
+  const utf8Case = makeApi(utf8Blob);
+  const utf8Res = keyring.readFromSystemKeyring({ platform: 'win32', win32CredApi: utf8Case.api });
+  assert.deepEqual(utf8Res, { refreshToken: '1//win-utf8-rt', email: 'utf8@example.com' });
+  assert.equal(utf8Case.viewCalled, 0);
+  assert.equal(utf8Case.decodedBlobCalls, 1);
+  assert.equal(utf8Case.freedPtr, utf8Case.rawStruct);
+
+  // UTF-16LE + trailing NUL credential via async entrypoint
+  const utf16Blob = Buffer.from(
+    `${keyring.serializeKeyringPayload({
+      accessToken: 'ya29.utf16',
+      refreshToken: '1//win-utf16-rt',
+      expiryTimestamp: 1800000000,
+      email: 'utf16@example.com'
+    })}\0\0`,
+    'utf16le'
+  );
+  const utf16Case = makeApi(utf16Blob);
+  const utf16Res = await keyring.readFromSystemKeyringAsync({ platform: 'win32', win32CredApi: utf16Case.api });
+  assert.deepEqual(utf16Res, { refreshToken: '1//win-utf16-rt', email: 'utf16@example.com' });
+  assert.equal(utf16Case.viewCalled, 0);
+  assert.equal(utf16Case.decodedBlobCalls, 1);
+  assert.equal(utf16Case.freedPtr, utf16Case.rawStruct);
+
+  // Empty blob returns null cleanly and still calls CredFree
+  const emptyCase = makeApi(null);
+  assert.equal(keyring.readFromSystemKeyring({ platform: 'win32', win32CredApi: emptyCase.api }), null);
+  assert.equal(emptyCase.viewCalled, 0);
+  assert.equal(emptyCase.freedPtr, emptyCase.rawStruct);
+});

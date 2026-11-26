@@ -155,6 +155,10 @@ function extractOAuthStateFromDb(dbPath, deps = {}) {
   }
   const db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
   try {
+    if (typeof db.exec === 'function') {
+      db.exec('PRAGMA busy_timeout = 250;');
+      db.exec('PRAGMA query_only = ON;');
+    }
     const unifiedVal = readItemValue(db, 'antigravityUnifiedStateSync.oauthToken');
     if (unifiedVal) {
       const { sentinelKey, payload } = protobuf.decodeUnifiedStateEntryWithTarget(
