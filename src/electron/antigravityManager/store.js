@@ -35,6 +35,39 @@ const DEFAULT_CONFIG = Object.freeze({
 });
 
 const VALID_SWITCH_TARGETS = new Set(['auto', 'classic', 'ide', 'agy', 'acp']);
+const MAX_AUTO_SWITCH_HISTORY = 20;
+
+/**
+ * @param {unknown} raw
+ * @returns {Record<string, any> | null}
+ */
+function sanitizeAutoSwitchRecord(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const src = /** @type {Record<string, any>} */ (raw);
+  const at = nonNegativeTimestamp(src.at);
+  if (at <= 0) return null;
+  const resumedConversations = Array.isArray(src.resumedConversations)
+    ? src.resumedConversations.map((id) => String(id || '').trim()).filter(Boolean).slice(0, 10)
+    : [];
+  return {
+    at,
+    fromEmail: typeof src.fromEmail === 'string' ? src.fromEmail.trim().toLowerCase().slice(0, 256) : '',
+    toEmail: typeof src.toEmail === 'string' ? src.toEmail.trim().slice(0, 256) : '',
+    target: typeof src.target === 'string' ? src.target.trim().slice(0, 32) : '',
+    mode: typeof src.mode === 'string' ? src.mode.trim().slice(0, 32) : '',
+    triggerLabel: typeof src.triggerLabel === 'string' ? src.triggerLabel.trim().slice(0, 256) : '',
+    ok: src.ok === true,
+    ...(typeof src.resumedCount === 'number' && Number.isFinite(src.resumedCount)
+      ? { resumedCount: Math.max(0, Math.round(src.resumedCount)), resumedConversations }
+      : {}),
+    ...(typeof src.resumeError === 'string' && src.resumeError.trim()
+      ? { resumeError: src.resumeError.trim().slice(0, 512) }
+      : {}),
+    ...(typeof src.error === 'string' && src.error.trim()
+      ? { error: src.error.trim().slice(0, 512) }
+      : {})
+  };
+}
 
 /**
  * @param {string} email
@@ -242,11 +275,15 @@ function createAntigravityManagerStore({ baseDir, safeStorage = null, logger = c
 
   let config = normalizeConfig(readJsonSafe(configFile, DEFAULT_CONFIG));
 
-  /** @type {{ version: number, activeAccounts: { classic: string | null, ide: string | null, agy: string | null, acp: string | null }, accounts: ReturnType<typeof sanitizeAccountMeta>[] }} */
+  /** @type {{ version: number, activeAccounts: { classic: string | null, ide: string | null, agy: string | null, acp: string | null }, accounts: ReturnType<typeof sanitizeAccountMeta>[], lastAutoSwitch: Record<string, any> | null, autoSwitchHistory: Record<string, any>[] }} */
   let accountsDoc = (() => {
     const loaded = readJsonSafe(accountsFile, null);
     const active = loaded?.activeAccounts && typeof loaded.activeAccounts === 'object' ? loaded.activeAccounts : {};
     const list = Array.isArray(loaded?.accounts) ? loaded.accounts.map(sanitizeAccountMeta) : [];
+    const history = Array.isArray(loaded?.autoSwitchHistory)
+      ? /** @type {Record<string, any>[]} */ (loaded.autoSwitchHistory.map(sanitizeAutoSwitchRecord).filter(Boolean)).slice(0, MAX_AUTO_SWITCH_HISTORY)
+      : [];
+    const lastAutoSwitch = sanitizeAutoSwitchRecord(loaded?.lastAutoSwitch) || history[0] || null;
     return {
       version: 1,
       activeAccounts: {
@@ -255,7 +292,9 @@ function createAntigravityManagerStore({ baseDir, safeStorage = null, logger = c
         agy: typeof active.agy === 'string' && active.agy ? active.agy : null,
         acp: typeof active.acp === 'string' && active.acp ? active.acp : null
       },
-      accounts: list
+      accounts: list,
+      lastAutoSwitch,
+      autoSwitchHistory: history
     };
   })();
 
@@ -590,11 +629,34 @@ function createAntigravityManagerStore({ baseDir, safeStorage = null, logger = c
     return profile;
   }
 
+  /**
+   * Persist the latest auto-switch audit record and prepend to bounded local history.
+   * @param {Record<string, any>} rawRecord
+   */
+  function recordAutoSwitch(rawRecord) {
+    const clean = sanitizeAutoSwitchRecord(rawRecord);
+    if (!clean) return null;
+    accountsDoc.lastAutoSwitch = clean;
+    accountsDoc.autoSwitchHistory = [clean, ...(accountsDoc.autoSwitchHistory || [])].slice(0, MAX_AUTO_SWITCH_HISTORY);
+    saveAccountsDoc();
+    return { ...clean };
+  }
+
+  function getLastAutoSwitch() {
+    return accountsDoc.lastAutoSwitch ? { ...accountsDoc.lastAutoSwitch } : null;
+  }
+
+  function getAutoSwitchHistory() {
+    return (accountsDoc.autoSwitchHistory || []).map((item) => ({ ...item }));
+  }
+
   function getStateForRenderer() {
     return {
       config: getConfig(),
       accounts: listAccounts(),
       activeAccounts: getActiveAccounts(),
+      lastAutoSwitch: getLastAutoSwitch(),
+      autoSwitchHistory: getAutoSwitchHistory(),
       hasOriginalDeviceBackup: fs.existsSync(originalDeviceFile),
       encryptionMode: canEncrypt() ? 'safeStorage' : 'privateFile'
     };
@@ -616,6 +678,9 @@ function createAntigravityManagerStore({ baseDir, safeStorage = null, logger = c
     setActiveAccount,
     setAccountWeight,
     updateAccountQuota,
+    recordAutoSwitch,
+    getLastAutoSwitch,
+    getAutoSwitchHistory,
     getOriginalDeviceProfile,
     saveOriginalDeviceProfileIfMissing,
     getStateForRenderer

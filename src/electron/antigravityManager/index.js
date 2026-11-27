@@ -50,7 +50,10 @@ const {
  *     activityMinIntervalMs?: number,
  *     turnEndDelayMs?: number,
  *     startupDelayMs?: number,
- *     hotSwitchVerifyDelayMs?: number
+ *     hotSwitchVerifyDelayMs?: number,
+ *     hotSwitchVerifyAttempts?: number,
+ *     maxBusyDeferralMs?: number,
+ *     maxQuotaAgeMs?: number
  *   }
  * }} options
  */
@@ -71,6 +74,9 @@ function createAntigravityManagerService(options) {
   const AUTO_SWITCH_TURN_END_DELAY_MS = Math.max(20, Number(options.autoSwitchMonitorOptions?.turnEndDelayMs || 600));
   const AUTO_SWITCH_STARTUP_DELAY_MS = Math.max(20, Number(options.autoSwitchMonitorOptions?.startupDelayMs || 2500));
   const HOT_SWITCH_VERIFY_DELAY_MS = Math.max(20, Number(options.autoSwitchMonitorOptions?.hotSwitchVerifyDelayMs || 1800));
+  const HOT_SWITCH_VERIFY_ATTEMPTS = Math.max(1, Math.min(6, Math.round(Number(options.autoSwitchMonitorOptions?.hotSwitchVerifyAttempts || 3))));
+  const AUTO_SWITCH_MAX_BUSY_DEFERRAL_MS = Math.max(200, Number(options.autoSwitchMonitorOptions?.maxBusyDeferralMs || 180_000));
+  const AUTO_SWITCH_MAX_QUOTA_AGE_MS = Math.max(1000, Number(options.autoSwitchMonitorOptions?.maxQuotaAgeMs || 15 * 60_000));
   const AUTO_SWITCH_CONFIG_KEYS = [
     'autoSwitchEnabled',
     'autoSwitchScope',
@@ -105,10 +111,21 @@ function createAntigravityManagerService(options) {
   const recentRunningConversations = new Map();
   /** @type {unknown} */
   let pendingAutoSwitchLimits = null;
+  let busyDeferralStartedAtMs = 0;
   let lastAutoSwitchAttemptMs = 0;
   let lastAutoSwitchWasEmptyPool = false;
+  /** @type {{ fromEmail: string, at: number } | null} */
+  let lastUnverifiedHotSwitch = null;
   /** @type {Record<string, any> | null} */
-  let lastAutoSwitch = null;
+  let lastAutoSwitch = store.getLastAutoSwitch();
+
+  /**
+   * @param {Record<string, any>} record
+   */
+  function commitAutoSwitchRecord(record) {
+    lastAutoSwitch = store.recordAutoSwitch(record) || record;
+    return lastAutoSwitch;
+  }
   /** @type {Array<() => void>} */
   const refreshWaiters = [];
   let started = false;
@@ -370,7 +387,9 @@ function createAntigravityManagerService(options) {
           return true;
         }
       });
-      scheduler.recordRefreshTimestamp();
+      if (!controller.signal.aborted && (targets.length === 0 || stats.success > 0)) {
+        scheduler.recordRefreshTimestamp();
+      }
       return { ok: true, ...stats };
     } finally {
       if (activeRefreshAbort === controller) activeRefreshAbort = null;
@@ -408,10 +427,11 @@ function createAntigravityManagerService(options) {
     onRefreshAll: async () => {
       const cfg = store.getConfig();
       const targets = store.listAccounts().filter((a) => !a.disabled && !a.banned && a.hasToken);
+      if (targets.length === 0) return { ok: true, total: 0, success: 0, failed: 0 };
       const controller = new AbortController();
       activeRefreshAbort = controller;
       try {
-        await quota.runSlidingWindowBatch(targets, {
+        const stats = await quota.runSlidingWindowBatch(targets, {
           concurrency: cfg.refreshConcurrency,
           slideDelaySecs: cfg.refreshSlideDelaySecs,
           signal: controller.signal,
@@ -432,6 +452,7 @@ function createAntigravityManagerService(options) {
             return true;
           }
         });
+        return { ok: !controller.signal.aborted && stats.success > 0, ...stats };
       } finally {
         if (activeRefreshAbort === controller) activeRefreshAbort = null;
       }
@@ -455,11 +476,27 @@ function createAntigravityManagerService(options) {
   }
 
   /**
+   * @param {unknown} limitsPayload
+   */
+  function hasUsableLocalRpcRow(limitsPayload) {
+    const providers = Array.isArray(limitsPayload)
+      ? limitsPayload
+      : (limitsPayload && typeof limitsPayload === 'object' && Array.isArray(/** @type {any} */ (limitsPayload).providers)
+          ? /** @type {any} */ (limitsPayload).providers
+          : []);
+    return providers.some((/** @type {any} */ row) => (
+      row && row.provider === 'antigravity' && row.source === 'rpc' && row.status === 'ok'
+    ));
+  }
+
+  /**
    * @param {string} _reason
-   * @param {{ bypassMinInterval?: boolean }} [opts]
+   * @param {{ bypassMinInterval?: boolean, fallbackLimits?: unknown }} [opts]
    */
   async function probeAndEvaluateLocalQuota(_reason, opts = {}) {
-    if (stopped || typeof options.probeLocalLimits !== 'function') return null;
+    if (stopped || typeof options.probeLocalLimits !== 'function') {
+      return opts.fallbackLimits ? await onLocalLimitsUpdated(opts.fallbackLimits) : null;
+    }
     if (!store.getConfig().autoSwitchEnabled) return null;
     if (localProbeInFlight || autoSwitchInFlight || switching) return null;
     const now = nowMsFn();
@@ -472,10 +509,19 @@ function createAntigravityManagerService(options) {
     try {
       const probed = await options.probeLocalLimits({ signal: controller.signal });
       lastLocalProbeAtMs = nowMsFn();
-      if (stopped || controller.signal.aborted || !probed) return null;
-      return await onLocalLimitsUpdated(probed);
+      if (stopped || controller.signal.aborted) return null;
+      if (probed && (!opts.fallbackLimits || hasUsableLocalRpcRow(probed))) {
+        return await onLocalLimitsUpdated(probed);
+      }
+      if (opts.fallbackLimits) {
+        return await onLocalLimitsUpdated(opts.fallbackLimits);
+      }
+      return null;
     } catch (_) {
       lastLocalProbeAtMs = nowMsFn();
+      if (!stopped && !controller.signal.aborted && opts.fallbackLimits) {
+        return await onLocalLimitsUpdated(opts.fallbackLimits);
+      }
       return null;
     } finally {
       if (activeLocalProbeAbort === controller) activeLocalProbeAbort = null;
@@ -724,7 +770,14 @@ function createAntigravityManagerService(options) {
   /**
    * @param {string} accountId
    * @param {string} [targetClient]
-   * @param {{ forceRestart?: boolean, verifyHotSwitch?: boolean, autoResume?: boolean }} [switchOpts]
+   * @param {{
+   *   forceRestart?: boolean,
+   *   verifyHotSwitch?: boolean,
+   *   autoResume?: boolean,
+   *   isAutoSwitch?: boolean,
+   *   syncAgyCli?: boolean,
+   *   triggeredFromEmail?: string
+   * }} [switchOpts]
    */
   async function switchAccountTo(accountId, targetClient, switchOpts = {}) {
     if (switching) return { ok: false, error: 'Account switch already in progress' };
@@ -738,7 +791,8 @@ function createAntigravityManagerService(options) {
       nowSec: nowSecFn,
       ...(options.switcherDeps || {}),
       fetch: options.fetch,
-      customExecutablePaths: cfg.customExecutablePaths
+      customExecutablePaths: cfg.customExecutablePaths,
+      ...(switchOpts?.syncAgyCli ? { syncAgyCli: true } : {})
     };
     const shouldAutoResume = (
       cfg.autoResumeEnabled !== false
@@ -754,10 +808,14 @@ function createAntigravityManagerService(options) {
       ? resumeApi.snapshotInterruptedConversations({
           ...(options.taskResumeDeps || {}),
           recentlyRunningIds: recentRunningConversations.keys(),
-          nowMs: nowForRecent
+          nowMs: nowForRecent,
+          onlyActivelyRunning: !switchOpts?.isAutoSwitch,
+          targetClient: target
         })
       : [];
 
+    pendingAutoSwitchLimits = null;
+    busyDeferralStartedAtMs = 0;
     switching = true;
     switchingAccountId = account.id;
     notifyStateChanged(false);
@@ -783,25 +841,40 @@ function createAntigravityManagerService(options) {
         && typeof options.probeLocalLimits === 'function'
         && account.email
       ) {
-        try {
+        const expectedEmail = String(account.email || '').trim().toLowerCase();
+        let verifiedLiveEmail = '';
+        for (let attempt = 0; attempt < HOT_SWITCH_VERIFY_ATTEMPTS; attempt += 1) {
           await waitUnref(HOT_SWITCH_VERIFY_DELAY_MS);
-          if (!stopped) {
+          if (stopped) break;
+          try {
             const verifySnapshot = await options.probeLocalLimits();
-            const liveEmail = extractLocalRpcAccountEmail(verifySnapshot);
-            const expectedEmail = String(account.email || '').trim().toLowerCase();
-            if (liveEmail && expectedEmail && liveEmail !== expectedEmail) {
-              logger.warn?.(`Hot-switch kept ${liveEmail} instead of ${expectedEmail}; falling back to full restart`);
-              res = await switcher.switchAccount({
-                account,
-                tokenData,
-                targetClient: target,
-                forceRestart: true,
-                store,
-                deps: switcherDepsObj
-              });
-            }
+            verifiedLiveEmail = extractLocalRpcAccountEmail(verifySnapshot);
+          } catch (_) {
+            verifiedLiveEmail = '';
           }
-        } catch (_) {}
+          if (verifiedLiveEmail) break;
+        }
+        if (!stopped && verifiedLiveEmail && expectedEmail && verifiedLiveEmail !== expectedEmail) {
+          lastUnverifiedHotSwitch = null;
+          logger.warn?.(`Hot-switch kept ${verifiedLiveEmail} instead of ${expectedEmail}; falling back to full restart`);
+          res = await switcher.switchAccount({
+            account,
+            tokenData,
+            targetClient: target,
+            forceRestart: true,
+            store,
+            deps: switcherDepsObj
+          });
+        } else if (verifiedLiveEmail) {
+          lastUnverifiedHotSwitch = null;
+        } else if (switchOpts?.triggeredFromEmail) {
+          lastUnverifiedHotSwitch = {
+            fromEmail: String(switchOpts.triggeredFromEmail).trim().toLowerCase(),
+            at: nowMsFn()
+          };
+        }
+      } else if (res?.ok && res?.mode === 'restart') {
+        lastUnverifiedHotSwitch = null;
       }
       switchedOk = Boolean(res?.ok);
       if (switchedOk && !autoSwitchInFlight) {
@@ -811,7 +884,8 @@ function createAntigravityManagerService(options) {
         try {
           const resumeOutcome = await resumeApi.resumeInterruptedConversations(interruptedBeforeSwitch, {
             ...(options.taskResumeDeps || {}),
-            prompt: cfg.autoResumePrompt
+            prompt: cfg.autoResumePrompt,
+            targetClient: String(res?.target || target)
           });
           if (resumeOutcome.resumedIds.length > 0) {
             for (const cid of resumeOutcome.resumedIds) recentRunningConversations.delete(cid);
@@ -936,10 +1010,11 @@ function createAntigravityManagerService(options) {
     }
     autoSwitchInFlight = true;
     pendingAutoSwitchLimits = null;
+    busyDeferralStartedAtMs = 0;
     notifyStateChanged(false);
 
     const initialCfg = store.getConfig();
-    /** @type {{ classicRunning: boolean, ideRunning: boolean } | null} */
+    /** @type {{ classicRunning: boolean, ideRunning: boolean, acpRunning: boolean } | null} */
     let activeClients = null;
     if (!options.switcherDeps || options.switcherDeps.processManager) {
       try {
@@ -951,7 +1026,10 @@ function createAntigravityManagerService(options) {
         if (typeof pmApi.isAntigravityRunning === 'function') {
           activeClients = {
             classicRunning: Boolean(pmApi.isAntigravityRunning('classic', procDeps)),
-            ideRunning: Boolean(pmApi.isAntigravityRunning('ide', procDeps))
+            ideRunning: Boolean(pmApi.isAntigravityRunning('ide', procDeps)),
+            acpRunning: typeof pmApi.isProcessRunningByName === 'function'
+              ? Boolean(pmApi.isProcessRunningByName('agy_acp_server', procDeps))
+              : false
           };
         }
       } catch (_) {}
@@ -966,11 +1044,16 @@ function createAntigravityManagerService(options) {
       if (scheduler.isRefreshing()) {
         await waitForActiveRefresh();
       } else {
-        const nowSec = Math.floor(nowMsFn() / 1000);
+        const nowMsBeforeRefresh = nowMsFn();
+        const nowSec = Math.floor(nowMsBeforeRefresh / 1000);
         const lastSec = scheduler.getLastRefreshTimestamp();
         const candidates = store.listAccounts().filter((a) => !a.disabled && !a.banned && a.hasToken);
-        const hasUnfetchedCandidate = candidates.some((a) => !a.quota?.lastUpdatedAt);
-        if (candidates.length > 0 && (lastSec <= 0 || nowSec - lastSec >= 45 || hasUnfetchedCandidate)) {
+        const hasUnfetchedOrStaleCandidate = candidates.some((a) => {
+          const rawTs = Number(a.quota?.lastUpdatedAt || 0);
+          const tsMs = rawTs > 0 && rawTs < 1e12 ? rawTs * 1000 : rawTs;
+          return tsMs <= 0 || nowMsBeforeRefresh - tsMs > AUTO_SWITCH_MAX_QUOTA_AGE_MS;
+        });
+        if (candidates.length > 0 && (lastSec <= 0 || nowSec - lastSec >= 45 || hasUnfetchedOrStaleCandidate)) {
           await refreshAccounts([]);
         }
       }
@@ -982,6 +1065,14 @@ function createAntigravityManagerService(options) {
       }
 
       const active = store.getActiveAccounts();
+      const slot = targetClient === 'ide' || (targetClient === 'auto' && activeClients?.ideRunning && !activeClients?.classicRunning)
+        ? 'ide'
+        : (targetClient === 'agy'
+            ? 'agy'
+            : (targetClient === 'acp' || (targetClient === 'auto' && !activeClients?.classicRunning && !activeClients?.ideRunning && activeClients?.acpRunning)
+                ? 'acp'
+                : 'classic'));
+      const slotId = active[slot];
       /** @type {Set<string>} */
       const excludeIdSet = new Set();
       /** @type {Set<string>} */
@@ -990,17 +1081,17 @@ function createAntigravityManagerService(options) {
         excludeEmailSet.add(evalRes.accountEmail);
         const matched = store.findAccountByEmail(evalRes.accountEmail);
         if (matched?.id) excludeIdSet.add(matched.id);
+        if (slotId && (slot === 'acp' || (slot === 'agy' && evalRes.sourceDetail !== 'cli'))) {
+          excludeIdSet.add(slotId);
+        }
       } else {
-        const slot = targetClient === 'ide' || (targetClient === 'auto' && activeClients?.ideRunning && !activeClients?.classicRunning)
-          ? 'ide'
-          : (targetClient === 'agy' ? 'agy' : (targetClient === 'acp' ? 'acp' : 'classic'));
-        const slotId = active[slot];
         if (slotId) excludeIdSet.add(slotId);
         const localHints = await detectLocalLoggedInAccountHints();
         for (const id of localHints.accountIds) excludeIdSet.add(id);
         for (const em of localHints.emails) excludeEmailSet.add(em);
       }
 
+      const selectionNowMs = nowMsFn();
       const best = autoSwitch.selectReplacementAccount(store.listAccounts(), {
         selectionMode: freshCfg.selectionMode,
         thresholdPercent: freshCfg.autoSwitchThresholdPercent,
@@ -1009,11 +1100,13 @@ function createAntigravityManagerService(options) {
         excludeEmails: excludeEmailSet,
         excludeAccountKeys: evalRes.accountKey ? [evalRes.accountKey] : [],
         preferredFamilies: evalRes.exhaustedFamilies,
-        requireVerifiedQuota: true
+        requireVerifiedQuota: true,
+        maxQuotaAgeMs: AUTO_SWITCH_MAX_QUOTA_AGE_MS,
+        nowMs: selectionNowMs
       });
 
       if (!best) {
-        const emptyRecord = {
+        const emptyRecord = commitAutoSwitchRecord({
           at: nowMsFn(),
           fromEmail: evalRes.accountEmail || '',
           toEmail: '',
@@ -1022,19 +1115,33 @@ function createAntigravityManagerService(options) {
           triggerLabel: evalRes.triggerLabel,
           ok: false,
           error: 'No eligible unexhausted account in pool'
-        };
-        lastAutoSwitch = emptyRecord;
+        });
         lastAutoSwitchAttemptMs = nowMsFn();
         lastAutoSwitchWasEmptyPool = true;
         try { options.onAutoSwitchCompleted?.(emptyRecord); } catch (_) {}
         return { ok: false, error: emptyRecord.error, lastAutoSwitch: emptyRecord };
       }
 
+      const shouldEscalateHotSwitch = Boolean(
+        lastUnverifiedHotSwitch
+        && evalRes.accountEmail
+        && lastUnverifiedHotSwitch.fromEmail === evalRes.accountEmail
+        && selectionNowMs - lastUnverifiedHotSwitch.at < 15 * 60_000
+      );
+      if (shouldEscalateHotSwitch) {
+        lastUnverifiedHotSwitch = null;
+      }
+
       lastAutoSwitchAttemptMs = nowMsFn();
       lastAutoSwitchWasEmptyPool = false;
       /** @type {any} */
-      const switchRes = await switchAccountTo(best.id, targetClient);
-      const record = {
+      const switchRes = await switchAccountTo(best.id, targetClient, {
+        isAutoSwitch: true,
+        syncAgyCli: evalRes.sourceDetail === 'cli',
+        forceRestart: shouldEscalateHotSwitch,
+        triggeredFromEmail: evalRes.accountEmail || ''
+      });
+      const record = commitAutoSwitchRecord({
         at: nowMsFn(),
         fromEmail: evalRes.accountEmail || '',
         toEmail: best.email || best.id,
@@ -1046,13 +1153,12 @@ function createAntigravityManagerService(options) {
         resumedConversations: Array.isArray(switchRes?.resumedConversations) ? switchRes.resumedConversations : [],
         ...(switchRes?.resumeError ? { resumeError: String(switchRes.resumeError) } : {}),
         ...(switchRes?.error ? { error: String(switchRes.error) } : {})
-      };
-      lastAutoSwitch = record;
+      });
       try { options.onAutoSwitchCompleted?.(record); } catch (_) {}
       return { ...switchRes, account: best, lastAutoSwitch: record };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
-      const errRecord = {
+      const errRecord = commitAutoSwitchRecord({
         at: nowMsFn(),
         fromEmail: evalRes.accountEmail || '',
         toEmail: '',
@@ -1061,8 +1167,7 @@ function createAntigravityManagerService(options) {
         triggerLabel: evalRes.triggerLabel,
         ok: false,
         error: errMsg
-      };
-      lastAutoSwitch = errRecord;
+      });
       lastAutoSwitchAttemptMs = nowMsFn();
       try { options.onAutoSwitchCompleted?.(errRecord); } catch (_) {}
       return { ok: false, error: errMsg, lastAutoSwitch: errRecord };
@@ -1081,11 +1186,13 @@ function createAntigravityManagerService(options) {
     const cfg = store.getConfig();
     if (!cfg.autoSwitchEnabled) {
       pendingAutoSwitchLimits = null;
+      busyDeferralStartedAtMs = 0;
       return { triggered: false, skipped: 'disabled' };
     }
     const evalRes = autoSwitch.evaluateLocalQuotaTrigger(limits, cfg);
     if (!evalRes.triggered) {
       pendingAutoSwitchLimits = null;
+      busyDeferralStartedAtMs = 0;
       return { triggered: false, skipped: 'within_quota' };
     }
     if (autoSwitchInFlight || switching) {
@@ -1099,9 +1206,16 @@ function createAntigravityManagerService(options) {
     if (lastAutoSwitchAttemptMs > 0 && now - lastAutoSwitchAttemptMs < effectiveCooldownMs) {
       return { triggered: true, skipped: 'cooldown' };
     }
-    if (!evalRes.hardExhausted && options.isLocalAntigravityBusy?.() === true) {
-      pendingAutoSwitchLimits = limits;
-      return { triggered: true, skipped: 'session_busy' };
+    if (options.isLocalAntigravityBusy?.() === true) {
+      if (busyDeferralStartedAtMs <= 0) {
+        busyDeferralStartedAtMs = now;
+      }
+      if (!evalRes.hardExhausted || now - busyDeferralStartedAtMs < AUTO_SWITCH_MAX_BUSY_DEFERRAL_MS) {
+        pendingAutoSwitchLimits = limits;
+        return { triggered: true, skipped: 'session_busy' };
+      }
+    } else {
+      busyDeferralStartedAtMs = 0;
     }
     const outcome = await runAutoSwitchFlow(evalRes);
     return { triggered: true, ...outcome };
@@ -1128,6 +1242,13 @@ function createAntigravityManagerService(options) {
     if (!isNowBusy && pendingAutoSwitchLimits) {
       const queued = pendingAutoSwitchLimits;
       pendingAutoSwitchLimits = null;
+      busyDeferralStartedAtMs = 0;
+      if (typeof options.probeLocalLimits === 'function') {
+        return probeAndEvaluateLocalQuota('deferred_turn_end', {
+          bypassMinInterval: true,
+          fallbackLimits: queued
+        });
+      }
       return onLocalLimitsUpdated(queued);
     }
 
@@ -1273,6 +1394,7 @@ function createAntigravityManagerService(options) {
     stopped = true;
     started = false;
     pendingAutoSwitchLimits = null;
+    busyDeferralStartedAtMs = 0;
     clearAutoSwitchMonitorTimers();
     scheduler.stop();
     resolveRefreshWaiters();

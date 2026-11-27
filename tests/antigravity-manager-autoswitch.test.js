@@ -859,3 +859,456 @@ test('summarizePoolAccountQuota and isPoolAccountExhausted ignore disabled bucke
   assert.equal(summary.entries[0].minPercent, 85);
   assert.equal(autoSwitch.isPoolAccountExhausted(account, { scope: 'primary', thresholdPercent: 0 }), false);
 });
+
+test('selectReplacementAccount rejects models-only candidates whose triggered family is exhausted, enforces maxQuotaAgeMs, and honors elapsed resetTime', () => {
+  const nowMs = Date.parse('2026-11-27T12:00:00Z');
+  const staleMs = nowMs - 30 * 60_000;
+  const freshMs = nowMs - 2 * 60_000;
+
+  // Models-only pool where every candidate has Claude=0% and Gemini=100% must NOT ping-pong under primary scope
+  const modelsOnlyPool = [
+    {
+      id: 'm1',
+      email: 'claude-zero@example.com',
+      hasToken: true,
+      quota: {
+        lastUpdatedAt: freshMs,
+        groups: [],
+        models: [
+          { name: 'gemini-3.1-pro-high', percentage: 100 },
+          { name: 'claude-sonnet-4.5', percentage: 0 }
+        ]
+      }
+    }
+  ];
+  assert.equal(
+    autoSwitch.selectReplacementAccount(modelsOnlyPool, {
+      scope: 'primary',
+      thresholdPercent: 0,
+      preferredFamilies: ['claude'],
+      requireVerifiedQuota: true,
+      maxQuotaAgeMs: 15 * 60_000,
+      nowMs
+    }),
+    null,
+    'must not switch into another Claude-depleted account under primary scope'
+  );
+
+  // Under `all` scope, when both Gemini and Claude are exhausted locally, a candidate with Gemini=100% is still eligible
+  assert.equal(
+    autoSwitch.selectReplacementAccount(modelsOnlyPool, {
+      scope: 'all',
+      thresholdPercent: 0,
+      preferredFamilies: ['gemini', 'claude'],
+      requireVerifiedQuota: true,
+      maxQuotaAgeMs: 15 * 60_000,
+      nowMs
+    })?.id,
+    'm1'
+  );
+
+  // Stale quota older than maxQuotaAgeMs is rejected when requireVerifiedQuota is true
+  const stalePool = [
+    {
+      id: 'stale-1',
+      email: 'stale@example.com',
+      hasToken: true,
+      quota: {
+        lastUpdatedAt: staleMs,
+        groups: [{ displayName: 'Gemini', buckets: [{ window: '5h', remainingFraction: 1 }] }]
+      }
+    }
+  ];
+  assert.equal(
+    autoSwitch.selectReplacementAccount(stalePool, {
+      scope: 'primary',
+      requireVerifiedQuota: true,
+      maxQuotaAgeMs: 15 * 60_000,
+      nowMs
+    }),
+    null
+  );
+
+  // Elapsed resetTime (updatedAt < resetTime <= nowMs) treats previously depleted 0% bucket as replenished
+  const resetAccount = {
+    id: 'reset-1',
+    email: 'reset@example.com',
+    hasToken: true,
+    quota: {
+      lastUpdatedAt: nowMs - 10 * 60_000,
+      groups: [{
+        displayName: 'Claude/GPT',
+        buckets: [{ window: '5h', remainingFraction: 0, resetTime: new Date(nowMs - 60_000).toISOString() }]
+      }]
+    }
+  };
+  assert.equal(
+    autoSwitch.selectReplacementAccount([resetAccount], {
+      scope: 'primary',
+      preferredFamilies: ['claude'],
+      requireVerifiedQuota: true,
+      maxQuotaAgeMs: 15 * 60_000,
+      nowMs
+    })?.id,
+    'reset-1'
+  );
+
+  // Dynamic G4 codenames map to 'other', while generic "Gemini Models" stays 'gemini' even with codename bucket IDs
+  assert.equal(autoSwitch.classifyQuotaGroupFamily('Gemini 4 Xenon weekly'), 'other');
+  assert.equal(autoSwitch.classifyQuotaGroupFamily('gemini-4-xenon-high'), 'other');
+  assert.equal(autoSwitch.classifyQuotaGroupFamily('Gemini Models', 'gemini-4-neon-5h gemini-4-carbon-5h'), 'gemini');
+
+  // Target-scoped RPC trigger filtering ignores non-matching sourceDetail rows
+  const mixedLocalRows = {
+    providers: [
+      {
+        provider: 'antigravity',
+        source: 'rpc',
+        sourceDetail: 'app',
+        status: 'ok',
+        accountEmail: 'desktop@example.com',
+        windows: [{ kind: 'session', label: 'Gemini 5-hour', usedPercent: 100, windowMinutes: 300, showMeter: true }]
+      },
+      {
+        provider: 'antigravity',
+        source: 'rpc',
+        sourceDetail: 'cli',
+        status: 'ok',
+        accountEmail: 'cli@example.com',
+        windows: [{ kind: 'session', label: 'Gemini 5-hour', usedPercent: 20, windowMinutes: 300, showMeter: true }]
+      }
+    ]
+  };
+  assert.equal(
+    autoSwitch.evaluateLocalQuotaTrigger(mixedLocalRows, { defaultSwitchTarget: 'agy', autoSwitchScope: 'primary' }).triggered,
+    false,
+    'explicit agy target must not trigger on desktop app exhaustion when cli is healthy'
+  );
+  assert.equal(autoSwitch.resolveSwitchTargetForTrigger('auto', 'app', { classicRunning: false, ideRunning: false, acpRunning: true }), 'acp');
+});
+
+test('hardExhausted defers while session is busy (with timeout fallback), manual switch clears pending limits, failed pool refresh rejects stale cache, and history persists', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-hardening-svc-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  let clockMs = 1_770_000_000_000;
+  let sessionBusy = true;
+  let networkDown = true;
+  let syncedCliCount = 0;
+  let keyringStored = null;
+
+  const makeService = () => createAntigravityManagerService({
+    baseDir: path.join(dir, 'mgr'),
+    nowMs: () => clockMs,
+    isLocalAntigravityBusy: () => sessionBusy,
+    autoSwitchMonitorOptions: {
+      maxBusyDeferralMs: 5000,
+      maxQuotaAgeMs: 60_000,
+      hotSwitchVerifyDelayMs: 20,
+      hotSwitchVerifyAttempts: 3
+    },
+    switcherDeps: {
+      oauth: { ensureFreshToken: async (tok) => tok },
+      deviceProfile: {
+        getStoragePath: () => '',
+        readDeviceProfile: () => null,
+        generateDeviceProfile: () => ({ machineId: 'm', macMachineId: 'mm', devDeviceId: 'd', sqmId: '{S}' })
+      },
+      keyring: {
+        writeToSystemKeyring: (p) => { keyringStored = p; },
+        readFromSystemKeyring: () => keyringStored
+      },
+      fileCredentials: {
+        writeFileCredentials: (_tok, opts) => {
+          if (opts?.syncAgyCli) syncedCliCount += 1;
+        }
+      },
+      processManager: {
+        listProcessesAsync: async () => [{
+          pid: 8800,
+          name: 'Antigravity',
+          exePath: '/opt/Antigravity/antigravity',
+          argv0: '/opt/Antigravity/antigravity',
+          args: '/opt/Antigravity/antigravity'
+        }],
+        isAntigravityRunning: (target) => target !== 'ide',
+        isProcessRunningByName: () => false,
+        getAntigravityExecutablePathAsync: async () => '/opt/Antigravity/antigravity',
+        detectAntigravityVersionAsync: async () => '2.35.0',
+        compareSemver: (a, b) => (a >= b ? 1 : -1),
+        getArgsFromRunningProcess: () => [],
+        getUserDataDirFromProcess: () => null,
+        getLanguageServerPids: () => [8801],
+        killLanguageServerAsync: async () => 1,
+        waitForLanguageServerRespawn: async () => true
+      }
+    },
+    fetch: async (url) => {
+      if (networkDown) {
+        throw new Error('network unreachable');
+      }
+      if (String(url).includes('loadCodeAssist')) {
+        return new Response(JSON.stringify({ currentTier: { id: 'ultra-tier' } }), { status: 200 });
+      }
+      if (String(url).includes('retrieveUserQuotaSummary')) {
+        return new Response(JSON.stringify({
+          groups: [
+            { displayName: 'Gemini', buckets: [{ window: '5h', remainingFraction: 0.95 }] },
+            { displayName: 'Claude/GPT', buckets: [{ window: '5h', remainingFraction: 0.95 }] }
+          ]
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ models: {} }), { status: 200 });
+    }
+  });
+
+  const service = makeService();
+  t.after(() => service.stop());
+
+  // Seed accounts with very old cached quota so failed refresh must NOT trust stale disk quota
+  const seedDir = path.join(dir, 'seed');
+  fs.mkdirSync(path.join(seedDir, 'accounts'), { recursive: true });
+  const exp = Math.floor(clockMs / 1000) + 7200;
+  for (const [idx, email] of ['a@example.com', 'b@example.com', 'c@example.com'].entries()) {
+    fs.writeFileSync(path.join(seedDir, 'accounts', `a${idx}.json`), JSON.stringify({
+      email,
+      quota: {
+        last_updated: Math.floor((clockMs - 3600_000) / 1000),
+        groups: [{ displayName: 'Gemini', buckets: [{ window: '5h', remainingFraction: 1 }] }]
+      },
+      token: { access_token: `ya29.${idx}`, refresh_token: `1//rt-${idx}`, expiry_timestamp: exp }
+    }));
+  }
+  service.importDataDir(seedDir);
+  const byEmail = Object.fromEntries(service.getState().accounts.map((a) => [a.email, a.id]));
+  service.setAccountWeight(byEmail['c@example.com'], 99);
+  service.setAccountWeight(byEmail['b@example.com'], 50);
+
+  service.updateConfig({
+    autoSwitchEnabled: true,
+    selectionMode: 'weighted',
+    autoSwitchCooldownSeconds: 60,
+    refreshSlideDelaySecs: 0
+  });
+
+  const hardPayload = {
+    providers: [{
+      provider: 'antigravity',
+      source: 'rpc',
+      sourceDetail: 'cli',
+      status: 'ok',
+      accountEmail: 'a@example.com',
+      windows: [{ kind: 'session', label: 'Claude/GPT 5-hour', usedPercent: 100, windowMinutes: 300, showMeter: true }]
+    }]
+  };
+
+  // 1. P1-1: Even hardExhausted (0% remaining) defers while local session is actively busy
+  const busyRes = await service.onLocalLimitsUpdated(hardPayload);
+  assert.equal(busyRes.triggered, true);
+  assert.equal(busyRes.skipped, 'session_busy');
+
+  // 2. P2-1: User manually switches to b@example.com while pendingAutoSwitchLimits was queued;
+  // subsequent busy->false transition must NOT replay a@example.com's stale trigger and overwrite b@ with c@!
+  const manualRes = await service.switchAccountTo(byEmail['b@example.com'], 'classic');
+  assert.equal(manualRes.ok, true);
+  assert.equal(service.getState().activeAccounts.classic, byEmail['b@example.com']);
+  sessionBusy = false;
+  const afterManualIdle = await service.onLocalActivityChanged({ busy: false });
+  assert.equal(afterManualIdle, null);
+  assert.equal(service.getState().activeAccounts.classic, byEmail['b@example.com']);
+
+  // 3. P1-4: When pool refresh fails completely (networkDown=true), lastRefreshAt stays 0 and stale 1h-old quota is rejected
+  const staleRes = await service.onLocalLimitsUpdated(hardPayload);
+  assert.equal(staleRes.ok, false);
+  assert.equal(service.getState().lastRefreshAt, 0, 'failed batch refresh must not advance lastRefreshAt');
+
+  // 4. Network recovers + busy deferral timeout fallback + CLI-triggered desktop switch syncs AGY CLI token too
+  networkDown = false;
+  clockMs += 400_000;
+  sessionBusy = true;
+  assert.equal((await service.onLocalLimitsUpdated(hardPayload)).skipped, 'session_busy');
+  clockMs += 6000; // exceeds maxBusyDeferralMs (5000ms)
+  const timeoutSwitch = await service.onLocalLimitsUpdated(hardPayload);
+  assert.equal(timeoutSwitch.ok, true);
+  assert.equal(timeoutSwitch.account.email, 'c@example.com');
+  assert.ok(syncedCliCount >= 1, 'CLI-triggered switch on running desktop also synced ~/.gemini/antigravity-cli');
+  assert.equal(service.getState().activeAccounts.agy, byEmail['c@example.com']);
+
+  // 5. P3-2: Auto-switch record and history persist across service restarts
+  service.stop();
+  const restartedService = makeService();
+  t.after(() => restartedService.stop());
+  assert.equal(restartedService.getState().lastAutoSwitch?.toEmail, 'c@example.com');
+  assert.equal(restartedService.getState().autoSwitchHistory.length, 2);
+});
+
+test('hot-switch verification retries empty RPC email before succeeding/restarting, and taskResume ignores canceled/question-waiting/idle-manual threads', async (t) => {
+  const sqlite = require('node:sqlite');
+  const taskResume = require('../src/electron/antigravityManager/taskResume');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-verify-resume-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const classicRoot = path.join(dir, '.gemini', 'antigravity');
+  const ideRoot = path.join(dir, '.gemini', 'antigravity-ide');
+  fs.mkdirSync(classicRoot, { recursive: true });
+  fs.mkdirSync(ideRoot, { recursive: true });
+
+  const initDb = (rootDir, rows) => {
+    const db = new sqlite.DatabaseSync(path.join(rootDir, 'conversation_summaries.db'));
+    db.exec(`
+      CREATE TABLE conversation_summaries (
+        conversation_id TEXT PRIMARY KEY,
+        title TEXT,
+        preview TEXT,
+        status TEXT,
+        not_fully_idle INTEGER,
+        killed INTEGER,
+        parent_conversation_id TEXT,
+        nesting_depth INTEGER,
+        last_modified_time TEXT,
+        last_user_input_time TEXT
+      );
+    `);
+    const ins = db.prepare(`
+      INSERT INTO conversation_summaries
+        (conversation_id, title, preview, status, not_fully_idle, killed, parent_conversation_id, nesting_depth, last_modified_time, last_user_input_time)
+      VALUES (?, ?, ?, ?, ?, ?, '', 0, ?, ?)
+    `);
+    for (const r of rows) ins.run(...r);
+    db.close();
+  };
+
+  const nowIso = new Date().toISOString().replace('T', ' ').replace('Z', '+00:00');
+  initDb(classicRoot, [
+    ['conv-canceling-db', 'Canceling in DB', '', 'CASCADE_RUN_STATUS_CANCELING', 1, 0, nowIso, nowIso],
+    ['conv-user-canceled', 'Stopped by user', '', 'CASCADE_RUN_STATUS_IDLE', 0, 0, nowIso, nowIso],
+    ['conv-ask-question', 'Waiting on user', '', 'CASCADE_RUN_STATUS_IDLE', 0, 0, nowIso, nowIso],
+    ['conv-done-with-checkpoint', 'Clean with trailing checkpoint', '', 'CASCADE_RUN_STATUS_IDLE', 0, 0, nowIso, nowIso],
+    ['conv-real-quota-stop', 'Real quota stop', '', 'CASCADE_RUN_STATUS_IDLE', 0, 0, nowIso, nowIso]
+  ]);
+  initDb(ideRoot, [
+    ['conv-ide-only', 'IDE running thread', '', 'CASCADE_RUN_STATUS_RUNNING', 1, 0, nowIso, nowIso]
+  ]);
+
+  const writeTranscript = (rootDir, cid, rows) => {
+    const logDir = path.join(rootDir, 'brain', cid, '.system_generated', 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(path.join(logDir, 'transcript.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  };
+  writeTranscript(classicRoot, 'conv-user-canceled', [
+    { step_index: 0, type: 'USER_INPUT', status: 'DONE' },
+    { step_index: 1, type: 'TOOL_CALL', status: 'CANCELED' }
+  ]);
+  writeTranscript(classicRoot, 'conv-ask-question', [
+    { step_index: 0, type: 'USER_INPUT', status: 'DONE' },
+    { step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE', tool_calls: [{ name: 'ask_question', arguments: {} }] }
+  ]);
+  writeTranscript(classicRoot, 'conv-done-with-checkpoint', [
+    { step_index: 0, type: 'USER_INPUT', status: 'DONE' },
+    { step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE' },
+    { step_index: 2, type: 'CHECKPOINT', status: 'DONE' }
+  ]);
+  writeTranscript(classicRoot, 'conv-real-quota-stop', [
+    { step_index: 0, type: 'USER_INPUT', status: 'DONE' },
+    { step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE', tool_calls: [{ name: 'run_command' }] },
+    { step_index: 2, type: 'SYSTEM_MESSAGE', status: 'DONE' }
+  ]);
+
+  // Classic target excludes IDE conversations, canceled turns, ask_question waits, and finished turns with trailing checkpoints
+  const classicAutoSnap = taskResume.snapshotInterruptedConversations({
+    homeDir: dir,
+    env: {},
+    targetClient: 'classic'
+  });
+  assert.deepEqual(classicAutoSnap.map((s) => s.conversationId), ['conv-real-quota-stop']);
+
+  // Manual switch (`onlyActivelyRunning: true`) never resurrects historical IDLE conversations
+  const classicManualSnap = taskResume.snapshotInterruptedConversations({
+    homeDir: dir,
+    env: {},
+    targetClient: 'classic',
+    onlyActivelyRunning: true
+  });
+  assert.deepEqual(classicManualSnap, []);
+
+  // IDE target isolates to `.gemini/antigravity-ide`
+  const ideSnap = taskResume.snapshotInterruptedConversations({
+    homeDir: dir,
+    env: {},
+    targetClient: 'ide'
+  });
+  assert.deepEqual(ideSnap.map((s) => s.conversationId), ['conv-ide-only']);
+
+  // Hot-switch verification retries when first post-respawn probe returns empty email, then catches stale email on 2nd attempt
+  let verifyProbeCalls = 0;
+  let restarted = 0;
+  const svc = createAntigravityManagerService({
+    baseDir: path.join(dir, 'mgr'),
+    autoSwitchMonitorOptions: {
+      hotSwitchVerifyDelayMs: 20,
+      hotSwitchVerifyAttempts: 3
+    },
+    probeLocalLimits: async () => {
+      verifyProbeCalls += 1;
+      const email = verifyProbeCalls === 1 ? '' : (restarted > 0 ? 'target@example.com' : 'stale@example.com');
+      return {
+        providers: [{
+          provider: 'antigravity',
+          source: 'rpc',
+          status: 'ok',
+          accountEmail: email,
+          windows: [{ kind: 'session', label: 'Gemini 5-hour', usedPercent: 10, windowMinutes: 300, showMeter: true }]
+        }]
+      };
+    },
+    switcherDeps: {
+      oauth: { ensureFreshToken: async (tok) => tok },
+      stateDb: { getDbPath: () => path.join(dir, 'state.vscdb'), injectTokenToDbAsync: async () => {} },
+      deviceProfile: {
+        getStoragePath: () => path.join(dir, 'storage.json'),
+        readDeviceProfileAsync: async () => null,
+        writeDeviceProfileAsync: async () => {},
+        generateDeviceProfile: () => ({ machineId: 'm', macMachineId: 'mm', devDeviceId: 'd', sqmId: '{S}' })
+      },
+      keyring: { writeToSystemKeyringAsync: async () => {} },
+      fileCredentials: { writeFileCredentialsAsync: async () => {} },
+      fs: { existsSync: () => true },
+      processManager: {
+        listProcessesAsync: async () => [{
+          pid: 5000,
+          name: 'Antigravity',
+          exePath: '/opt/Antigravity/antigravity',
+          argv0: '/opt/Antigravity/antigravity',
+          args: '/opt/Antigravity/antigravity'
+        }],
+        isAntigravityRunning: (target) => target !== 'ide',
+        getAntigravityExecutablePathAsync: async () => '/opt/Antigravity/antigravity',
+        detectAntigravityVersionAsync: async () => '2.35.0',
+        compareSemver: () => 1,
+        getArgsFromRunningProcess: () => [],
+        getUserDataDirFromProcess: () => null,
+        getLanguageServerPids: () => [5001],
+        killLanguageServerAsync: async () => 1,
+        waitForLanguageServerRespawn: async () => true,
+        closeAntigravity: async () => {},
+        startAntigravity: () => { restarted += 1; }
+      }
+    }
+  });
+  t.after(() => svc.stop());
+
+  const seedDir = path.join(dir, 'seed');
+  fs.mkdirSync(path.join(seedDir, 'accounts'), { recursive: true });
+  fs.writeFileSync(path.join(seedDir, 'accounts', 't.json'), JSON.stringify({
+    email: 'target@example.com',
+    token: { access_token: 'ya29.t', refresh_token: '1//t', expiry_timestamp: Math.floor(Date.now() / 1000) + 7200 }
+  }));
+  svc.importDataDir(seedDir);
+  const targetId = svc.getState().accounts[0].id;
+  const sw = await svc.switchAccountTo(targetId, 'classic');
+  assert.equal(sw.ok, true);
+  assert.equal(sw.mode, 'restart');
+  assert.equal(verifyProbeCalls, 2, 'retried after initial empty RPC email and caught stale hot-switch on attempt 2');
+  assert.equal(restarted, 1);
+});

@@ -96,7 +96,7 @@ function applyAccountCredentials(account, tokenData, { isIde, effectiveTarget, a
         expiryTimestamp: tokenData.expiryTimestamp,
         email: account.email,
         idToken: tokenData.idToken
-      }, { ...deps, syncAgyCli: false });
+      }, { ...deps, syncAgyCli: Boolean(deps.syncAgyCli) });
     } catch (_) {}
 
     return;
@@ -165,7 +165,7 @@ function applyAccountCredentials(account, tokenData, { isIde, effectiveTarget, a
       expiryTimestamp: tokenData.expiryTimestamp,
       email: account.email,
       idToken: tokenData.idToken
-    }, { ...deps, syncAgyCli: false });
+    }, { ...deps, syncAgyCli: Boolean(deps.syncAgyCli) });
   } catch (_) {}
 }
 
@@ -233,7 +233,7 @@ async function applyAccountCredentialsAsync(account, tokenData, { isIde, effecti
       email: account.email,
       idToken: tokenData.idToken
     };
-    const fileOpts = { ...deps, syncAgyCli: false };
+    const fileOpts = { ...deps, syncAgyCli: Boolean(deps.syncAgyCli) };
     try {
       if (typeof fc.writeFileCredentialsAsync === 'function') {
         await fc.writeFileCredentialsAsync(payload, fileOpts);
@@ -428,8 +428,7 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', forceR
     return { ok: true, target: 'agy', mode: 'cli', accountId: activeAccount.id };
   }
 
-  // 3b. ACP IDE Plugin target
-  if (normalizedTarget === 'acp' || normalizedTarget === 'plugin' || normalizedTarget === 'ide-plugin') {
+  const runAcpSwitch = async () => {
     await ensureDeviceProfile('classic', deps);
     const acpKeyringOpts = { ...deps, account: kr.ACP_ACCOUNT };
     const acpKeyringPayload = {
@@ -458,6 +457,11 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', forceR
       : pm.killAcpServers(deps);
     store.setActiveAccount('acp', activeAccount.id);
     return { ok: true, target: 'acp', mode: 'acp', restartedProcesses: killedAcp, accountId: activeAccount.id };
+  };
+
+  // 3b. ACP IDE Plugin target
+  if (normalizedTarget === 'acp' || normalizedTarget === 'plugin' || normalizedTarget === 'ide-plugin') {
+    return await runAcpSwitch();
   }
 
   // 3c. Desktop Classic / IDE target (lazy executable lookup avoids scanning uninstalled variants)
@@ -476,6 +480,15 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', forceR
 
   const classicRunning = pm.isAntigravityRunning(null, snapshotDeps);
   const ideRunning = pm.isAntigravityRunning('ide', snapshotDeps);
+  if (
+    !explicitTarget
+    && !classicRunning
+    && !ideRunning
+    && typeof pm.isProcessRunningByName === 'function'
+    && pm.isProcessRunningByName('agy_acp_server', snapshotDeps)
+  ) {
+    return await runAcpSwitch();
+  }
 
   /** @type {boolean} */
   let isIde;
@@ -573,6 +586,9 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', forceR
 
   const activeSlot = isIde ? 'ide' : 'classic';
   store.setActiveAccount(activeSlot, activeAccount.id);
+  if (deps.syncAgyCli) {
+    store.setActiveAccount('agy', activeAccount.id);
+  }
   return {
     ok: true,
     target: activeSlot,

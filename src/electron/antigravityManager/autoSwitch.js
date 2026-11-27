@@ -12,6 +12,12 @@ const DEDICATED_CODENAME_RE = /\b(argon|neon|hydrogen|carbon|helium|wtu)\b/i;
 const CLAUDE_3P_RE = /\b(claude|gpt|3p)\b/i;
 const WINDOW_5H_RE = /\b(5h|5-hour|five-hour|five hour|session|hour)\b/i;
 const WINDOW_WEEKLY_RE = /\b(weekly|7d|week)\b/i;
+const GENERIC_GEMINI_GROUP_LABEL_RE = /^gemini(?:\s+models?)?(?:\s+(?:5-hour|5h|five-hour|five hour|session|weekly|7d))?$/i;
+const GENERIC_GEMINI_ROLE_TOKENS = new Set([
+  'pro', 'flash', 'lite', 'ultra', 'high', 'medium', 'low', 'xhigh', 'minimal',
+  'image', 'exp', 'preview', 'disabled', 'thinking', 'tiered', 'models',
+  'model', 'wtu', 'weekly', '5h', '7d', 'session', 'hour', 'quota', 'pool', 'default', 'standard'
+]);
 
 /** @type {Record<string, number>} */
 const TIER_RANK = Object.freeze({
@@ -38,18 +44,50 @@ function normalizeAccountWeight(value, fallback = DEFAULT_ACCOUNT_WEIGHT) {
 }
 
 /**
+ * Detect whether a label/model string names a dedicated Gemini 4+ codename pool
+ * (e.g. Argon, Xenon, `gemini-4-<codename>`, `gemini-pro-orchestrator-<code>`).
+ *
+ * @param {string} text
+ * @returns {boolean}
+ */
+function hasDedicatedGemini4Codename(text) {
+  const lower = String(text || '').toLowerCase();
+  if (!lower) return false;
+  if (DEDICATED_CODENAME_RE.test(lower)) return true;
+  for (const match of lower.matchAll(/\bgemini[-_\s]+(\d+)(?:\.\d+)?[-_\s]+([a-z]+)\b/g)) {
+    const major = Number.parseInt(match[1], 10);
+    const token = match[2];
+    if (Number.isFinite(major) && major >= 4 && token && !GENERIC_GEMINI_ROLE_TOKENS.has(token)) {
+      return true;
+    }
+  }
+  for (const match of lower.matchAll(/\bgemini-pro-orchestrator-([a-z0-9]+)\b/g)) {
+    const token = match[1];
+    if (token === 'g1' || (/[a-z]/.test(token) && !GENERIC_GEMINI_ROLE_TOKENS.has(token))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Classify a quota group or model name into `'gemini'`, `'claude'`, or `'other'`.
- * Dedicated Gemini 4 codename pools (e.g. Argon) map to `'other'` so `'primary'`
- * scope focuses on general Gemini and Claude/GPT pools.
+ * Dedicated Gemini 4+ codename pools (e.g. Argon) map to `'other'` so `'primary'`
+ * scope focuses on general Gemini and Claude/GPT pools, while generic `"Gemini"` /
+ * `"Gemini Models"` group titles stay `'gemini'` even if child bucket IDs mention codenames.
  *
  * @param {string} label
  * @param {string} [extraText]
  * @returns {'gemini' | 'claude' | 'other'}
  */
 function classifyQuotaGroupFamily(label, extraText = '') {
-  const combined = `${label || ''} ${extraText || ''}`.toLowerCase();
-  if (DEDICATED_CODENAME_RE.test(combined)) return 'other';
+  const cleanLabel = String(label || '').trim();
+  const combined = `${cleanLabel} ${extraText || ''}`.toLowerCase();
   if (CLAUDE_3P_RE.test(combined)) return 'claude';
+  if (GENERIC_GEMINI_GROUP_LABEL_RE.test(cleanLabel)) return 'gemini';
+  if (hasDedicatedGemini4Codename(cleanLabel) || (!cleanLabel.toLowerCase().includes('gemini') && hasDedicatedGemini4Codename(combined))) {
+    return 'other';
+  }
   if (combined.includes('gemini')) return 'gemini';
   return 'other';
 }
@@ -92,7 +130,7 @@ function extractLimitWindowGroupName(win) {
  *
  * @param {string | undefined | null} defaultSwitchTarget
  * @param {string | undefined | null} sourceDetail
- * @param {{ classicRunning?: boolean, ideRunning?: boolean } | null} [activeClients]
+ * @param {{ classicRunning?: boolean, ideRunning?: boolean, acpRunning?: boolean } | null} [activeClients]
  * @returns {'auto' | 'classic' | 'ide' | 'agy' | 'acp'}
  */
 function resolveSwitchTargetForTrigger(defaultSwitchTarget, sourceDetail, activeClients = null) {
@@ -107,6 +145,9 @@ function resolveSwitchTargetForTrigger(defaultSwitchTarget, sourceDetail, active
     }
     return 'agy';
   }
+  if (activeClients && !activeClients.classicRunning && !activeClients.ideRunning && activeClients.acpRunning) {
+    return 'acp';
+  }
   return 'auto';
 }
 
@@ -117,7 +158,8 @@ function resolveSwitchTargetForTrigger(defaultSwitchTarget, sourceDetail, active
  * @param {unknown} limitsPayload
  * @param {{
  *   autoSwitchScope?: string,
- *   autoSwitchThresholdPercent?: number
+ *   autoSwitchThresholdPercent?: number,
+ *   defaultSwitchTarget?: string
  * }} [rawConfig]
  */
 function evaluateLocalQuotaTrigger(limitsPayload, rawConfig = {}) {
@@ -142,6 +184,7 @@ function evaluateLocalQuotaTrigger(limitsPayload, rawConfig = {}) {
   const scope = VALID_AUTO_SWITCH_SCOPES.has(String(rawConfig?.autoSwitchScope || ''))
     ? /** @type {'primary' | 'any' | 'all'} */ (rawConfig.autoSwitchScope)
     : 'primary';
+  const configuredTarget = String(rawConfig?.defaultSwitchTarget || 'auto').trim().toLowerCase();
   const rawThreshold = Number(rawConfig?.autoSwitchThresholdPercent);
   const threshold = Number.isFinite(rawThreshold) ? Math.max(0, Math.min(50, Math.round(rawThreshold))) : 0;
   const thresholdLimit = threshold + 1e-6;
@@ -149,6 +192,9 @@ function evaluateLocalQuotaTrigger(limitsPayload, rawConfig = {}) {
   for (const row of providers) {
     if (!row || typeof row !== 'object') continue;
     if (row.provider !== 'antigravity' || row.source !== 'rpc' || row.status !== 'ok') continue;
+    const rowSourceDetail = String(row.sourceDetail || '').trim().toLowerCase();
+    if (configuredTarget === 'agy' && rowSourceDetail && rowSourceDetail !== 'cli') continue;
+    if ((configuredTarget === 'classic' || configuredTarget === 'ide') && rowSourceDetail === 'cli') continue;
     if (!Array.isArray(row.windows) || row.windows.length === 0) continue;
 
     /** @type {Array<{ label: string, period: '5h' | 'weekly', groupName: string, family: 'gemini' | 'claude' | 'other', remainingPercent: number, resetsAt: string | null }>} */
@@ -217,16 +263,43 @@ function evaluateLocalQuotaTrigger(limitsPayload, rawConfig = {}) {
 }
 
 /**
+ * Normalize an account's `quota.lastUpdatedAt` (seconds or milliseconds) into epoch ms.
+ * @param {Record<string, any> | null | undefined} account
+ * @returns {number}
+ */
+function accountQuotaUpdatedAtMs(account) {
+  const raw = Number(account?.quota?.lastUpdatedAt || 0);
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  return raw < 1e12 ? raw * 1000 : raw;
+}
+
+/**
+ * Check whether a bucket/model reset timestamp has already elapsed since `updatedAtMs`.
+ * @param {unknown} resetTime
+ * @param {number} updatedAtMs
+ * @param {number | undefined} nowMs
+ * @returns {boolean}
+ */
+function hasQuotaWindowResetElapsed(resetTime, updatedAtMs, nowMs) {
+  if (typeof nowMs !== 'number' || !Number.isFinite(nowMs) || updatedAtMs <= 0) return false;
+  if (typeof resetTime !== 'string' || !resetTime.trim()) return false;
+  const resetMs = Date.parse(resetTime);
+  return Number.isFinite(resetMs) && updatedAtMs < resetMs && resetMs <= nowMs;
+}
+
+/**
  * Summarize an Antigravity Manager pool account's group/model remaining percentages.
  * @param {Record<string, any>} account
+ * @param {{ nowMs?: number }} [options]
  * @returns {{
  *   hasQuotaData: boolean,
  *   entries: Array<{ name: string, family: 'gemini' | 'claude' | 'other', minPercent: number }>
  * }}
  */
-function summarizePoolAccountQuota(account) {
+function summarizePoolAccountQuota(account, options = {}) {
   const groups = Array.isArray(account?.quota?.groups) ? account.quota.groups : [];
   const models = Array.isArray(account?.quota?.models) ? account.quota.models : [];
+  const updatedAtMs = accountQuotaUpdatedAtMs(account);
 
   if (groups.length > 0) {
     /** @type {Array<{ name: string, family: 'gemini' | 'claude' | 'other', minPercent: number }>} */
@@ -243,7 +316,11 @@ function summarizePoolAccountQuota(account) {
       });
       const targetBuckets = relevantBuckets.length > 0 ? relevantBuckets : activeBuckets;
       const fractions = targetBuckets
-        .map((/** @type {any} */ b) => Number(b?.remainingFraction))
+        .map((/** @type {any} */ b) => (
+          hasQuotaWindowResetElapsed(b?.resetTime, updatedAtMs, options.nowMs)
+            ? 1
+            : Number(b?.remainingFraction)
+        ))
         .filter((/** @type {number} */ n) => Number.isFinite(n));
       if (fractions.length === 0) continue;
       const minPct = Math.max(0, Math.min(100, Math.min(...fractions) * 100));
@@ -264,7 +341,9 @@ function summarizePoolAccountQuota(account) {
     /** @type {Array<{ name: string, family: 'gemini' | 'claude' | 'other', minPercent: number }>} */
     const entries = models.map((/** @type {any} */ m) => {
       const name = String(m?.name || m?.displayName || 'Model');
-      const pct = Number(m?.percentage);
+      const pct = hasQuotaWindowResetElapsed(m?.resetTime, updatedAtMs, options.nowMs)
+        ? 100
+        : Number(m?.percentage);
       return {
         name,
         family: classifyQuotaGroupFamily(name, String(m?.displayName || '')),
@@ -286,14 +365,28 @@ function summarizePoolAccountQuota(account) {
  *   scope?: 'primary' | 'any' | 'all' | string,
  *   thresholdPercent?: number,
  *   preferredFamilies?: Array<'gemini' | 'claude' | 'other'>,
- *   requireVerifiedQuota?: boolean
+ *   requireVerifiedQuota?: boolean,
+ *   maxQuotaAgeMs?: number,
+ *   nowMs?: number
  * }} [options]
  * @returns {boolean}
  */
 function isPoolAccountExhausted(account, options = {}) {
-  const { hasQuotaData, entries } = summarizePoolAccountQuota(account);
+  const { hasQuotaData, entries } = summarizePoolAccountQuota(account, { nowMs: options.nowMs });
   if (!hasQuotaData) {
     return options.requireVerifiedQuota === true;
+  }
+  if (
+    options.requireVerifiedQuota === true
+    && typeof options.maxQuotaAgeMs === 'number'
+    && Number.isFinite(options.maxQuotaAgeMs)
+    && options.maxQuotaAgeMs > 0
+  ) {
+    const nowMs = typeof options.nowMs === 'number' && Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
+    const updatedAtMs = accountQuotaUpdatedAtMs(account);
+    if (updatedAtMs <= 0 || nowMs - updatedAtMs > options.maxQuotaAgeMs) {
+      return true;
+    }
   }
 
   const rawThreshold = Number(options.thresholdPercent);
@@ -333,11 +426,11 @@ function isPoolAccountExhausted(account, options = {}) {
  * and overall average at 35%; otherwise returns overall average matching `pickBestAccount`.
  *
  * @param {Record<string, any>} account
- * @param {{ preferredFamilies?: Array<'gemini' | 'claude' | 'other'> }} [options]
+ * @param {{ preferredFamilies?: Array<'gemini' | 'claude' | 'other'>, nowMs?: number }} [options]
  * @returns {number}
  */
 function scoreCandidateAccount(account, options = {}) {
-  const { hasQuotaData, entries } = summarizePoolAccountQuota(account);
+  const { hasQuotaData, entries } = summarizePoolAccountQuota(account, { nowMs: options.nowMs });
   if (!hasQuotaData || entries.length === 0) return 0;
 
   const overallAvg = entries.reduce((sum, item) => sum + item.minPercent, 0) / entries.length;
@@ -368,6 +461,8 @@ function scoreCandidateAccount(account, options = {}) {
  *   excludeAccountKeys?: Iterable<string>,
  *   preferredFamilies?: Array<'gemini' | 'claude' | 'other'>,
  *   requireVerifiedQuota?: boolean,
+ *   maxQuotaAgeMs?: number,
+ *   nowMs?: number,
  *   skipExhaustedCheck?: boolean
  * }} [options]
  * @returns {Record<string, any> | null}
@@ -380,6 +475,9 @@ function selectReplacementAccount(accounts, options = {}) {
   const selectionMode = VALID_SELECTION_MODES.has(String(options.selectionMode || ''))
     ? /** @type {'auto' | 'weighted'} */ (options.selectionMode)
     : 'auto';
+  const effectiveScope = VALID_AUTO_SWITCH_SCOPES.has(String(options.scope || ''))
+    ? /** @type {'primary' | 'any' | 'all'} */ (options.scope)
+    : 'primary';
 
   const baseEligible = list.filter((acc) => {
     if (!acc || acc.hasToken === false || acc.disabled || acc.banned || acc.validationBlocked || acc.quota?.isForbidden) {
@@ -399,25 +497,30 @@ function selectReplacementAccount(accounts, options = {}) {
   let candidates = options.skipExhaustedCheck
     ? baseEligible
     : baseEligible.filter((acc) => !isPoolAccountExhausted(acc, {
-        scope: options.scope,
+        scope: effectiveScope,
         thresholdPercent: options.thresholdPercent,
         preferredFamilies: options.preferredFamilies,
-        requireVerifiedQuota: options.requireVerifiedQuota
+        requireVerifiedQuota: options.requireVerifiedQuota,
+        maxQuotaAgeMs: options.maxQuotaAgeMs,
+        nowMs: options.nowMs
       }));
 
-  // If preferredFamilies filtered out every otherwise-unexhausted account (e.g. a pool account lacks that family),
-  // retry with scope-only exhaustion check unless requireVerifiedQuota rejected all exhausted accounts.
+  // Only under `scope === 'all'` (when every local family is depleted) allow falling back
+  // to an account that still has at least one unexhausted pool even if another pool is depleted.
   if (
     candidates.length === 0
     && !options.skipExhaustedCheck
+    && effectiveScope === 'all'
     && Array.isArray(options.preferredFamilies)
-    && options.preferredFamilies.length > 0
+    && options.preferredFamilies.length > 1
   ) {
     candidates = baseEligible.filter((acc) => !isPoolAccountExhausted(acc, {
-      scope: options.scope,
+      scope: effectiveScope,
       thresholdPercent: options.thresholdPercent,
       preferredFamilies: [],
-      requireVerifiedQuota: options.requireVerifiedQuota
+      requireVerifiedQuota: options.requireVerifiedQuota,
+      maxQuotaAgeMs: options.maxQuotaAgeMs,
+      nowMs: options.nowMs
     }));
   }
 

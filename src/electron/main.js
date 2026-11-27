@@ -55,6 +55,7 @@ const { createWorkbuddyManagedAccounts } = require('./providers/workbuddy/manage
 const { createWorkbuddyLocalAuth, isSupportedWorkbuddyLocalAppPlatform } = require('./providers/workbuddy/localAuth');
 const { createAntigravityManagerService } = require('./antigravityManager');
 const { fetchAntigravityLimits } = require('../shared/providers/antigravity/limits');
+const antigravityProbe = require('../shared/providers/antigravity/probe');
 const { createElectronLimitsFetch } = require('./limits/fetch');
 const { createLimitsHistoryStore } = require('./limits/historyStore');
 const { historyRowKey } = require('./limits/historyIdentity');
@@ -8447,9 +8448,41 @@ function hasRunningLocalAntigravitySession(summary, now = Date.now()) {
 }
 
 async function probeLocalAntigravityLimitsForManager(opts = {}) {
+  const probeDeps = { ...(opts?.signal ? { signal: opts.signal } : {}) };
+  let infos = null;
+  try {
+    infos = await antigravityProbe.detectProcessInfos(probeDeps);
+  } catch (_) {
+    infos = null;
+  }
+  const kinds = Array.isArray(infos)
+    ? [...new Set(infos.map((info) => info?.kind).filter(Boolean))]
+    : [];
+  if (kinds.length > 1) {
+    const perKindResults = await Promise.all(kinds.map(async (kind) => {
+      try {
+        return await fetchAntigravityLimits(
+          { antigravityLocalLimitsEnabled: true, antigravityManagedAccounts: [] },
+          {
+            ...probeDeps,
+            detectProcessInfos: async () => infos.filter((info) => info?.kind === kind)
+          }
+        );
+      } catch (_) {
+        return [];
+      }
+    }));
+    const providers = perKindResults.flatMap((res) => (Array.isArray(res) ? res : (res ? [res] : [])));
+    if (providers.length > 0) {
+      return { updatedAt: new Date().toISOString(), providers };
+    }
+  }
   const res = await fetchAntigravityLimits(
     { antigravityLocalLimitsEnabled: true, antigravityManagedAccounts: [] },
-    { ...(opts?.signal ? { signal: opts.signal } : {}) }
+    {
+      ...probeDeps,
+      ...(Array.isArray(infos) ? { detectProcessInfos: async () => infos } : {})
+    }
   );
   const providers = Array.isArray(res) ? res : (res ? [res] : []);
   return { updatedAt: new Date().toISOString(), providers };
@@ -8486,9 +8519,10 @@ function ensureAntigravityManagerService() {
     probeLocalLimits: (opts) => probeLocalAntigravityLimitsForManager(opts),
     onAutoSwitchCompleted: (result) => {
       if (result?.ok) {
+        const delayMs = result.mode === 'restart' ? 5500 : 2500;
         const timer = setTimeout(() => {
           void refreshLimitProvider('antigravity');
-        }, 2500);
+        }, delayMs);
         timer.unref?.();
       }
     },

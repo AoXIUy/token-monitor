@@ -97,12 +97,23 @@ function createAntigravityManagerScheduler({
     if (stopped) return;
     if (!tryAcquireLock()) return;
     try { onRefreshStateChange?.(true); } catch (_) {}
+    let refreshSucceeded = true;
     try {
-      await onRefreshAll(reason);
+      const outcome = await onRefreshAll(reason);
+      if (outcome && typeof outcome === 'object' && /** @type {any} */ (outcome).ok === false) {
+        refreshSucceeded = false;
+      }
     } catch (error) {
+      refreshSucceeded = false;
       (logger.warn || console.warn)(`[antigravity-manager-scheduler] ${reason} refresh failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
-      recordRefreshTimestamp(nowSec());
+      const finishedSec = nowSec();
+      if (Number.isFinite(finishedSec)) {
+        intervalBaselineSec = finishedSec;
+      }
+      if (refreshSucceeded) {
+        recordRefreshTimestamp(finishedSec);
+      }
       releaseLock();
       try { onRefreshStateChange?.(false); } catch (_) {}
     }

@@ -64,21 +64,65 @@ function parseSqliteTimestampMs(raw) {
   return Number.isFinite(ms) && ms > 0 ? ms : 0;
 }
 
+const USER_CANCEL_MESSAGE_RE = /\b(cancel(?:l)?ed by user|user cancel(?:l)?ed|aborted by user|request cancel(?:l)?ed|turn cancel(?:l)?ed)\b/i;
+const INTERACTIVE_USER_WAIT_TOOLS = new Set([
+  'ask_question',
+  'ask_user',
+  'request_user_input',
+  'confirm_action'
+]);
+
 /**
- * @param {{ homeDir?: string, env?: NodeJS.ProcessEnv }} [opts]
+ * @param {{ homeDir?: string, env?: NodeJS.ProcessEnv, targetClient?: string | null }} [opts]
  * @returns {string[]}
  */
 function candidateAntigravityRoots(opts = {}) {
   const home = opts.homeDir || os.homedir();
   const env = opts.env || process.env;
+  const target = String(opts.targetClient || '').trim().toLowerCase();
+  const includeClassic = !target || target === 'auto' || target === 'classic' || target === 'agy' || target === 'acp';
+  const includeIde = !target || target === 'auto' || target === 'ide';
+  const includeCli = !target || target === 'auto' || target === 'agy';
   const roots = [
     typeof env.ANTIGRAVITY_HOME === 'string' ? env.ANTIGRAVITY_HOME.trim() : '',
     typeof env.ANTIGRAVITY_DATA_DIR === 'string' ? env.ANTIGRAVITY_DATA_DIR.trim() : '',
-    path.join(home, '.gemini', 'antigravity'),
-    path.join(home, '.gemini', 'antigravity-ide'),
-    path.join(home, '.gemini', 'antigravity-cli')
+    includeClassic ? path.join(home, '.gemini', 'antigravity') : '',
+    includeIde ? path.join(home, '.gemini', 'antigravity-ide') : '',
+    includeCli ? path.join(home, '.gemini', 'antigravity-cli') : ''
   ].filter(Boolean);
   return [...new Set(roots)];
+}
+
+/**
+ * @param {Record<string, any>} step
+ * @returns {boolean}
+ */
+function isStepUserCanceled(step) {
+  if (!step || typeof step !== 'object') return false;
+  if (step.canceled === true || step.cancelled === true || step.userCanceled === true || step.user_canceled === true) {
+    return true;
+  }
+  const status = String(step.status || '').trim().toUpperCase();
+  if (status === 'CANCELED' || status === 'CANCELLED' || status === 'ABORTED' || status === 'INTERRUPTED_BY_USER') {
+    return true;
+  }
+  const text = `${step.error || ''} ${step.error_message || ''} ${step.message || ''} ${step.content || ''}`;
+  return USER_CANCEL_MESSAGE_RE.test(text);
+}
+
+/**
+ * @param {Record<string, any>} step
+ * @returns {boolean}
+ */
+function isStepWaitingOnUserPrompt(step) {
+  if (!step || typeof step !== 'object' || !Array.isArray(step.tool_calls)) return false;
+  return step.tool_calls.some((/** @type {any} */ tc) => {
+    const toolName = String(tc?.name || tc?.tool_name || '').trim().toLowerCase();
+    if (INTERACTIVE_USER_WAIT_TOOLS.has(toolName)) return true;
+    const args = tc?.arguments && typeof tc.arguments === 'object' ? tc.arguments : null;
+    if (args?.ArtifactMetadata?.RequestFeedback === true) return true;
+    return false;
+  });
 }
 
 /**
@@ -157,6 +201,35 @@ function inspectTranscriptTailInterruption(rootDir, conversationId, fsApi = fs) 
     if (turnSteps.some((step) => step.status === 'RUNNING' || step.status === 'ACTIVE')) {
       return { interrupted: true, definitive: true, reason: 'step_still_running' };
     }
+    if (turnSteps.some(isStepUserCanceled)) {
+      return { interrupted: false, definitive: true, reason: '' };
+    }
+
+    let lastPlannerIdx = -1;
+    for (let i = turnSteps.length - 1; i >= 0; i -= 1) {
+      if (turnSteps[i].type === 'PLANNER_RESPONSE') {
+        lastPlannerIdx = i;
+        break;
+      }
+    }
+    if (lastPlannerIdx >= 0) {
+      const lastPlanner = turnSteps[lastPlannerIdx];
+      if (isStepWaitingOnUserPrompt(lastPlanner)) {
+        return { interrupted: false, definitive: true, reason: '' };
+      }
+      const plannerHasToolCalls = Array.isArray(lastPlanner.tool_calls) && lastPlanner.tool_calls.length > 0;
+      const plannerHasError = Boolean(lastPlanner.error || lastPlanner.error_message || lastPlanner.failure);
+      const trailingSteps = turnSteps.slice(lastPlannerIdx + 1);
+      const trailingIndicatesInterruption = trailingSteps.some((step) => (
+        Boolean(step.error || step.error_message || step.failure)
+        || step.type === 'SYSTEM_MESSAGE'
+        || step.type === 'ERROR'
+        || step.type === 'USER_INPUT'
+      ));
+      if (lastPlanner.status === 'DONE' && !plannerHasToolCalls && !plannerHasError && !trailingIndicatesInterruption) {
+        return { interrupted: false, definitive: true, reason: '' };
+      }
+    }
 
     const hasToolCalls = Array.isArray(lastStep.tool_calls) && lastStep.tool_calls.length > 0;
     const hasError = Boolean(lastStep.error || lastStep.error_message || lastStep.failure);
@@ -192,7 +265,9 @@ function inspectTranscriptTailInterruption(rootDir, conversationId, fsApi = fs) 
  *   recentlyRunningIds?: Iterable<string>,
  *   nowMs?: number,
  *   maxAgeMs?: number,
- *   maxResults?: number
+ *   maxResults?: number,
+ *   onlyActivelyRunning?: boolean,
+ *   targetClient?: string | null
  * }} [options]
  * @returns {Array<{ conversationId: string, title: string, reason: string, modifiedMs: number, rootDir: string }>}
  */
@@ -203,6 +278,7 @@ function snapshotInterruptedConversations(options = {}) {
   const nowMs = Number.isFinite(options.nowMs) ? Number(options.nowMs) : Date.now();
   const maxAgeMs = Number.isFinite(options.maxAgeMs) ? Number(options.maxAgeMs) : MAX_INTERRUPTED_CONVERSATION_AGE_MS;
   const maxResults = Number.isFinite(options.maxResults) ? Math.max(1, Number(options.maxResults)) : MAX_CONVERSATIONS_TO_RESUME;
+  const onlyActivelyRunning = options.onlyActivelyRunning === true;
   const recentRunning = new Set(Array.from(options.recentlyRunningIds || [], (id) => String(id || '').trim()).filter(Boolean));
 
   /** @type {Map<string, { conversationId: string, title: string, reason: string, modifiedMs: number, rootDir: string }>} */
@@ -264,11 +340,18 @@ function snapshotInterruptedConversations(options = {}) {
         }
 
         const statusUpper = String(row?.status || '').trim().toUpperCase();
+        if (
+          statusUpper.includes('CANCEL')
+          || statusUpper.includes('WAIT')
+          || statusUpper.includes('APPROV')
+          || statusUpper.includes('CONFIRM')
+        ) {
+          continue;
+        }
         const notFullyIdle = row?.not_fully_idle === 1 || row?.not_fully_idle === true;
         const isRunningInDb = (
           statusUpper === 'CASCADE_RUN_STATUS_RUNNING'
           || statusUpper === 'CASCADE_RUN_STATUS_BUSY'
-          || statusUpper === 'CASCADE_RUN_STATUS_CANCELING'
           || notFullyIdle
         );
 
@@ -277,7 +360,7 @@ function snapshotInterruptedConversations(options = {}) {
         if (isRunningInDb) {
           interrupted = true;
           reason = 'running_before_switch';
-        } else {
+        } else if (!onlyActivelyRunning) {
           const tailCheck = inspectTranscriptTailInterruption(rootDir, id, fsApi);
           if (tailCheck.definitive) {
             interrupted = tailCheck.interrupted;
@@ -370,7 +453,8 @@ function callConversationServiceHttp({ port, csrfToken, method, body, timeoutMs 
  *   platform?: NodeJS.Platform,
  *   homeDir?: string,
  *   procs?: Array<{ pid: number, name: string, exePath: string, argv0: string, args: string }>,
- *   fs?: Pick<typeof fs, 'existsSync'>
+ *   fs?: Pick<typeof fs, 'existsSync'>,
+ *   targetClient?: string | null
  * }} [opts]
  * @returns {{ bin: string, prefixArgs: string[] } | null}
  */
@@ -379,10 +463,20 @@ function resolveAgentApiCommand(opts = {}) {
   const home = opts.homeDir || os.homedir();
   const existsSync = opts.fs?.existsSync || fs.existsSync;
   const pathApi = platform === 'win32' ? path.win32 : path;
+  const target = String(opts.targetClient || '').trim().toLowerCase();
+  const rawProcs = opts.procs || [];
+  const orderedProcs = (target === 'ide' || target === 'classic')
+    ? [...rawProcs].sort((a, b) => {
+        const aIde = processManager.isAntigravityIdeStr(a.exePath) || processManager.isAntigravityIdeStr(a.args);
+        const bIde = processManager.isAntigravityIdeStr(b.exePath) || processManager.isAntigravityIdeStr(b.args);
+        const wantIde = target === 'ide';
+        return Number(bIde === wantIde) - Number(aIde === wantIde);
+      })
+    : rawProcs;
 
   // 1. Prefer the live running Antigravity language_server binary (`<ls_exe> agentapi ...`),
   // which works identically across Windows, macOS, and Linux without shell wrapper scripts.
-  for (const proc of opts.procs || []) {
+  for (const proc of orderedProcs) {
     if (
       proc.exePath
       && processManager.classifyProcess(proc.name, proc.exePath, proc.argv0, proc.args) === 'language_server'
@@ -404,7 +498,7 @@ function resolveAgentApiCommand(opts = {}) {
   }
 
   // 3. Derive language_server path relative to Classic/IDE executable if running or installed.
-  for (const proc of opts.procs || []) {
+  for (const proc of orderedProcs) {
     const kind = processManager.classifyProcess(proc.name, proc.exePath, proc.argv0, proc.args);
     if ((kind === 'classic' || kind === 'ide') && proc.exePath) {
       const appDir = pathApi.dirname(proc.exePath);
@@ -433,14 +527,16 @@ function resolveAgentApiCommand(opts = {}) {
 /**
  * Read newest daemon JSON descriptors (`hub_*.json`, `ls_*.json`) exposing an `httpPort` + `csrfToken`.
  *
- * @param {{ homeDir?: string, env?: NodeJS.ProcessEnv, fs?: typeof fs, livePids?: Set<number> }} [opts]
+ * @param {{ homeDir?: string, env?: NodeJS.ProcessEnv, fs?: typeof fs, livePids?: Set<number>, targetClient?: string | null }} [opts]
  * @returns {Array<{ pid: number, port: number, csrfToken: string, mtimeMs: number }>}
  */
 function readCandidateHttpEndpointsFromDaemonDirs(opts = {}) {
   const fsApi = opts.fs || fs;
   /** @type {Array<{ pid: number, port: number, csrfToken: string, mtimeMs: number }>} */
   const candidates = [];
-  for (const rootDir of candidateAntigravityRoots(opts)) {
+  const targetRoots = candidateAntigravityRoots(opts);
+  const roots = targetRoots.length > 0 ? targetRoots : candidateAntigravityRoots({ ...opts, targetClient: 'auto' });
+  for (const rootDir of roots) {
     const daemonDir = path.join(rootDir, 'daemon');
     let names;
     try { names = fsApi.readdirSync(daemonDir); } catch (_) { continue; }
@@ -478,7 +574,8 @@ function readCandidateHttpEndpointsFromDaemonDirs(opts = {}) {
  *   fs?: typeof fs,
  *   listProcessesAsync?: () => Promise<Array<{ pid: number, name: string, exePath: string, argv0: string, args: string }>>,
  *   callConversationService?: typeof callConversationServiceHttp,
- *   sleep?: (ms: number) => Promise<void>
+ *   sleep?: (ms: number) => Promise<void>,
+ *   targetClient?: string | null
  * }} [options]
  * @returns {Promise<{ port: number, csrfToken: string, command: { bin: string, prefixArgs: string[] } } | null>}
  */
@@ -501,7 +598,8 @@ async function discoverLiveAgentApiEndpoint(options = {}) {
         platform: options.platform,
         homeDir: options.homeDir,
         procs,
-        fs: options.fs
+        fs: options.fs,
+        targetClient: options.targetClient
       });
 
       if (command) {
@@ -509,7 +607,8 @@ async function discoverLiveAgentApiEndpoint(options = {}) {
           homeDir: options.homeDir,
           env: options.env,
           fs: options.fs,
-          livePids
+          livePids,
+          targetClient: options.targetClient
         });
 
         /** @type {Array<{ port: number, csrfToken: string }>} */
@@ -624,7 +723,8 @@ function runAgentApiSendMessage(command, conversationId, prompt, ctx) {
  *   listProcessesAsync?: () => Promise<Array<{ pid: number, name: string, exePath: string, argv0: string, args: string }>>,
  *   callConversationService?: typeof callConversationServiceHttp,
  *   discoverEndpoint?: typeof discoverLiveAgentApiEndpoint,
- *   sleep?: (ms: number) => Promise<void>
+ *   sleep?: (ms: number) => Promise<void>,
+ *   targetClient?: string | null
  * }} [options]
  * @returns {Promise<{ ok: boolean, resumedIds: string[], skippedIds: string[], error?: string }>}
  */
