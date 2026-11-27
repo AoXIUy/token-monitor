@@ -28,6 +28,12 @@ const { tokscaleConfigDir } = require('../../tokscaleConfig');
 // ~/.gemini/; when none exist there is nothing to sync, so don't spawn at all.
 const ANTIGRAVITY_DATA_ROOTS = ['antigravity', 'antigravity-ide', 'antigravity-backup'];
 const ANTIGRAVITY_SYNC_LOCK_MAX_BYTES = 128;
+// `tokscale antigravity sync` exports every known session over loopback RPC in
+// serial (~110-140ms per session plus process/socket discovery), taking ~50s at
+// ~400 sessions. Match Cursor's background budget and give explicit rescans
+// extra headroom for large local histories.
+const ANTIGRAVITY_BACKGROUND_SYNC_TIMEOUT_MS = 150_000;
+const ANTIGRAVITY_EXPLICIT_SYNC_TIMEOUT_MS = 300_000;
 
 function antigravityDataRoots(home = os.homedir()) {
   return ANTIGRAVITY_DATA_ROOTS.map((name) => path.join(home, '.gemini', name));
@@ -156,16 +162,19 @@ function createAntigravitySelfSync({ selfSyncThrottle, tokscaleCommand }) {
   async function maybeSyncAntigravity(clientsCsv, logger, home = os.homedir(), options = {}) {
     throwIfAborted(options.signal);
     const enabled = new Set(normalizeClientsCsv(clientsCsv).split(',').filter(Boolean));
-    if (!enabled.has('antigravity')) return;
-    if (!antigravityDataPresent(home)) return;
-    if (!selfSyncThrottle.claim('antigravity', options.minIntervalMs)) return;
+    if (!enabled.has('antigravity')) return false;
+    if (!antigravityDataPresent(home)) return false;
+    if (!selfSyncThrottle.claim('antigravity', options.minIntervalMs)) return false;
+    const timeoutMs = options.timeoutMs ?? (options.explicit === true
+      ? ANTIGRAVITY_EXPLICIT_SYNC_TIMEOUT_MS
+      : ANTIGRAVITY_BACKGROUND_SYNC_TIMEOUT_MS);
     const attempt = selfSyncThrottle.beginAttempt('antigravity');
     if (typeof options.run === 'function') {
       const cancelAttempt = () => selfSyncThrottle.cancelAttempt('antigravity', attempt);
       options.signal?.addEventListener('abort', cancelAttempt, { once: true });
       if (options.signal?.aborted) cancelAttempt();
       try {
-        await options.run({ signal: options.signal });
+        await options.run({ signal: options.signal, timeoutMs });
         selfSyncThrottle.completeAttempt('antigravity', attempt, false);
       } catch (err) {
         if (options.signal?.aborted) {
@@ -182,7 +191,7 @@ function createAntigravitySelfSync({ selfSyncThrottle, tokscaleCommand }) {
       } finally {
         options.signal?.removeEventListener('abort', cancelAttempt);
       }
-      return;
+      return true;
     }
     const { bin, prefixArgs, env } = tokscaleCommand();
     const syncLockPath = options.syncLockPath || antigravitySyncLockPath(home, env);
@@ -248,7 +257,7 @@ function createAntigravitySelfSync({ selfSyncThrottle, tokscaleCommand }) {
         };
         timer = null;
         termination.request();
-      }, options.timeoutMs ?? 30000);
+      }, timeoutMs);
       child.stdout?.on('data', (chunk) => {
         if (terminalOutcome || stdout.length >= MAX_SYNC_DETAIL_INPUT_LENGTH) return;
         const remaining = MAX_SYNC_DETAIL_INPUT_LENGTH - stdout.length;
@@ -309,13 +318,16 @@ function createAntigravitySelfSync({ selfSyncThrottle, tokscaleCommand }) {
       child.stdin?.end();
     });
     throwIfAborted(options.signal);
+    return true;
   }
 
   return { maybeSyncAntigravity };
 }
 
 module.exports = {
+  ANTIGRAVITY_BACKGROUND_SYNC_TIMEOUT_MS,
   ANTIGRAVITY_DATA_ROOTS,
+  ANTIGRAVITY_EXPLICIT_SYNC_TIMEOUT_MS,
   antigravityDataPresent,
   antigravityDataRoots,
   antigravitySyncLockPath,

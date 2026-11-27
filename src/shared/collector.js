@@ -69,7 +69,7 @@ const {
   terminationUnconfirmedError
 } = require('./subprocessTermination');
 const { lowerSubprocessPriority } = require('./subprocessPriority');
-const { createAntigravitySelfSync } = require('./providers/antigravity/selfSync');
+const { antigravityDataPresent, createAntigravitySelfSync } = require('./providers/antigravity/selfSync');
 const { readRecentTurns: readRecentAntigravityTurns } = require('./providers/antigravity/sessionMetadata');
 const { ANTIGRAVITY_ACP_SOURCE_ID, discoverAntigravityAcpPaths } = require('./providers/antigravity/acpPaths');
 const { withCursorLifecycle } = require('./providers/cursor/lifecycle');
@@ -1442,16 +1442,23 @@ async function collectUsageOnce(options) {
       onTerminationUnconfirmed: () => reportTerminationUnconfirmed('cursor-sync'),
       onFailure: options.onSelfSyncFailed
     });
-    await maybeSyncAntigravity(syncClients, options.logger, options.homeDir || os.homedir(), {
-      minIntervalMs: selfSyncThrottle.minIntervalForTick(options, 'antigravity'),
-      run: options.runAntigravitySync,
-      syncLockPath: options.antigravitySyncLockPath,
-      signal: options.signal,
-      timeoutMs: options.selfSyncTimeoutMs,
-      terminationOptions: options.subprocessTerminationOptions,
-      onTerminationUnconfirmed: () => reportTerminationUnconfirmed('antigravity-sync'),
-      onFailure: options.onSelfSyncFailed
-    });
+    if (!options.skipAntigravitySync && normalizeClientsCsv(syncClients).split(',').includes('antigravity')) {
+      if (typeof options.waitForAntigravitySync === 'function') {
+        await options.waitForAntigravitySync();
+        throwIfAborted(options.signal);
+      }
+      await maybeSyncAntigravity(syncClients, options.logger, options.homeDir || os.homedir(), {
+        minIntervalMs: selfSyncThrottle.minIntervalForTick(options, 'antigravity'),
+        explicit: selfSyncSelected(options.forceSelfSync, 'antigravity'),
+        run: options.runAntigravitySync,
+        syncLockPath: options.antigravitySyncLockPath,
+        signal: options.signal,
+        timeoutMs: options.selfSyncTimeoutMs,
+        terminationOptions: options.subprocessTerminationOptions,
+        onTerminationUnconfirmed: () => reportTerminationUnconfirmed('antigravity-sync'),
+        onFailure: options.onSelfSyncFailed
+      });
+    }
     throwIfAborted(options.signal);
     throwIfAborted(options.signal);
     if (anchorUsed) {
@@ -2504,6 +2511,15 @@ function startCollector(options) {
   let tickHadFailure = false;
   const scheduledWatchClients = new Set();
   let scheduledWatchNeedsFullScan = false;
+  let antigravitySyncInFlight = null;
+  const withoutSelfSyncClient = (selection, kind) => selection === true
+    ? SELF_SYNC_KINDS.filter((client) => client !== kind)
+    : Array.isArray(selection)
+      ? (() => {
+        const remaining = selection.filter((client) => client !== kind);
+        return remaining.length > 0 ? remaining : null;
+      })()
+      : selection;
   // Source events waiting on the shared throttle, and the timer that comes back
   // for them. Built here rather than at module scope because its timer has to
   // die with this collector; the throttle it reads deadlines from is shared, so
@@ -2512,7 +2528,7 @@ function startCollector(options) {
   const sourceSyncQueue = createSourceSyncQueue({
     throttle: selfSyncThrottle,
     retryMs: watchDebounceMs,
-    isBusy: () => tickInFlight,
+    isBusy: () => tickInFlight || Boolean(antigravitySyncInFlight),
     // The tick that carried this event already scanned against the stale cache,
     // so the catch-up has to rescan the same clients behind the sync.
     onDue: (sourceSelfSync) => runTick('source-sync', {
@@ -2523,9 +2539,33 @@ function startCollector(options) {
   });
   const restoreCursorSource = kind => sourceSyncQueue.restore(['cursor'], kind);
   const selfSyncedClients = normalizeClientsCsv(clients).split(',').filter((client) => SELF_SYNCED_CLIENTS.has(client));
-  const nonCursorSyncSelection = selection => selection === true
-    ? SELF_SYNC_KINDS.filter(client => client !== 'cursor')
-    : Array.isArray(selection) ? selection.filter(client => client !== 'cursor') : selection;
+  const nonCursorSyncSelection = selection => withoutSelfSyncClient(selection, 'cursor');
+  const runCollectorAntigravitySync = (syncOptions) => {
+    const previous = antigravitySyncInFlight;
+    const tracked = Promise.resolve(previous)
+      .catch(() => {})
+      .then(() => {
+        throwIfAborted(runtimeSignal);
+        return maybeSyncAntigravity('antigravity', log, options.homeDir || os.homedir(), {
+          ...syncOptions,
+          run: options.runAntigravitySync,
+          syncLockPath: options.antigravitySyncLockPath,
+          signal: runtimeSignal,
+          timeoutMs: options.selfSyncTimeoutMs,
+          terminationOptions: options.subprocessTerminationOptions,
+          onTerminationUnconfirmed: () => emitDiagnosticEvent({
+            subsystem: 'collector',
+            code: 'subprocess-termination-unconfirmed',
+            operation: 'antigravity-sync'
+          })
+        });
+      })
+      .finally(() => {
+        if (antigravitySyncInFlight === tracked) antigravitySyncInFlight = null;
+      });
+    antigravitySyncInFlight = tracked;
+    return tracked;
+  };
   let publishedCursorRevision = trackedClients.has('cursor') ? -1 : 0;
   const cursorSource = trackedClients.has('cursor') ? createCursorUsageSource({
     signal: runtimeSignal,
@@ -2892,6 +2932,10 @@ function startCollector(options) {
         } : null,
         forceSelfSync: tickOptions.forceSelfSync ?? null,
         sourceSelfSync: tickOptions.sourceSelfSync ?? null,
+        skipAntigravitySync: Boolean(tickOptions.skipAntigravitySync)
+          && !selfSyncSelected(tickOptions.forceSelfSync, 'antigravity')
+          && !selfSyncSelected(tickOptions.sourceSelfSync, 'antigravity'),
+        waitForAntigravitySync: () => antigravitySyncInFlight || Promise.resolve(),
         reasonixNativeSessionsEnabled,
         reasonixNativeSessionCache,
         codexLocalUsageStore: codexLocalSource?.store || options.codexLocalUsageStore,
@@ -3271,6 +3315,61 @@ function startCollector(options) {
       if (stopped) return false;
       if (cursorSource.getSnapshot().revision !== publishedCursorRevision) {
         tickOptions = { ...tickOptions, todayOnly: false, targetClients: [], forceHistory: true };
+      }
+    }
+    if (
+      !tickInFlight
+      && !tickOptions.cursorSnapshotRefresh
+      && trackedClients.has('antigravity')
+      && (anchor !== null || selfSyncSelected(tickOptions.forceSelfSync, 'antigravity'))
+    ) {
+      const targets = normalizeClientsCsv(tickOptions.targetClients).split(',').filter(Boolean);
+      const antigravitySelected = !tickOptions.todayOnly
+        || targets.length === 0
+        || targets.includes('antigravity')
+        || selfSyncSelected(tickOptions.forceSelfSync, 'antigravity')
+        || selfSyncSelected(tickOptions.sourceSelfSync, 'antigravity');
+      if (antigravitySelected) {
+        const forceAntigravity = selfSyncSelected(tickOptions.forceSelfSync, 'antigravity');
+        if (antigravitySyncInFlight && !forceAntigravity) {
+          // A background Antigravity RPC sync is already running outside
+          // tickInFlight; scan direct conversation databases immediately.
+          tickOptions = { ...tickOptions, skipAntigravitySync: true };
+        } else {
+          try {
+            if (forceAntigravity && antigravitySyncInFlight) {
+              await antigravitySyncInFlight;
+              if (stopped || runtimeSignal.aborted) return false;
+            }
+            const homeDir = options.homeDir || os.homedir();
+            const minIntervalMs = selfSyncThrottle.minIntervalForTick(tickOptions, 'antigravity');
+            if (antigravityDataPresent(homeDir) && selfSyncThrottle.msUntilDue('antigravity', minIntervalMs) === 0) {
+              const antigravityAcknowledged = forceAntigravity ? sourceSyncQueue.acknowledge(['antigravity']) : [];
+              const consumed = mergeSelfSyncSelection(
+                tickOptions.sourceSelfSync,
+                mergeSelfSyncSelection(tickOptions.acknowledgedSourceSync, antigravityAcknowledged)
+              ) || [];
+              await runCollectorAntigravitySync({
+                minIntervalMs,
+                explicit: forceAntigravity,
+                onFailure: (kind) => sourceSyncQueue.restore(consumed, kind)
+              });
+              if (stopped || runtimeSignal.aborted) return false;
+              tickOptions = {
+                ...tickOptions,
+                forceSelfSync: withoutSelfSyncClient(tickOptions.forceSelfSync, 'antigravity'),
+                sourceSelfSync: withoutSelfSyncClient(tickOptions.sourceSelfSync, 'antigravity'),
+                skipAntigravitySync: true
+              };
+            } else {
+              tickOptions = { ...tickOptions, skipAntigravitySync: true };
+            }
+          } catch (error) {
+            if (stopped || runtimeSignal.aborted) return false;
+            if (onError) onError(error, reason); else log(`collector Antigravity sync failed: ${error.message}`);
+            return false;
+          }
+        }
       }
     }
     const tickActivityRevision = Number.isFinite(tickOptions.activityRevision)
@@ -3749,9 +3848,16 @@ function startCollector(options) {
     // Same ordering as the barrier: the waiting tick resumes, and enters
     // tickInFlight, before this continuation asks again.
     if (cursorRestartRead) return cursorRestartRead.then(() => whenIdle());
+    if (antigravitySyncInFlight) return antigravitySyncInFlight.then(() => whenIdle());
     const usageIdle = !tickInFlight ? Promise.resolve() : new Promise((resolve) => idleWaiters.push(resolve));
     return usageIdle.then(() => activityUpdate).then(() => stopped
-      ? Promise.all([pricingRefresher?.whenIdle(), codexLocalSource?.whenIdle(), cursorSource?.whenIdle()]) : undefined);
+      ? Promise.all([
+        pricingRefresher?.whenIdle(),
+        codexLocalSource?.whenIdle(),
+        cursorSource?.whenIdle(),
+        antigravitySyncInFlight?.catch(() => {})
+      ])
+      : undefined);
   }
 
   function getDiagnostics() {
