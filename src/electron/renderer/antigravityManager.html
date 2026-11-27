@@ -77,6 +77,17 @@
                 <input id="agmAutoSwitchCooldownInput" type="number" min="30" max="3600" step="10" value="180" />
               </label>
             </div>
+            <label class="agm-toggle-row agm-toggle-divider">
+              <span class="agm-toggle-text">
+                <strong data-i18n="agManager.autoResumeEnable">Auto-resume interrupted tasks</strong>
+                <small data-i18n="agManager.autoResumeEnableDesc">Automatically send a continue prompt via agentapi to conversations stopped by quota limits or account switch.</small>
+              </span>
+              <input id="agmAutoResumeEnabledInput" type="checkbox" checked />
+            </label>
+            <label class="agm-field">
+              <span data-i18n="agManager.autoResumePrompt">Resume prompt</span>
+              <input id="agmAutoResumePromptInput" type="text" maxlength="500" value="继续" data-i18n-placeholder="agManager.autoResumePromptPlaceholder" placeholder="Continue" />
+            </label>
           </div>
         </div>
       </div>

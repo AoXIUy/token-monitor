@@ -760,6 +760,22 @@ async function getAntigravityExecutablePathAsync(targetIde = null, deps = {}) {
 }
 
 /**
+ * @param {any} parsed
+ * @param {boolean} isProductJson
+ * @returns {string | null}
+ */
+function extractManifestVersion(parsed, isProductJson) {
+  const candidates = isProductJson
+    ? [parsed?.antigravityVersion, parsed?.ideVersion, parsed?.applicationVersion, parsed?.version]
+    : [parsed?.version];
+  for (const raw of candidates) {
+    const ver = String(raw || '').trim();
+    if (/^\d+\.\d+/.test(ver)) return ver;
+  }
+  return null;
+}
+
+/**
  * @param {string | null} exePath
  * @returns {string | null}
  */
@@ -772,12 +788,20 @@ function detectAntigravityVersion(exePath) {
     path.resolve(path.dirname(exePath), 'resources', 'app')
   ];
   for (const dir of dirs) {
+    const productPath = path.join(dir, 'product.json');
+    if (fs.existsSync(productPath)) {
+      try {
+        const ver = extractManifestVersion(JSON.parse(fs.readFileSync(productPath, 'utf8')), true);
+        if (ver) return ver;
+      } catch (_) {}
+    }
+  }
+  for (const dir of dirs) {
     const pkgPath = path.join(dir, 'package.json');
     if (fs.existsSync(pkgPath)) {
       try {
-        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-        const ver = String(pkg?.version || '').trim();
-        if (/^\d+\.\d+/.test(ver)) return ver;
+        const ver = extractManifestVersion(JSON.parse(fs.readFileSync(pkgPath, 'utf8')), false);
+        if (ver) return ver;
       } catch (_) {}
     }
   }
@@ -797,11 +821,17 @@ async function detectAntigravityVersionAsync(exePath) {
     path.resolve(path.dirname(exePath), 'resources', 'app')
   ];
   for (const dir of dirs) {
+    const productPath = path.join(dir, 'product.json');
+    try {
+      const ver = extractManifestVersion(JSON.parse(await fs.promises.readFile(productPath, 'utf8')), true);
+      if (ver) return ver;
+    } catch (_) {}
+  }
+  for (const dir of dirs) {
     const pkgPath = path.join(dir, 'package.json');
     try {
-      const pkg = JSON.parse(await fs.promises.readFile(pkgPath, 'utf8'));
-      const ver = String(pkg?.version || '').trim();
-      if (/^\d+\.\d+/.test(ver)) return ver;
+      const ver = extractManifestVersion(JSON.parse(await fs.promises.readFile(pkgPath, 'utf8')), false);
+      if (ver) return ver;
     } catch (_) {}
   }
   return null;

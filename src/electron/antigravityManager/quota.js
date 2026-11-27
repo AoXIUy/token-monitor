@@ -4,7 +4,7 @@
 const { ensureFreshToken } = require('./oauth');
 const { normalizeSubscriptionTier } = require('../../shared/antigravityManagerProtocol');
 
-const KNOWN_STABLE_VERSION = '4.3.0';
+const KNOWN_STABLE_VERSION = '2.35.2';
 
 const CLOUD_CODE_LOAD_PROJECT_ENDPOINTS = Object.freeze([
   'https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist',
@@ -56,7 +56,7 @@ const GENERIC_GEMINI_ROLE_TOKENS = new Set([
 function defaultEgressUserAgent(platform = process.platform, arch = process.arch) {
   const osPart = platform === 'win32' ? 'windows' : platform;
   const archPart = arch === 'x64' ? 'amd64' : arch;
-  return `antigravity/${KNOWN_STABLE_VERSION} ${osPart}/${archPart}`;
+  return `antigravity/hub/${KNOWN_STABLE_VERSION} ${osPart}/${archPart}`;
 }
 
 /**
@@ -210,7 +210,15 @@ function extractGemini4Codename(modelName) {
       }
     }
   }
-  if (lower.includes('argon') || stripped === 'gemini-pro-orchestrator-g1-pro') {
+  if (stripped.startsWith('gemini-pro-orchestrator-')) {
+    const rest = stripped.slice('gemini-pro-orchestrator-'.length);
+    const code = (rest.split('-')[0] || '').trim();
+    if (code === 'g1') return 'argon';
+    if (code && /[a-z]/.test(code) && !GENERIC_GEMINI_ROLE_TOKENS.has(code)) {
+      return code;
+    }
+  }
+  if (lower.includes('argon')) {
     return 'argon';
   }
   return null;
@@ -297,8 +305,9 @@ function findGeneralGeminiGroup(groups, knownCodenames) {
  * @param {string} nameLower
  * @param {boolean} isUltra
  * @param {string[]} knownCodenames
+ * @param {{ officialSupported?: boolean }} [options]
  */
-function matchQuotaGroupForModel(groups, nameLower, isUltra, knownCodenames) {
+function matchQuotaGroupForModel(groups, nameLower, isUltra, knownCodenames, options = {}) {
   const g4Codename = extractGemini4Codename(nameLower);
   const isArgon = g4Codename === 'argon';
   const isClaudeOrGpt = !g4Codename && (nameLower.startsWith('claude') || nameLower.startsWith('gpt'));
@@ -311,8 +320,12 @@ function matchQuotaGroupForModel(groups, nameLower, isUltra, knownCodenames) {
   if (g4Codename) {
     const specific = groups.find((g) => groupMatchesCodename(g, g4Codename));
     if (specific) return { kind: 'matched', group: specific };
-    if (isArgon && !isUltra) return { kind: 'skipUnauthorized' };
     const general = findGeneralGeminiGroup(groups, knownCodenames);
+    if (isArgon && !isUltra) {
+      const generalDesc = String(general?.description || '').toLowerCase();
+      const allowedInGeneral = Boolean(options?.officialSupported) || generalDesc.includes('argon');
+      if (!allowedInGeneral) return { kind: 'skipUnauthorized' };
+    }
     if (!general) return isArgon ? { kind: 'skipUnauthorized' } : { kind: 'none' };
     return { kind: 'matched', group: general };
   }
@@ -371,12 +384,16 @@ function modelQuotaPercentage(quotaInfo) {
  */
 function pickMostRestrictiveBucket(buckets) {
   if (!Array.isArray(buckets) || buckets.length === 0) return null;
-  const bucket5h = buckets.find((b) => {
+  const activeBuckets = buckets.filter((b) => (
+    b && b.disabled !== true && typeof b.remainingFraction === 'number' && Number.isFinite(b.remainingFraction)
+  ));
+  if (activeBuckets.length === 0) return null;
+  const bucket5h = activeBuckets.find((b) => {
     const w = String(b.window || '').toLowerCase();
     const bid = String(b.bucketId || '').toLowerCase();
     return w.includes('5h') || bid.includes('5h') || w.includes('hour') || bid.includes('hour');
   });
-  const bucketWeekly = buckets.find((b) => {
+  const bucketWeekly = activeBuckets.find((b) => {
     const w = String(b.window || '').toLowerCase();
     const bid = String(b.bucketId || '').toLowerCase();
     return w.includes('week') || bid.includes('week') || w.includes('7d') || bid.includes('7d');
@@ -387,7 +404,7 @@ function pickMostRestrictiveBucket(buckets) {
     if (bucketWeekly.remainingFraction < bucket5h.remainingFraction) return bucketWeekly;
     return bucketWeekly.resetTime ? bucketWeekly : bucket5h;
   }
-  return bucket5h || bucketWeekly || buckets[0];
+  return bucket5h || bucketWeekly || activeBuckets[0];
 }
 
 /**
@@ -498,14 +515,30 @@ async function fetchQuotaSummary(accessToken, projectId, deps) {
       }
       tracker.markSuccess(url);
       const data = await response.json().catch(() => null);
-      if (!Array.isArray(data?.groups)) return null;
-      return data.groups.map((/** @type {any} */ g) => ({
+      const summary = data?.response || data?.summary || data;
+      if (!Array.isArray(summary?.groups)) return null;
+      return summary.groups.map((/** @type {any} */ g) => ({
         displayName: String(g?.displayName || ''),
         description: g?.description ? String(g.description) : '',
         buckets: (Array.isArray(g?.buckets) ? g.buckets : []).flatMap((/** @type {any} */ b) => {
           const resetTime = String(b?.resetTime || '').trim();
-          let rf = parseRemainingFraction(b?.remainingFraction);
-          if (rf === null && (b?.remainingFraction === undefined || b?.remainingFraction === null) && resetTime) {
+          const disabled = b?.disabled === true;
+          const rawFraction = b?.remainingFraction
+            ?? b?.remaining?.remainingFraction
+            ?? (b?.remaining?.case === 'remainingFraction' ? b.remaining.value : undefined);
+          let rf = parseRemainingFraction(rawFraction);
+          if (disabled) {
+            return [{
+              bucketId: String(b?.bucketId || ''),
+              window: String(b?.window || ''),
+              remainingFraction: rf,
+              disabled: true,
+              resetTime,
+              displayName: b?.displayName ? String(b.displayName) : '',
+              description: b?.description ? String(b.description) : ''
+            }];
+          }
+          if (rf === null && (rawFraction === undefined || rawFraction === null) && resetTime) {
             // Proto3 JSON omits 0 remainingFraction on depleted buckets when resetTime is present.
             rf = 0;
           }
@@ -514,6 +547,7 @@ async function fetchQuotaSummary(accessToken, projectId, deps) {
             bucketId: String(b?.bucketId || ''),
             window: String(b?.window || ''),
             remainingFraction: rf,
+            disabled: false,
             resetTime,
             displayName: b?.displayName ? String(b.displayName) : '',
             description: b?.description ? String(b.description) : ''
@@ -682,7 +716,9 @@ async function fetchAccountQuota(account, tokenData, deps = {}) {
         if (!isModelCompliantWithBaseline(name)) continue;
         if (officialSupported.size > 0 && !officialSupported.has(nameLower)) continue;
 
-        const match = matchQuotaGroupForModel(groups, nameLower, isUltra, knownG4Codenames);
+        const match = matchQuotaGroupForModel(groups, nameLower, isUltra, knownG4Codenames, {
+          officialSupported: officialSupported.size > 0 && officialSupported.has(nameLower)
+        });
         if (match.kind === 'skipUnauthorized') continue;
 
         const modelPct = modelQuotaPercentage(info?.quotaInfo);
@@ -691,7 +727,7 @@ async function fetchAccountQuota(account, tokenData, deps = {}) {
         let groupReset = '';
         if (match.kind === 'matched') {
           const chosen = pickMostRestrictiveBucket(match.group.buckets);
-          if (chosen) {
+          if (chosen && typeof chosen.remainingFraction === 'number') {
             groupPct = Math.round(chosen.remainingFraction * 100);
             groupReset = String(chosen.resetTime || '').trim();
           }

@@ -11,6 +11,10 @@ const {
   VALID_SELECTION_MODES,
   normalizeAccountWeight
 } = require('./autoSwitch');
+const {
+  DEFAULT_AUTO_RESUME_PROMPT,
+  normalizeAutoResumePrompt
+} = require('./taskResume');
 
 const DEFAULT_CONFIG = Object.freeze({
   startupRefresh: false,
@@ -25,6 +29,8 @@ const DEFAULT_CONFIG = Object.freeze({
   autoSwitchThresholdPercent: 0,
   selectionMode: 'auto',
   autoSwitchCooldownSeconds: 180,
+  autoResumeEnabled: true,
+  autoResumePrompt: DEFAULT_AUTO_RESUME_PROMPT,
   customExecutablePaths: { classic: '', ide: '', cli: '' }
 });
 
@@ -114,6 +120,8 @@ function normalizeConfig(raw) {
     autoSwitchThresholdPercent: Number.isFinite(thresholdRaw) ? Math.max(0, Math.min(50, Math.round(thresholdRaw))) : DEFAULT_CONFIG.autoSwitchThresholdPercent,
     selectionMode: VALID_SELECTION_MODES.has(modeRaw) ? modeRaw : DEFAULT_CONFIG.selectionMode,
     autoSwitchCooldownSeconds: Number.isFinite(cooldownRaw) ? Math.max(30, Math.min(3600, Math.round(cooldownRaw))) : DEFAULT_CONFIG.autoSwitchCooldownSeconds,
+    autoResumeEnabled: src.autoResumeEnabled !== false,
+    autoResumePrompt: normalizeAutoResumePrompt(src.autoResumePrompt, DEFAULT_CONFIG.autoResumePrompt),
     customExecutablePaths: {
       classic: typeof customPathsRaw.classic === 'string' ? customPathsRaw.classic.trim() : '',
       ide: typeof customPathsRaw.ide === 'string' ? customPathsRaw.ide.trim() : '',

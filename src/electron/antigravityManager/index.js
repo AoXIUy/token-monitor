@@ -12,7 +12,10 @@ const switcher = require('./switcher');
 const importExport = require('./importExport');
 const deviceProfile = require('./deviceProfile');
 const processManager = require('./processManager');
+const keyring = require('./keyring');
+const fileCredentials = require('./fileCredentials');
 const autoSwitch = require('./autoSwitch');
+const taskResume = require('./taskResume');
 const {
   AG_MANAGER_SNAPSHOT_PATH,
   sanitizeAntigravityManagerSnapshot
@@ -30,14 +33,25 @@ const {
  *   getDeviceIdentity?: () => { deviceId: string, hostname: string },
  *   getHubSyncTarget?: () => { mode: string, hubUrl?: string, secret?: string, embeddedHub?: any } | null,
  *   isLocalAntigravityBusy?: () => boolean,
+ *   probeLocalLimits?: (opts?: { signal?: AbortSignal }) => Promise<any>,
+ *   getLatestLocalLimits?: () => any,
  *   onAutoSwitchCompleted?: (result: any) => void,
  *   nowMs?: () => number,
  *   switcherDeps?: Record<string, any>,
+ *   taskResumeDeps?: Record<string, any>,
  *   onStateChanged?: (state: any) => void,
  *   onRefreshProgress?: (progress: any) => void,
  *   onImportProgress?: (progress: any) => void,
  *   logger?: { log?: Function, warn?: Function, error?: Function },
- *   schedulerOptions?: { pollMs?: number, startupDelayMs?: number }
+ *   schedulerOptions?: { pollMs?: number, startupDelayMs?: number },
+ *   autoSwitchMonitorOptions?: {
+ *     pollMs?: number,
+ *     activityDebounceMs?: number,
+ *     activityMinIntervalMs?: number,
+ *     turnEndDelayMs?: number,
+ *     startupDelayMs?: number,
+ *     hotSwitchVerifyDelayMs?: number
+ *   }
  * }} options
  */
 function createAntigravityManagerService(options) {
@@ -51,19 +65,44 @@ function createAntigravityManagerService(options) {
   });
   const healthTracker = new quota.EndpointHealthTracker();
   const REFRESH_STATE_THROTTLE_MS = 280;
+  const AUTO_SWITCH_MONITOR_POLL_MS = Math.max(200, Number(options.autoSwitchMonitorOptions?.pollMs || 25_000));
+  const AUTO_SWITCH_ACTIVITY_DEBOUNCE_MS = Math.max(20, Number(options.autoSwitchMonitorOptions?.activityDebounceMs || 1200));
+  const AUTO_SWITCH_ACTIVITY_MIN_INTERVAL_MS = Math.max(50, Number(options.autoSwitchMonitorOptions?.activityMinIntervalMs || 8000));
+  const AUTO_SWITCH_TURN_END_DELAY_MS = Math.max(20, Number(options.autoSwitchMonitorOptions?.turnEndDelayMs || 600));
+  const AUTO_SWITCH_STARTUP_DELAY_MS = Math.max(20, Number(options.autoSwitchMonitorOptions?.startupDelayMs || 2500));
+  const HOT_SWITCH_VERIFY_DELAY_MS = Math.max(20, Number(options.autoSwitchMonitorOptions?.hotSwitchVerifyDelayMs || 1800));
+  const AUTO_SWITCH_CONFIG_KEYS = [
+    'autoSwitchEnabled',
+    'autoSwitchScope',
+    'autoSwitchThresholdPercent',
+    'selectionMode',
+    'autoSwitchCooldownSeconds',
+    'defaultSwitchTarget'
+  ];
   /** @type {AbortController | null} */
   let activeRefreshAbort = null;
   /** @type {AbortController | null} */
   let activeOAuthAbort = null;
+  /** @type {AbortController | null} */
+  let activeLocalProbeAbort = null;
   /** @type {ReturnType<typeof setTimeout> | null} */
   let hubSyncTimer = null;
   /** @type {ReturnType<typeof setTimeout> | null} */
   let refreshStateTimer = null;
+  /** @type {ReturnType<typeof setInterval> | null} */
+  let autoSwitchMonitorTimer = null;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let localProbeDebounceTimer = null;
   let lastRefreshStateEmitMs = 0;
   let switching = false;
   /** @type {string | null} */
   let switchingAccountId = null;
   let autoSwitchInFlight = false;
+  let localProbeInFlight = false;
+  let lastLocalProbeAtMs = 0;
+  let wasLocalAntigravityBusy = false;
+  /** @type {Map<string, number>} */
+  const recentRunningConversations = new Map();
   /** @type {unknown} */
   let pendingAutoSwitchLimits = null;
   let lastAutoSwitchAttemptMs = 0;
@@ -72,6 +111,7 @@ function createAntigravityManagerService(options) {
   let lastAutoSwitch = null;
   /** @type {Array<() => void>} */
   const refreshWaiters = [];
+  let started = false;
   let stopped = false;
 
   function resolveRefreshWaiters() {
@@ -95,6 +135,30 @@ function createAntigravityManagerService(options) {
     if (lastAutoSwitchWasEmptyPool) {
       lastAutoSwitchWasEmptyPool = false;
       lastAutoSwitchAttemptMs = 0;
+    }
+  }
+
+  function resetAutoSwitchCooldown() {
+    lastAutoSwitchWasEmptyPool = false;
+    lastAutoSwitchAttemptMs = 0;
+  }
+
+  function clearLocalProbeDebounceTimer() {
+    if (localProbeDebounceTimer) {
+      clearTimeout(localProbeDebounceTimer);
+      localProbeDebounceTimer = null;
+    }
+  }
+
+  function clearAutoSwitchMonitorTimers() {
+    clearLocalProbeDebounceTimer();
+    if (autoSwitchMonitorTimer) {
+      clearInterval(autoSwitchMonitorTimer);
+      autoSwitchMonitorTimer = null;
+    }
+    if (activeLocalProbeAbort) {
+      activeLocalProbeAbort.abort();
+      activeLocalProbeAbort = null;
     }
   }
 
@@ -391,12 +455,102 @@ function createAntigravityManagerService(options) {
   }
 
   /**
+   * @param {string} _reason
+   * @param {{ bypassMinInterval?: boolean }} [opts]
+   */
+  async function probeAndEvaluateLocalQuota(_reason, opts = {}) {
+    if (stopped || typeof options.probeLocalLimits !== 'function') return null;
+    if (!store.getConfig().autoSwitchEnabled) return null;
+    if (localProbeInFlight || autoSwitchInFlight || switching) return null;
+    const now = nowMsFn();
+    if (!opts.bypassMinInterval && lastLocalProbeAtMs > 0 && now - lastLocalProbeAtMs < AUTO_SWITCH_ACTIVITY_MIN_INTERVAL_MS) {
+      return null;
+    }
+    localProbeInFlight = true;
+    const controller = new AbortController();
+    activeLocalProbeAbort = controller;
+    try {
+      const probed = await options.probeLocalLimits({ signal: controller.signal });
+      lastLocalProbeAtMs = nowMsFn();
+      if (stopped || controller.signal.aborted || !probed) return null;
+      return await onLocalLimitsUpdated(probed);
+    } catch (_) {
+      lastLocalProbeAtMs = nowMsFn();
+      return null;
+    } finally {
+      if (activeLocalProbeAbort === controller) activeLocalProbeAbort = null;
+      localProbeInFlight = false;
+    }
+  }
+
+  /**
+   * @param {number} delayMs
+   * @param {string} reason
+   * @param {boolean} [bypassMinInterval]
+   */
+  function scheduleLocalQuotaProbe(delayMs, reason, bypassMinInterval = false) {
+    if (stopped || typeof options.probeLocalLimits !== 'function' || !store.getConfig().autoSwitchEnabled) return;
+    if (localProbeDebounceTimer && !bypassMinInterval) return;
+    clearLocalProbeDebounceTimer();
+    localProbeDebounceTimer = setTimeout(() => {
+      localProbeDebounceTimer = null;
+      void probeAndEvaluateLocalQuota(reason, { bypassMinInterval });
+    }, delayMs);
+    localProbeDebounceTimer.unref?.();
+  }
+
+  function reconcileAutoSwitchMonitor() {
+    if (stopped || !started || typeof options.probeLocalLimits !== 'function' || !store.getConfig().autoSwitchEnabled) {
+      clearAutoSwitchMonitorTimers();
+      return;
+    }
+    if (!autoSwitchMonitorTimer) {
+      autoSwitchMonitorTimer = setInterval(() => {
+        void probeAndEvaluateLocalQuota('interval');
+      }, AUTO_SWITCH_MONITOR_POLL_MS);
+      autoSwitchMonitorTimer.unref?.();
+    }
+  }
+
+  /**
+   * @param {unknown} limitsPayload
+   * @param {number} maxAgeMs
+   */
+  function hasFreshLocalRpcRow(limitsPayload, maxAgeMs) {
+    const providers = Array.isArray(limitsPayload)
+      ? limitsPayload
+      : (limitsPayload && typeof limitsPayload === 'object' && Array.isArray(/** @type {any} */ (limitsPayload).providers)
+          ? /** @type {any} */ (limitsPayload).providers
+          : []);
+    const now = nowMsFn();
+    return providers.some((/** @type {any} */ row) => {
+      if (!row || row.provider !== 'antigravity' || row.source !== 'rpc' || row.status !== 'ok') return false;
+      const ts = Date.parse(String(row.updatedAt || ''));
+      return Number.isFinite(ts) && ts > 0 && now - ts <= maxAgeMs;
+    });
+  }
+
+  /**
    * @param {Record<string, any>} patch
    */
   function updateConfig(patch) {
-    const updated = store.updateConfig(patch);
+    const src = patch && typeof patch === 'object' ? patch : {};
+    const touchedAutoSwitch = AUTO_SWITCH_CONFIG_KEYS.some((key) => Object.prototype.hasOwnProperty.call(src, key));
+    const updated = store.updateConfig(src);
     resetEmptyPoolBackoff();
+    if (touchedAutoSwitch) {
+      resetAutoSwitchCooldown();
+    }
+    reconcileAutoSwitchMonitor();
     notifyStateChanged(true);
+    if (touchedAutoSwitch && updated.autoSwitchEnabled) {
+      const cachedLimits = options.getLatestLocalLimits?.();
+      if (cachedLimits && hasFreshLocalRpcRow(cachedLimits, 15_000) && autoSwitch.evaluateLocalQuotaTrigger(cachedLimits, updated).triggered) {
+        void Promise.resolve(onLocalLimitsUpdated(cachedLimits)).catch(() => {});
+      } else if (typeof options.probeLocalLimits === 'function') {
+        void probeAndEvaluateLocalQuota('config_change', { bypassMinInterval: true });
+      }
+    }
     return { ok: true, config: updated };
   }
 
@@ -538,10 +692,41 @@ function createAntigravityManagerService(options) {
   }
 
   /**
+   * @param {unknown} limitsPayload
+   * @returns {string}
+   */
+  function extractLocalRpcAccountEmail(limitsPayload) {
+    const providers = Array.isArray(limitsPayload)
+      ? limitsPayload
+      : (limitsPayload && typeof limitsPayload === 'object' && Array.isArray(/** @type {any} */ (limitsPayload).providers)
+          ? /** @type {any} */ (limitsPayload).providers
+          : []);
+    for (const row of providers) {
+      if (row && row.provider === 'antigravity' && row.source === 'rpc' && row.status === 'ok') {
+        const email = String(row.accountEmail || '').trim().toLowerCase();
+        if (email) return email;
+      }
+    }
+    return '';
+  }
+
+  /**
+   * @param {number} ms
+   * @returns {Promise<void>}
+   */
+  function waitUnref(ms) {
+    return new Promise((resolve) => {
+      const t = setTimeout(() => resolve(), ms);
+      t.unref?.();
+    });
+  }
+
+  /**
    * @param {string} accountId
    * @param {string} [targetClient]
+   * @param {{ forceRestart?: boolean, verifyHotSwitch?: boolean, autoResume?: boolean }} [switchOpts]
    */
-  async function switchAccountTo(accountId, targetClient) {
+  async function switchAccountTo(accountId, targetClient, switchOpts = {}) {
     if (switching) return { ok: false, error: 'Account switch already in progress' };
     const account = store.getAccount(accountId);
     if (!account) return { ok: false, error: 'Account not found' };
@@ -549,24 +734,103 @@ function createAntigravityManagerService(options) {
     if (!tokenData) return { ok: false, error: 'Account has no stored token' };
     const cfg = store.getConfig();
     const target = targetClient || cfg.defaultSwitchTarget || 'auto';
+    const switcherDepsObj = {
+      nowSec: nowSecFn,
+      ...(options.switcherDeps || {}),
+      fetch: options.fetch,
+      customExecutablePaths: cfg.customExecutablePaths
+    };
+    const shouldAutoResume = (
+      cfg.autoResumeEnabled !== false
+      && switchOpts?.autoResume !== false
+      && (!options.switcherDeps || Boolean(options.taskResumeDeps))
+    );
+    const nowForRecent = nowMsFn();
+    for (const [cid, seenAt] of recentRunningConversations) {
+      if (nowForRecent - seenAt > 5 * 60_000) recentRunningConversations.delete(cid);
+    }
+    const resumeApi = /** @type {typeof taskResume} */ (options.taskResumeDeps?.api || taskResume);
+    const interruptedBeforeSwitch = shouldAutoResume
+      ? resumeApi.snapshotInterruptedConversations({
+          ...(options.taskResumeDeps || {}),
+          recentlyRunningIds: recentRunningConversations.keys(),
+          nowMs: nowForRecent
+        })
+      : [];
+
     switching = true;
     switchingAccountId = account.id;
     notifyStateChanged(false);
     let switchedOk = false;
     try {
-      const res = await switcher.switchAccount({
+      /** @type {any} */
+      let res = await switcher.switchAccount({
         account,
         tokenData,
         targetClient: target,
+        forceRestart: Boolean(switchOpts?.forceRestart),
         store,
-        deps: {
-          nowSec: nowSecFn,
-          ...(options.switcherDeps || {}),
-          fetch: options.fetch,
-          customExecutablePaths: cfg.customExecutablePaths
-        }
+        deps: switcherDepsObj
       });
+      // On Windows / Electron builds where `Antigravity.exe` caches `state.vscdb` OAuth in memory
+      // and re-injects the previous account into a respawned language_server, verify the live RPC
+      // identity after a hot-switch and fall back to a clean full restart when still mismatched.
+      if (
+        res?.ok
+        && res?.mode === 'hot'
+        && !switchOpts?.forceRestart
+        && switchOpts?.verifyHotSwitch !== false
+        && typeof options.probeLocalLimits === 'function'
+        && account.email
+      ) {
+        try {
+          await waitUnref(HOT_SWITCH_VERIFY_DELAY_MS);
+          if (!stopped) {
+            const verifySnapshot = await options.probeLocalLimits();
+            const liveEmail = extractLocalRpcAccountEmail(verifySnapshot);
+            const expectedEmail = String(account.email || '').trim().toLowerCase();
+            if (liveEmail && expectedEmail && liveEmail !== expectedEmail) {
+              logger.warn?.(`Hot-switch kept ${liveEmail} instead of ${expectedEmail}; falling back to full restart`);
+              res = await switcher.switchAccount({
+                account,
+                tokenData,
+                targetClient: target,
+                forceRestart: true,
+                store,
+                deps: switcherDepsObj
+              });
+            }
+          }
+        } catch (_) {}
+      }
       switchedOk = Boolean(res?.ok);
+      if (switchedOk && !autoSwitchInFlight) {
+        resetAutoSwitchCooldown();
+      }
+      if (switchedOk && shouldAutoResume && interruptedBeforeSwitch.length > 0 && !stopped) {
+        try {
+          const resumeOutcome = await resumeApi.resumeInterruptedConversations(interruptedBeforeSwitch, {
+            ...(options.taskResumeDeps || {}),
+            prompt: cfg.autoResumePrompt
+          });
+          if (resumeOutcome.resumedIds.length > 0) {
+            for (const cid of resumeOutcome.resumedIds) recentRunningConversations.delete(cid);
+          }
+          res = {
+            ...res,
+            resumedConversations: resumeOutcome.resumedIds,
+            resumedCount: resumeOutcome.resumedIds.length,
+            ...(resumeOutcome.error ? { resumeError: resumeOutcome.error } : {})
+          };
+        } catch (resumeErr) {
+          res = {
+            ...res,
+            resumedConversations: [],
+            resumedCount: 0,
+            resumeError: resumeErr instanceof Error ? resumeErr.message : String(resumeErr)
+          };
+        }
+      }
       return res;
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -609,6 +873,61 @@ function createAntigravityManagerService(options) {
   }
 
   /**
+   * Best-effort local credential inspection when RPC `GetUserStatus` omits `accountEmail`
+   * (e.g. timeout on Windows socket check), so the currently logged-in account is never re-picked.
+   * @returns {Promise<{ emails: string[], accountIds: string[] }>}
+   */
+  async function detectLocalLoggedInAccountHints() {
+    /** @type {Set<string>} */
+    const emails = new Set();
+    /** @type {Set<string>} */
+    const refreshTokens = new Set();
+    const canInspectRealHost = !options.switcherDeps;
+    const krApi = options.switcherDeps?.keyring || (canInspectRealHost ? keyring : null);
+    const fcApi = options.switcherDeps?.fileCredentials || (canInspectRealHost ? fileCredentials : null);
+
+    if (krApi) {
+      try {
+        const kr = typeof krApi.readFromSystemKeyringAsync === 'function'
+          ? await krApi.readFromSystemKeyringAsync(options.switcherDeps || {})
+          : (typeof krApi.readFromSystemKeyring === 'function' ? krApi.readFromSystemKeyring(options.switcherDeps || {}) : null);
+        if (kr?.email) emails.add(String(kr.email).trim().toLowerCase());
+        if (kr?.refreshToken) refreshTokens.add(String(kr.refreshToken).trim());
+      } catch (_) {}
+    }
+    if (fcApi) {
+      try {
+        const files = typeof fcApi.readLocalCredentialFilesAsync === 'function'
+          ? await fcApi.readLocalCredentialFilesAsync(options.switcherDeps || {})
+          : (typeof fcApi.readLocalCredentialFiles === 'function' ? fcApi.readLocalCredentialFiles(options.switcherDeps || {}) : []);
+        for (const item of Array.isArray(files) ? files : []) {
+          if (item?.email) emails.add(String(item.email).trim().toLowerCase());
+          if (item?.refreshToken) refreshTokens.add(String(item.refreshToken).trim());
+        }
+      } catch (_) {}
+    }
+
+    /** @type {Set<string>} */
+    const accountIds = new Set();
+    if (emails.size > 0 || refreshTokens.size > 0) {
+      for (const acc of store.listAccounts()) {
+        if (acc.email && emails.has(acc.email.toLowerCase())) {
+          accountIds.add(acc.id);
+          continue;
+        }
+        if (refreshTokens.size > 0) {
+          const tok = store.getAccountToken(acc.id);
+          if (tok?.refreshToken && refreshTokens.has(tok.refreshToken)) {
+            accountIds.add(acc.id);
+            if (acc.email) emails.add(acc.email.toLowerCase());
+          }
+        }
+      }
+    }
+    return { emails: [...emails], accountIds: [...accountIds] };
+  }
+
+  /**
    * @param {ReturnType<typeof autoSwitch.evaluateLocalQuotaTrigger>} evalRes
    */
   async function runAutoSwitchFlow(evalRes) {
@@ -620,9 +939,27 @@ function createAntigravityManagerService(options) {
     notifyStateChanged(false);
 
     const initialCfg = store.getConfig();
+    /** @type {{ classicRunning: boolean, ideRunning: boolean } | null} */
+    let activeClients = null;
+    if (!options.switcherDeps || options.switcherDeps.processManager) {
+      try {
+        const pmApi = options.switcherDeps?.processManager || processManager;
+        const procs = typeof pmApi.listProcessesAsync === 'function'
+          ? await pmApi.listProcessesAsync(options.switcherDeps || {})
+          : (typeof pmApi.listProcesses === 'function' ? pmApi.listProcesses(options.switcherDeps || {}) : null);
+        const procDeps = procs ? { ...(options.switcherDeps || {}), listProcesses: () => procs } : (options.switcherDeps || {});
+        if (typeof pmApi.isAntigravityRunning === 'function') {
+          activeClients = {
+            classicRunning: Boolean(pmApi.isAntigravityRunning('classic', procDeps)),
+            ideRunning: Boolean(pmApi.isAntigravityRunning('ide', procDeps))
+          };
+        }
+      } catch (_) {}
+    }
     const targetClient = autoSwitch.resolveSwitchTargetForTrigger(
       initialCfg.defaultSwitchTarget,
-      evalRes.sourceDetail
+      evalRes.sourceDetail,
+      activeClients
     );
 
     try {
@@ -633,7 +970,7 @@ function createAntigravityManagerService(options) {
         const lastSec = scheduler.getLastRefreshTimestamp();
         const candidates = store.listAccounts().filter((a) => !a.disabled && !a.banned && a.hasToken);
         const hasUnfetchedCandidate = candidates.some((a) => !a.quota?.lastUpdatedAt);
-        if (candidates.length > 0 && (lastSec <= 0 || nowSec - lastSec >= 15 || hasUnfetchedCandidate)) {
+        if (candidates.length > 0 && (lastSec <= 0 || nowSec - lastSec >= 45 || hasUnfetchedCandidate)) {
           await refreshAccounts([]);
         }
       }
@@ -645,25 +982,31 @@ function createAntigravityManagerService(options) {
       }
 
       const active = store.getActiveAccounts();
-      /** @type {string[]} */
-      const excludeIds = [];
+      /** @type {Set<string>} */
+      const excludeIdSet = new Set();
+      /** @type {Set<string>} */
+      const excludeEmailSet = new Set();
       if (evalRes.accountEmail) {
+        excludeEmailSet.add(evalRes.accountEmail);
         const matched = store.findAccountByEmail(evalRes.accountEmail);
-        if (matched?.id) excludeIds.push(matched.id);
+        if (matched?.id) excludeIdSet.add(matched.id);
       } else {
-        const slot = targetClient === 'ide'
+        const slot = targetClient === 'ide' || (targetClient === 'auto' && activeClients?.ideRunning && !activeClients?.classicRunning)
           ? 'ide'
           : (targetClient === 'agy' ? 'agy' : (targetClient === 'acp' ? 'acp' : 'classic'));
         const slotId = active[slot];
-        if (slotId) excludeIds.push(slotId);
+        if (slotId) excludeIdSet.add(slotId);
+        const localHints = await detectLocalLoggedInAccountHints();
+        for (const id of localHints.accountIds) excludeIdSet.add(id);
+        for (const em of localHints.emails) excludeEmailSet.add(em);
       }
 
       const best = autoSwitch.selectReplacementAccount(store.listAccounts(), {
         selectionMode: freshCfg.selectionMode,
         thresholdPercent: freshCfg.autoSwitchThresholdPercent,
         scope: freshCfg.autoSwitchScope,
-        excludeIds,
-        excludeEmails: evalRes.accountEmail ? [evalRes.accountEmail] : [],
+        excludeIds: excludeIdSet,
+        excludeEmails: excludeEmailSet,
         excludeAccountKeys: evalRes.accountKey ? [evalRes.accountKey] : [],
         preferredFamilies: evalRes.exhaustedFamilies,
         requireVerifiedQuota: true
@@ -699,6 +1042,9 @@ function createAntigravityManagerService(options) {
         mode: String(switchRes?.mode || ''),
         triggerLabel: evalRes.triggerLabel,
         ok: Boolean(switchRes?.ok),
+        resumedCount: Number(switchRes?.resumedCount || 0),
+        resumedConversations: Array.isArray(switchRes?.resumedConversations) ? switchRes.resumedConversations : [],
+        ...(switchRes?.resumeError ? { resumeError: String(switchRes.resumeError) } : {}),
         ...(switchRes?.error ? { error: String(switchRes.error) } : {})
       };
       lastAutoSwitch = record;
@@ -761,12 +1107,38 @@ function createAntigravityManagerService(options) {
     return { triggered: true, ...outcome };
   }
 
-  function onLocalActivityChanged() {
-    if (stopped || !pendingAutoSwitchLimits) return null;
-    if (options.isLocalAntigravityBusy?.() === true) return null;
-    const queued = pendingAutoSwitchLimits;
-    pendingAutoSwitchLimits = null;
-    return onLocalLimitsUpdated(queued);
+  /**
+   * @param {{ busy?: boolean, runningConversationIds?: string[] }} [activityInfo]
+   */
+  function onLocalActivityChanged(activityInfo) {
+    if (stopped) return null;
+    const now = nowMsFn();
+    if (Array.isArray(activityInfo?.runningConversationIds)) {
+      for (const rawId of activityInfo.runningConversationIds) {
+        const cid = String(rawId || '').trim();
+        if (cid) recentRunningConversations.set(cid, now);
+      }
+    }
+    const isNowBusy = typeof activityInfo?.busy === 'boolean'
+      ? activityInfo.busy
+      : options.isLocalAntigravityBusy?.() === true;
+    const previouslyBusy = wasLocalAntigravityBusy;
+    wasLocalAntigravityBusy = isNowBusy;
+
+    if (!isNowBusy && pendingAutoSwitchLimits) {
+      const queued = pendingAutoSwitchLimits;
+      pendingAutoSwitchLimits = null;
+      return onLocalLimitsUpdated(queued);
+    }
+
+    if (store.getConfig().autoSwitchEnabled && typeof options.probeLocalLimits === 'function') {
+      if (previouslyBusy && !isNowBusy) {
+        scheduleLocalQuotaProbe(AUTO_SWITCH_TURN_END_DELAY_MS, 'turn_end', true);
+      } else {
+        scheduleLocalQuotaProbe(AUTO_SWITCH_ACTIVITY_DEBOUNCE_MS, 'activity', false);
+      }
+    }
+    return null;
   }
 
   /**
@@ -888,13 +1260,20 @@ function createAntigravityManagerService(options) {
   }
 
   function start() {
+    started = true;
     scheduler.start();
+    reconcileAutoSwitchMonitor();
+    if (store.getConfig().autoSwitchEnabled && typeof options.probeLocalLimits === 'function') {
+      scheduleLocalQuotaProbe(AUTO_SWITCH_STARTUP_DELAY_MS, 'startup', true);
+    }
     scheduleHubSync();
   }
 
   function stop() {
     stopped = true;
+    started = false;
     pendingAutoSwitchLimits = null;
+    clearAutoSwitchMonitorTimers();
     scheduler.stop();
     resolveRefreshWaiters();
     clearRefreshStateTimer();

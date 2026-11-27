@@ -8,7 +8,7 @@ const DEFAULT_ACCOUNT_WEIGHT = 50;
 const MIN_ACCOUNT_WEIGHT = 1;
 const MAX_ACCOUNT_WEIGHT = 100;
 
-const DEDICATED_CODENAME_RE = /\b(argon|hydrogen|carbon|helium|wtu)\b/i;
+const DEDICATED_CODENAME_RE = /\b(argon|neon|hydrogen|carbon|helium|wtu)\b/i;
 const CLAUDE_3P_RE = /\b(claude|gpt|3p)\b/i;
 const WINDOW_5H_RE = /\b(5h|5-hour|five-hour|five hour|session|hour)\b/i;
 const WINDOW_WEEKLY_RE = /\b(weekly|7d|week)\b/i;
@@ -84,19 +84,29 @@ function extractLimitWindowGroupName(win) {
  * Map a local RPC `sourceDetail` (`'app' | 'cli' | 'ide'`) to a switcher target client
  * when the user's configured `defaultSwitchTarget` is `'auto'`.
  *
+ * Note: `probe.js` labels standard `Antigravity.exe` builds whose language server lives under
+ * `resources/app/extensions/antigravity/bin/language_server*` as `sourceDetail = 'ide'`, whereas
+ * `switcher.js` reserves `'ide'` strictly for the separate `Antigravity IDE` product and uses
+ * `'classic'` for standard `Antigravity`. Returning `'auto'` for desktop/IDE sources lets
+ * `switcher.switchAccount` inspect actual running processes via `processManager`.
+ *
  * @param {string | undefined | null} defaultSwitchTarget
  * @param {string | undefined | null} sourceDetail
+ * @param {{ classicRunning?: boolean, ideRunning?: boolean } | null} [activeClients]
  * @returns {'auto' | 'classic' | 'ide' | 'agy' | 'acp'}
  */
-function resolveSwitchTargetForTrigger(defaultSwitchTarget, sourceDetail) {
+function resolveSwitchTargetForTrigger(defaultSwitchTarget, sourceDetail, activeClients = null) {
   const configured = String(defaultSwitchTarget || 'auto').trim().toLowerCase();
   if (configured === 'classic' || configured === 'ide' || configured === 'agy' || configured === 'acp') {
     return configured;
   }
   const detail = String(sourceDetail || '').trim().toLowerCase();
-  if (detail === 'ide') return 'ide';
-  if (detail === 'cli') return 'agy';
-  if (detail === 'app') return 'classic';
+  if (detail === 'cli') {
+    if (activeClients && (activeClients.classicRunning || activeClients.ideRunning)) {
+      return 'auto';
+    }
+    return 'agy';
+  }
   return 'auto';
 }
 
@@ -223,18 +233,21 @@ function summarizePoolAccountQuota(account) {
     const entries = [];
     for (const group of groups) {
       const buckets = Array.isArray(group?.buckets) ? group.buckets : [];
-      if (buckets.length === 0) continue;
-      const relevantBuckets = buckets.filter((/** @type {any} */ b) => {
+      const activeBuckets = buckets.filter((/** @type {any} */ b) => (
+        b && b.disabled !== true && typeof b.remainingFraction === 'number' && Number.isFinite(b.remainingFraction)
+      ));
+      if (activeBuckets.length === 0) continue;
+      const relevantBuckets = activeBuckets.filter((/** @type {any} */ b) => {
         const text = `${b?.window || ''} ${b?.bucketId || ''}`;
         return WINDOW_5H_RE.test(text) || WINDOW_WEEKLY_RE.test(text);
       });
-      const targetBuckets = relevantBuckets.length > 0 ? relevantBuckets : buckets;
+      const targetBuckets = relevantBuckets.length > 0 ? relevantBuckets : activeBuckets;
       const fractions = targetBuckets
         .map((/** @type {any} */ b) => Number(b?.remainingFraction))
         .filter((/** @type {number} */ n) => Number.isFinite(n));
       if (fractions.length === 0) continue;
       const minPct = Math.max(0, Math.min(100, Math.min(...fractions) * 100));
-      const extraText = buckets.map((/** @type {any} */ b) => `${b?.bucketId || ''} ${b?.displayName || ''}`).join(' ');
+      const extraText = activeBuckets.map((/** @type {any} */ b) => `${b?.bucketId || ''} ${b?.displayName || ''}`).join(' ');
       const name = String(group?.displayName || 'Quota');
       entries.push({
         name,

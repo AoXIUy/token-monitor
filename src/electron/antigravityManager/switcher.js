@@ -141,6 +141,15 @@ function applyAccountCredentials(account, tokenData, { isIde, effectiveTarget, a
       idToken: tokenData.idToken,
       oauthClientKey: tokenData.oauthClientKey
     }, deps);
+    try {
+      (deps.keyring || keyring).writeToSystemKeyring({
+        accessToken: tokenData.accessToken,
+        refreshToken: tokenData.refreshToken,
+        expiryTimestamp: tokenData.expiryTimestamp,
+        email: account.email,
+        idToken: tokenData.idToken
+      }, deps);
+    } catch (_) {}
   }
 
   if (account.deviceProfile?.macMachineId && (deps.fs ? deps.fs.existsSync(dbPath) : require('node:fs').existsSync(dbPath))) {
@@ -312,6 +321,7 @@ async function applyAccountCredentialsAsync(account, tokenData, { isIde, effecti
     }
   } else {
     await injectDb(Boolean(account.deviceProfile && storagePath));
+    await writeKeyringSafe().catch(() => {});
   }
 
   if (!hasAsyncInject && account.deviceProfile?.macMachineId && dbExists && typeof sdb.writeServiceMachineId === 'function') {
@@ -330,6 +340,7 @@ async function applyAccountCredentialsAsync(account, tokenData, { isIde, effecti
  *   account: Record<string, any>,
  *   tokenData: Record<string, any>,
  *   targetClient?: string | null,
+ *   forceRestart?: boolean,
  *   store: {
  *     upsertAccount: (meta: any, token?: any) => any,
  *     saveAccountToken: (id: string, token: any) => boolean,
@@ -339,7 +350,7 @@ async function applyAccountCredentialsAsync(account, tokenData, { isIde, effecti
  *   deps?: Record<string, any>
  * }} params
  */
-async function switchAccount({ account, tokenData, targetClient = 'auto', store, deps = {} }) {
+async function switchAccount({ account, tokenData, targetClient = 'auto', forceRestart = false, store, deps = {} }) {
   const oauthApi = deps.oauth || oauth;
   const pm = deps.processManager || processManager;
   const kr = deps.keyring || keyring;
@@ -518,7 +529,7 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', store,
   let hotSwitched = false;
   let launched = false;
 
-  if (running) {
+  if (running && !forceRestart && !deps.forceRestart) {
     try {
       // Pre-write credentials once before killing language_server so supervisor respawns with new account
       await applyAccountCredentialsAsync(activeAccount, freshToken, { isIde, effectiveTarget, activeExePath, deps: credDeps });

@@ -112,13 +112,19 @@ function convertRustQuota(rawQuota) {
     displayName: String(g?.display_name ?? g?.displayName ?? ''),
     description: g?.description ? String(g.description) : '',
     buckets: (Array.isArray(g?.buckets) ? g.buckets : []).map((/** @type {any} */ b) => {
+      const disabled = b?.disabled === true;
       const rfRaw = b?.remaining_fraction ?? b?.remainingFraction;
-      const rfNum = Number(rfRaw);
-      const remainingFraction = Number.isFinite(rfNum) ? Math.max(0, Math.min(1, rfNum)) : 0;
+      const rfNum = rfRaw === null || rfRaw === undefined || rfRaw === '' || typeof rfRaw === 'boolean'
+        ? NaN
+        : Number(rfRaw);
+      const remainingFraction = disabled
+        ? (Number.isFinite(rfNum) ? Math.max(0, Math.min(1, rfNum)) : null)
+        : (Number.isFinite(rfNum) ? Math.max(0, Math.min(1, rfNum)) : 0);
       return {
         bucketId: String(b?.bucket_id ?? b?.bucketId ?? ''),
         window: String(b?.window ?? ''),
         remainingFraction,
+        disabled,
         resetTime: String(b?.reset_time ?? b?.resetTime ?? ''),
         displayName: String(b?.display_name ?? b?.displayName ?? ''),
         description: String(b?.description ?? '')

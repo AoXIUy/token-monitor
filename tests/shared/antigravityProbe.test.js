@@ -1422,3 +1422,53 @@ test('_poolForModel maps Gemini 4 Neon and Gemini 4 Hydrogen to Gemini Pro inste
   assert.equal(probe._poolForModel('Gemini 4 Argon (High)', 'gemini-4-argon-high'), 'Gemini 4 Argon');
   assert.equal(probe._poolForModel('Claude Opus 5.5', 'claude-opus-5-5'), 'Claude');
 });
+
+test('win32 probe sets UTF-8 PowerShell output, unwraps quoted flags, and keeps full summary/identity budget for desktopPid', async () => {
+  let capturedPsScript = '';
+  const winStdout = '8844 "C:\\Users\\雨娇\\AppData\\Local\\Programs\\Antigravity\\language_server_windows_x64.exe" "language_server_windows_x64.exe" --app_data_dir "antigravity" --csrf_token "win-quoted-tok"\r\n';
+  const infos = await probe.detectProcessInfos({
+    platform: 'win32',
+    spawn: (_cmd, args) => {
+      capturedPsScript = String(args.at(-1) || '');
+      return fakeSpawn(winStdout)();
+    }
+  });
+  assert.match(capturedPsScript, /OutputEncoding = \[System\.Text\.Encoding\]::UTF8/);
+  assert.equal(infos.length, 1);
+  assert.equal(infos[0].pid, 8844);
+  assert.equal(infos[0].csrfToken, 'win-quoted-tok');
+
+  let identityTimeoutObserved = 0;
+  const result = await probe.probe({
+    platform: 'win32',
+    probeTimeoutMs: 4000,
+    detectProcessInfos: async () => [{
+      pid: 8844,
+      kind: 'app',
+      csrfToken: 'desk-tok',
+      desktopRpcPort: 4242,
+      hubPort: null,
+      extensionPort: null
+    }],
+    listeningPorts: async () => [4242],
+    callLs: async ({ method, timeoutMs }) => {
+      if (method === 'GetUnleashData') return {};
+      if (method === 'RetrieveUserQuotaSummary') {
+        await new Promise((r) => setTimeout(r, 2200)); // > 50% of 4000ms budget
+        return {
+          groups: [{
+            displayName: 'Gemini Models',
+            buckets: [{ bucketId: 'gemini-5h', window: '5h', remainingFraction: 0 }]
+          }]
+        };
+      }
+      if (method === 'GetUserStatus') {
+        identityTimeoutObserved = timeoutMs;
+        return { userStatus: { email: 'win-user@example.com' } };
+      }
+      throw probe._errorWithStatus('unavailable', 'unexpected');
+    }
+  });
+  assert.equal(result.accountEmail, 'win-user@example.com');
+  assert.ok(identityTimeoutObserved > 1000, `expected win32/desktopPid GetUserStatus budget > 1000ms, got ${identityTimeoutObserved}`);
+});

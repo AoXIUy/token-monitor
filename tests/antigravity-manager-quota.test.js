@@ -163,3 +163,80 @@ test('fetchAccountQuota preserves UNKNOWN tier when loadCodeAssist fails', async
   assert.equal(res.ok, true);
   assert.equal(res.subscriptionTier, 'UNKNOWN');
 });
+
+test('defaultEgressUserAgent uses antigravity/hub/2.35.2 and extractGemini4Codename covers Neon/Carbon/Hydrogen/Orchestrator', () => {
+  assert.equal(quota.KNOWN_STABLE_VERSION, '2.35.2');
+  assert.equal(quota.defaultEgressUserAgent('linux', 'x64'), 'antigravity/hub/2.35.2 linux/amd64');
+  assert.equal(quota.defaultEgressUserAgent('win32', 'x64'), 'antigravity/hub/2.35.2 windows/amd64');
+
+  assert.equal(quota.extractGemini4Codename('gemini-4-neon-xhigh'), 'neon');
+  assert.equal(quota.extractGemini4Codename('gemini-4-carbon-high'), 'carbon');
+  assert.equal(quota.extractGemini4Codename('gemini-4-hydrogen-tiered-xhigh'), 'hydrogen');
+  assert.equal(quota.extractGemini4Codename('gemini-pro-orchestrator-neon'), 'neon');
+  assert.equal(quota.extractGemini4Codename('gemini-pro-orchestrator-argon'), 'argon');
+  assert.equal(quota.extractGemini4Codename('gemini-pro-orchestrator'), null);
+
+  const proGroupsWithMergedArgon = [
+    {
+      displayName: 'Gemini Models',
+      description: 'Models within this group: Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon, Gemini 4 Hydrogen',
+      buckets: [{ bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.7 }]
+    }
+  ];
+  const mergedArgon = quota.matchQuotaGroupForModel(proGroupsWithMergedArgon, 'gemini-4-argon-high', false, ['neon', 'carbon', 'argon', 'hydrogen']);
+  assert.equal(mergedArgon.kind, 'matched');
+  assert.equal(mergedArgon.group.displayName, 'Gemini Models');
+
+  const officialAllowedArgon = quota.matchQuotaGroupForModel(
+    [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.7 }] }],
+    'gemini-4-argon-high',
+    false,
+    ['argon'],
+    { officialSupported: true }
+  );
+  assert.equal(officialAllowedArgon.kind, 'matched');
+});
+
+test('fetchQuotaSummary preserves disabled buckets with null remainingFraction and pickMostRestrictiveBucket skips disabled', async () => {
+  const groups = await quota.fetchQuotaSummary('ya29.tok', 'proj-1', {
+    fetch: async () => new Response(JSON.stringify({
+      response: {
+        groups: [
+          {
+            displayName: 'Claude and GPT models',
+            description: 'Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B',
+            buckets: [
+              { bucketId: '3p-5h', window: '5h', remaining: { remainingFraction: 0.8 }, disabled: true },
+              { bucketId: '3p-weekly', window: 'weekly', remainingFraction: 0.45, resetTime: '2026-12-01T16:00:00Z' }
+            ]
+          }
+        ]
+      }
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+  });
+
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].buckets.length, 2);
+  assert.equal(groups[0].buckets[0].disabled, true);
+  assert.equal(groups[0].buckets[0].remainingFraction, 0.8);
+  assert.equal(groups[0].buckets[1].disabled, false);
+
+  const nullDisabled = await quota.fetchQuotaSummary('ya29.tok', 'proj-1', {
+    fetch: async () => new Response(JSON.stringify({
+      groups: [{
+        displayName: 'Gemini Models',
+        buckets: [{ bucketId: 'gemini-5h', window: '5h', disabled: true, resetTime: '2026-12-01T16:00:00Z' }]
+      }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+  });
+  assert.equal(nullDisabled[0].buckets.length, 1);
+  assert.equal(nullDisabled[0].buckets[0].disabled, true);
+  assert.equal(nullDisabled[0].buckets[0].remainingFraction, null);
+
+  const chosen = quota.pickMostRestrictiveBucket([
+    { bucketId: 'gemini-5h', window: '5h', remainingFraction: null, disabled: true },
+    { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.65, disabled: false }
+  ]);
+  assert.equal(chosen.bucketId, 'gemini-weekly');
+  assert.equal(quota.pickMostRestrictiveBucket([{ bucketId: 'gemini-5h', window: '5h', remainingFraction: null, disabled: true }]), null);
+});

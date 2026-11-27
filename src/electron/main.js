@@ -54,6 +54,7 @@ const workbuddyOAuth = require('../shared/providers/workbuddy/oauth');
 const { createWorkbuddyManagedAccounts } = require('./providers/workbuddy/managedAccounts');
 const { createWorkbuddyLocalAuth, isSupportedWorkbuddyLocalAppPlatform } = require('./providers/workbuddy/localAuth');
 const { createAntigravityManagerService } = require('./antigravityManager');
+const { fetchAntigravityLimits } = require('../shared/providers/antigravity/limits');
 const { createElectronLimitsFetch } = require('./limits/fetch');
 const { createLimitsHistoryStore } = require('./limits/historyStore');
 const { historyRowKey } = require('./limits/historyIdentity');
@@ -4763,6 +4764,9 @@ function startSyncCollector() {
         syncUploadIntervalMs: syncUploadIntervalMs()
       };
       lastCollectedDevice = { ...visibleSummary, receivedAt: new Date().toISOString() };
+      if (typeof antigravityManagerService !== 'undefined' && antigravityManagerService && typeof hasRunningLocalAntigravitySession === 'function') {
+        void Promise.resolve(antigravityManagerService.onLocalActivityChanged?.({ busy: hasRunningLocalAntigravitySession(lastCollectedDevice) })).catch(() => {});
+      }
       requestSyncDisplayStats({
         reason: 'local',
         at: new Date().toISOString(),
@@ -4805,6 +4809,9 @@ function startHostCollector() {
       if (isExternalAgentActive()) { usageTransform.forget(); return; }
       const visibleSummary = summary;
       lastCollectedDevice = { ...visibleSummary, receivedAt: new Date().toISOString() };
+      if (typeof antigravityManagerService !== 'undefined' && antigravityManagerService && typeof hasRunningLocalAntigravitySession === 'function') {
+        void Promise.resolve(antigravityManagerService.onLocalActivityChanged?.({ busy: hasRunningLocalAntigravitySession(lastCollectedDevice) })).catch(() => {});
+      }
       if (!embeddedHub) return;
       const handle = embeddedHub;
       const uploadIdentity = getSyncContentRuntime().status().identity;
@@ -5197,8 +5204,13 @@ function publishLocalSessionActivity(patch) {
   pluginRuntime?.publishStats(activityStats, latestStats);
   updateEdgeDockCells(activityStats);
   if (typeof openclawBridgeInstance !== 'undefined') openclawBridgeInstance?.onLocalSessionActivity(visiblePatch);
-  if (typeof antigravityManagerService !== 'undefined' && antigravityManagerService && visiblePatch?.liveActivity?.antigravity?.status !== 'running') {
-    void Promise.resolve(antigravityManagerService.onLocalActivityChanged?.()).catch(() => {});
+  if (typeof antigravityManagerService !== 'undefined' && antigravityManagerService) {
+    const runningConversationIds = typeof extractRunningAntigravityConversationIds === 'function'
+      ? extractRunningAntigravityConversationIds(lastCollectedDevice)
+      : [];
+    const busy = runningConversationIds.length > 0
+      || (typeof hasRunningLocalAntigravitySession === 'function' && hasRunningLocalAntigravitySession(lastCollectedDevice));
+    void Promise.resolve(antigravityManagerService.onLocalActivityChanged?.({ busy, runningConversationIds })).catch(() => {});
   }
   sendPush({ event: 'session-activity', data: { patch: visiblePatch, snapshot } });
 }
@@ -5594,6 +5606,9 @@ function startLocalCollector() {
       const visibleSummary = summary;
       localDevice = { ...visibleSummary, receivedAt: new Date().toISOString() };
       lastCollectedDevice = localDevice;
+      if (typeof antigravityManagerService !== 'undefined' && antigravityManagerService && typeof hasRunningLocalAntigravitySession === 'function') {
+        void Promise.resolve(antigravityManagerService.onLocalActivityChanged?.({ busy: hasRunningLocalAntigravitySession(lastCollectedDevice) })).catch(() => {});
+      }
       localStats = composeLocalOnlySummary(localDevice, (stats) => {
         withHistoryPreview(stats, [localDevice]);
         attachLocalNativeViews(stats, localDevice);
@@ -8398,6 +8413,48 @@ async function getDashboardHistory(options = {}) {
   }, settings?.modelAliases, { grouping: settings?.modelAliasGrouping });
 }
 
+function extractRunningAntigravityConversationIds(summary, now = Date.now()) {
+  if (!summary || typeof summary !== 'object') return [];
+  const liveLeaseMs = 30_000;
+  const ids = new Set();
+  const isRunningReading = (reading) => {
+    if (!reading || reading.state !== 'running') return false;
+    const observedMs = Date.parse(String(reading.observedAt || ''));
+    return Number.isFinite(observedMs) && observedMs > 0 && now - observedMs < liveLeaseMs;
+  };
+  for (const row of Object.values(summary?.nativeSessions?.today || {})) {
+    if (row?.client === 'antigravity' && !row.parentSessionId && row.sessionId && isRunningReading(row.liveActivity)) {
+      ids.add(String(row.sessionId));
+    }
+  }
+  const today = summary?.periods?.today || summary?.today;
+  for (const [key, reading] of Object.entries(today?.sessionActivity || {})) {
+    if (key.startsWith('antigravity:') && isRunningReading(reading)) {
+      const row = today?.sessions?.[key];
+      if (!row?.parentSessionId) ids.add(key.slice('antigravity:'.length));
+    }
+  }
+  for (const row of Object.values(today?.sessions || {})) {
+    if (row?.client === 'antigravity' && !row.parentSessionId && row.sessionId && isRunningReading(row.liveActivity)) {
+      ids.add(String(row.sessionId));
+    }
+  }
+  return [...ids];
+}
+
+function hasRunningLocalAntigravitySession(summary, now = Date.now()) {
+  return extractRunningAntigravityConversationIds(summary, now).length > 0;
+}
+
+async function probeLocalAntigravityLimitsForManager(opts = {}) {
+  const res = await fetchAntigravityLimits(
+    { antigravityLocalLimitsEnabled: true, antigravityManagedAccounts: [] },
+    { ...(opts?.signal ? { signal: opts.signal } : {}) }
+  );
+  const providers = Array.isArray(res) ? res : (res ? [res] : []);
+  return { updatedAt: new Date().toISOString(), providers };
+}
+
 function ensureAntigravityManagerService() {
   if (antigravityManagerService) return antigravityManagerService;
   antigravityManagerService = createAntigravityManagerService({
@@ -8424,7 +8481,9 @@ function ensureAntigravityManagerService() {
       }
       return null;
     },
-    isLocalAntigravityBusy: () => lastCollectedDevice?.liveActivity?.antigravity?.status === 'running',
+    isLocalAntigravityBusy: () => hasRunningLocalAntigravitySession(lastCollectedDevice),
+    getLatestLocalLimits: () => settingsLocalLimits?.limits || lastCollectedDevice?.limits || null,
+    probeLocalLimits: (opts) => probeLocalAntigravityLimitsForManager(opts),
     onAutoSwitchCompleted: (result) => {
       if (result?.ok) {
         const timer = setTimeout(() => {

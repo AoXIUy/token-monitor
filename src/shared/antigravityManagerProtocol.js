@@ -105,7 +105,7 @@ function strictRemainingFraction(value) {
  *   lastUpdatedAt: number,
  *   isForbidden: boolean,
  *   forbiddenReason: string,
- *   groups: Array<{ displayName: string, description: string, buckets: Array<{ bucketId: string, window: string, remainingFraction: number, resetTime: string, displayName: string }> }>,
+ *   groups: Array<{ displayName: string, description: string, buckets: Array<{ bucketId: string, window: string, remainingFraction: number | null, disabled: boolean, resetTime: string, displayName: string, description: string }> }>,
  *   models: Array<{ name: string, displayName: string, percentage: number, resetTime: string }>
  * } | null}
  */
@@ -121,18 +121,21 @@ function sanitizeQuota(raw) {
           ? group.buckets.slice(0, MAX_BUCKETS_PER_GROUP).flatMap((bucket) => {
               if (!isPlainObject(bucket)) return [];
               const resetTime = cleanIsoDate(bucket.resetTime ?? bucket.reset_time) || cleanSingleLine(bucket.resetTime ?? bucket.reset_time, 64);
+              const disabled = bucket.disabled === true;
               const rawFraction = bucket.remainingFraction ?? bucket.remaining_fraction;
               let remainingFraction = strictRemainingFraction(rawFraction);
-              if (remainingFraction === null && (rawFraction === undefined || rawFraction === null) && resetTime) {
+              if (!disabled && remainingFraction === null && (rawFraction === undefined || rawFraction === null) && resetTime) {
                 remainingFraction = 0;
               }
-              if (remainingFraction === null) return [];
+              if (!disabled && remainingFraction === null) return [];
               return [{
                 bucketId: cleanSingleLine(bucket.bucketId ?? bucket.bucket_id, 128),
                 window: cleanSingleLine(bucket.window, 32),
                 remainingFraction,
+                disabled,
                 resetTime,
-                displayName: cleanSingleLine(bucket.displayName ?? bucket.display_name, 128)
+                displayName: cleanSingleLine(bucket.displayName ?? bucket.display_name, 128),
+                description: cleanSingleLine(bucket.description, 256)
               }];
             })
           : [];

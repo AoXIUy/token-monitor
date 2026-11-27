@@ -20,6 +20,7 @@ const { antigravityDataRoots } = require('./selfSync');
 const { quotaGroupRank } = require('./corePolicy');
 
 const DEFAULT_PROBE_TIMEOUT_MS = 8000;
+const WIN32_DEFAULT_PROBE_TIMEOUT_MS = 20000;
 const DEFAULT_RPC_TIMEOUT_MS = 12000;
 const MAX_DAEMON_FILES_PER_DIR = 256;
 const MAX_DAEMON_FILE_BYTES = 16 * 1024;
@@ -158,9 +159,9 @@ function sortProcessInfos(infos) {
 
 function extractFlag(flag, command) {
   const escaped = flag.replace(/[-\\^$*+?.()|[\]{}]/g, '\\$&');
-  const re = new RegExp(`${escaped}[=\\s]+([^\\s]+)`, 'i');
+  const re = new RegExp(`${escaped}[=\\s]+(?:"([^"]+)"|'([^']+)'|([^\\s]+))`, 'i');
   const match = command.match(re);
-  return match ? match[1] : null;
+  return match ? (match[1] ?? match[2] ?? match[3] ?? null) : null;
 }
 
 function validPort(value) {
@@ -199,8 +200,8 @@ function readDaemonInfos(deps = {}) {
   for (const dir of daemonDiscoveryDirs(deps)) {
     let entries;
     try { entries = fsApi.readdirSync(dir); } catch (_) { continue; }
-    for (const name of entries.slice(0, MAX_DAEMON_FILES_PER_DIR)) {
-      if (!name.endsWith('.json')) continue;
+    const jsonEntries = entries.filter((name) => name.endsWith('.json'));
+    for (const name of jsonEntries.slice(-MAX_DAEMON_FILES_PER_DIR)) {
       const filePath = path.join(dir, name);
       try {
         const stat = fsApi.lstatSync(filePath);
@@ -411,8 +412,10 @@ async function detectProcessInfosPosix(deps = {}) {
 async function detectProcessInfosWin32(deps = {}) {
   // Surface both the IDE language server and the CLI (`agy` / `antigravity-cli`)
   // hosts; the command-line classifier (antigravityProcessKind) re-filters for
-  // precision, so a broad Name filter here is safe.
-  const script = `Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'language_server*' -or $_.Name -like 'language-server*' -or $_.Name -like 'agy*' -or $_.Name -like 'antigravity*' } | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }`;
+  // precision, so a broad Name filter here is safe. Force UTF-8 output so localized
+  // Windows code pages (e.g. CP936/GBK) do not corrupt non-ASCII paths, and include
+  // ExecutablePath when CommandLine omits directory separators.
+  const script = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'language_server*' -or $_.Name -like 'language-server*' -or $_.Name -like 'agy*' -or $_.Name -like 'antigravity*' } | ForEach-Object { $c = $_.CommandLine; if (-not $c -and $_.ExecutablePath) { $c = '"' + $_.ExecutablePath + '"' } elseif ($c -and $_.ExecutablePath -and $c -notmatch '[\\\\/]') { $c = '"' + $_.ExecutablePath + '" ' + $c }; "$($_.ProcessId) $c" }`;
   const stdout = await runProcessText('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
     deps,
     timeoutMs: Math.min(10000, Number(deps.timeoutMs) || 10000)
@@ -869,6 +872,7 @@ async function groupedQuotaFromCandidates(candidates, call, {
   sourceKey,
   summaryDeadlineMs,
   probeDeadlineMs,
+  identityTimeoutMs = 1000,
   signal
 }) {
   let lastError = previousError || errorWithStatus('unavailable', 'no endpoint candidates');
@@ -885,12 +889,13 @@ async function groupedQuotaFromCandidates(candidates, call, {
         let accountPlan = null;
         let accountEmail = null;
         try {
+          const maxIdentityMs = candidate.desktopPid ? Math.max(identityTimeoutMs, 5000) : identityTimeoutMs;
           const identity = await callBeforeDeadline(call, {
             ...candidate,
             method: 'GetUserStatus',
             body: { metadata: PROBE_METADATA },
             signal
-          }, probeDeadlineMs, 1000);
+          }, probeDeadlineMs, maxIdentityMs);
           accountPlan =
             firstTrimmedString(identity?.userStatus?.userTier?.name)
             || preferredPlanInfoName(identity?.userStatus?.planStatus?.planInfo)
@@ -930,7 +935,9 @@ async function detectedProcessInfos(deps) {
 }
 
 async function probe(deps = {}) {
-  const probeTimeoutMs = Math.max(1, Number(deps.probeTimeoutMs) || DEFAULT_PROBE_TIMEOUT_MS);
+  const isWin32 = (deps.platform || process.platform) === 'win32';
+  const defaultTimeoutMs = isWin32 ? WIN32_DEFAULT_PROBE_TIMEOUT_MS : DEFAULT_PROBE_TIMEOUT_MS;
+  const probeTimeoutMs = Math.max(1, Number(deps.probeTimeoutMs) || defaultTimeoutMs);
   const probeDeadlineMs = Date.now() + probeTimeoutMs;
   throwIfAborted(deps.signal);
   const abortController = new AbortController();
@@ -1062,13 +1069,14 @@ async function probe(deps = {}) {
 
         const groupOptions = {
           probeDeadlineMs,
+          identityTimeoutMs: isWin32 ? 5000 : 1000,
           signal,
           csrfToken: sourceInfos[index].csrfToken,
           sourceKey: sourceKeys[index]
         };
         const grouped = await groupedQuotaFromCandidates(entry.candidates, call, {
           ...groupOptions,
-          summaryDeadlineMs: halfDeadlineMs(),
+          summaryDeadlineMs: entry.fallbackCandidates ? halfDeadlineMs() : probeDeadlineMs,
           previousError: entry.error
         });
         if (grouped.snapshot || signal.aborted || !entry.fallbackCandidates) return grouped;

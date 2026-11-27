@@ -206,3 +206,50 @@ test('sanitizeAntigravityManagerSnapshot maps banInfo.code, preserves depleted 0
   assert.throws(() => failingStore.putSnapshot({ deviceId: 'host-fail', accounts: [] }));
   assert.equal(failingStore.getSnapshots().devices.length, 0);
 });
+
+test('sanitizeAntigravityManagerSnapshot preserves disabled buckets with null remainingFraction and bucket descriptions', () => {
+  const clean = sanitizeAntigravityManagerSnapshot({
+    deviceId: 'host-3',
+    accounts: [
+      {
+        id: 'acc-1',
+        email: 'user@example.com',
+        quota: {
+          groups: [
+            {
+              displayName: 'Gemini Models',
+              description: 'Models within this group: Gemini 4 Neon, Gemini 4 Carbon',
+              buckets: [
+                {
+                  bucketId: 'gemini-5h',
+                  window: '5h',
+                  disabled: true,
+                  remainingFraction: null,
+                  resetTime: '2026-11-27T07:50:06Z',
+                  description: 'Disabled for this tier'
+                },
+                {
+                  bucketId: 'gemini-weekly',
+                  window: 'weekly',
+                  remainingFraction: 0.72,
+                  resetTime: '2026-12-03T16:23:21Z',
+                  description: 'Resets in 6 days'
+                }
+              ]
+            }
+          ],
+          models: []
+        }
+      }
+    ]
+  });
+
+  const buckets = clean.accounts[0].quota.groups[0].buckets;
+  assert.equal(buckets.length, 2);
+  assert.equal(buckets[0].disabled, true);
+  assert.equal(buckets[0].remainingFraction, null);
+  assert.equal(buckets[0].description, 'Disabled for this tier');
+  assert.equal(buckets[1].disabled, false);
+  assert.equal(buckets[1].remainingFraction, 0.72);
+  assert.equal(buckets[1].description, 'Resets in 6 days');
+});

@@ -188,10 +188,74 @@ test('antigravityManager formatting, capability inference, and bucket classifica
     { label: 'GPT-120B', tone: 'ok' }
   ]);
 
+  const flagshipPills = ctx.inferCapabilityPills({
+    quota: {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          description: 'Models within this group: Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon, Gemini 4 Hydrogen, Orchestrator (Neon), Gemini 3.8 Flash',
+          buckets: []
+        },
+        {
+          displayName: 'Claude and GPT models',
+          description: 'Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B',
+          buckets: []
+        }
+      ],
+      models: [
+        { name: 'gemini-4-argon-high' },
+        { name: 'gemini-4-hydrogen-high' },
+        { name: 'gemini-4-neon-xhigh' },
+        { name: 'claude-sonnet-4-6' },
+        { name: 'claude-opus-5-5-high' },
+        { name: 'gpt-oss-120b-medium' }
+      ]
+    }
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(flagshipPills)), [
+    { label: 'Neon', tone: 'violet' },
+    { label: 'Claude 5.5', tone: 'amber' },
+    { label: 'GPT-120B', tone: 'ok' }
+  ]);
+
+  const groupOnlyPills = ctx.inferCapabilityPills({
+    quota: {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          description: 'Models within this group: Gemini 4 Carbon, Orchestrator (Carbon)',
+          buckets: []
+        }
+      ],
+      models: []
+    }
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(groupOnlyPills)), [
+    { label: 'Carbon', tone: 'violet' }
+  ]);
+
   assert.equal(ctx.is5hBucket({ window: '5h' }), true);
+  assert.equal(ctx.is5hBucket({ window: 'session' }), true);
+  assert.equal(ctx.is5hBucket({ bucketId: 'gemini-session-history', displayName: 'Session History' }), false);
   assert.equal(ctx.isWeeklyBucket({ bucketId: 'gemini-7d' }), true);
   assert.equal(ctx.isClaudeOr3pGroup({ displayName: 'Claude & 3P', buckets: [] }), true);
   assert.equal(ctx.isDedicatedCodenameGroup({ displayName: 'Gemini Argon WTU', buckets: [] }), true);
+  assert.equal(ctx.isDedicatedCodenameGroup({
+    displayName: 'Gemini Models',
+    description: 'Models within this group: Gemini 4 Neon, Gemini 4 Argon',
+    buckets: [{ bucketId: 'gemini-5h' }]
+  }), false);
+  assert.equal(ctx.normalizeQuotaGroupTitle({ displayName: 'Gemini Models' }), 'Gemini');
+  assert.equal(ctx.normalizeQuotaGroupTitle({ displayName: 'Claude and GPT models' }), 'Claude / GPT');
+  assert.equal(ctx.extractQuotaGroupModelsHint({
+    description: 'Models within this group: Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon, Gemini 4 Hydrogen, Orchestrator (Neon), Gemini 3.8 Flash'
+  }), 'Neon · Carbon · Argon · Hydrogen · 3.8 Flash');
+  assert.equal(ctx.extractQuotaGroupModelsHint({
+    description: 'Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B'
+  }), 'Claude 5.5 · GPT-120B');
+  assert.equal(ctx.extractQuotaGroupModelsHint({
+    description: 'For paid Pro plans, Argon quota is separate.'
+  }), '');
 });
 
 test('antigravityManager state pruning, progress bar reset, clipboard IPC preference, and partial settings locale work properly', async () => {

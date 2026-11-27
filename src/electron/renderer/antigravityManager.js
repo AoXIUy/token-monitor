@@ -58,6 +58,8 @@ const els = {
   autoSwitchScopeSelect: document.getElementById('agmAutoSwitchScopeSelect'),
   autoSwitchThresholdInput: document.getElementById('agmAutoSwitchThresholdInput'),
   autoSwitchCooldownInput: document.getElementById('agmAutoSwitchCooldownInput'),
+  autoResumeEnabledInput: document.getElementById('agmAutoResumeEnabledInput'),
+  autoResumePromptInput: document.getElementById('agmAutoResumePromptInput'),
   refreshSplit: document.getElementById('agmRefreshSplit'),
   refreshNowBtn: document.getElementById('agmRefreshNowBtn'),
   refreshNowLabel: document.getElementById('agmRefreshNowLabel'),
@@ -334,6 +336,12 @@ function iconClaude() {
   ], 11, 'agm-quota-family-icon is-claude');
 }
 
+function iconOtherQuota() {
+  return makeSvgIcon([
+    ['circle', { cx: 12, cy: 12, r: 4.5 }]
+  ], 10, 'agm-quota-family-icon is-other', true);
+}
+
 function makePill(text, tone = '', small = false) {
   const span = document.createElement('span');
   span.className = `agm-pill${small ? ' agm-pill-sm' : ''}${tone ? ` agm-pill-${tone}` : ''}`;
@@ -359,49 +367,78 @@ function formatCompactTimestamp(rawTs) {
 
 function inferCapabilityPills(acc) {
   const models = Array.isArray(acc?.quota?.models) ? acc.quota.models : [];
-  if (models.length === 0) return [];
+  const groups = Array.isArray(acc?.quota?.groups) ? acc.quota.groups : [];
+  if (models.length === 0 && groups.length === 0) return [];
   const pills = [];
+  const g4Priority = ['neon', 'carbon', 'hydrogen', 'argon'];
 
-  let g4Code = '';
-  let claudeLabel = '';
+  const texts = [];
+  for (const m of models) {
+    if (m?.name) texts.push(String(m.name).trim().toLowerCase());
+    if (m?.displayName) texts.push(String(m.displayName).trim().toLowerCase());
+  }
+  for (const g of groups) {
+    if (g?.displayName) texts.push(String(g.displayName).trim().toLowerCase());
+    if (g?.description) texts.push(String(g.description).trim().toLowerCase());
+  }
+
+  const g4Codes = [];
+  const addG4Code = (candidate) => {
+    const clean = String(candidate || '').trim().toLowerCase();
+    if (clean && !GENERIC_CAPABILITY_WORDS.has(clean) && !g4Codes.includes(clean)) {
+      g4Codes.push(clean);
+    }
+  };
+
+  let bestClaude = null;
+  let sawClaude = false;
   let gptLabel = '';
 
-  for (const m of models) {
-    const rawName = String(m?.name || '').trim().toLowerCase();
-    if (!rawName) continue;
+  for (const text of texts) {
+    if (!text) continue;
 
-    if (!g4Code) {
-      if (rawName.includes('argon') || rawName.includes('orchestrator-g1-pro')) {
-        g4Code = 'Argon';
-      } else if (rawName.startsWith('gemini-')) {
-        const match = rawName.match(/^gemini-(\d+)(?:\.\d+)?-([a-z]+)/);
-        if (match) {
-          const major = Number.parseInt(match[1], 10);
-          const candidate = match[2];
-          if (major >= 4 && candidate && !GENERIC_CAPABILITY_WORDS.has(candidate)) {
-            g4Code = candidate.charAt(0).toUpperCase() + candidate.slice(1);
-          }
+    if (text.includes('orchestrator-g1-pro') || (text.includes('argon') && (text.includes('gemini') || text.includes('orchestrator')))) {
+      addG4Code('argon');
+    }
+    for (const match of text.matchAll(/gemini-(\d+)(?:\.\d+)?-([a-z]+)/g)) {
+      if (Number.parseInt(match[1], 10) >= 4) addG4Code(match[2]);
+    }
+    for (const match of text.matchAll(/gemini\s+(\d+)(?:\.\d+)?\s+([a-z]+)/g)) {
+      if (Number.parseInt(match[1], 10) >= 4) addG4Code(match[2]);
+    }
+    for (const match of text.matchAll(/gemini-pro-orchestrator-([a-z]+)/g)) {
+      addG4Code(match[1] === 'g1' ? 'argon' : match[1]);
+    }
+    for (const match of text.matchAll(/orchestrator\s*\(([a-z]+)\)/g)) {
+      addG4Code(match[1]);
+    }
+
+    if (/\bclaude\b|claude-/.test(text)) {
+      sawClaude = true;
+      for (const verMatch of text.matchAll(/claude(?:[-_\s]+(?:sonnet|opus|haiku))?[-_\s]*(\d+)(?:[.-](\d+))?/g)) {
+        const major = Number.parseInt(verMatch[1], 10);
+        const minor = verMatch[2] ? Number.parseInt(verMatch[2], 10) : 0;
+        const score = major * 1000 + minor;
+        const label = verMatch[2] ? `Claude ${major}.${minor}` : `Claude ${major}`;
+        if (!bestClaude || score > bestClaude.score) {
+          bestClaude = { score, label };
         }
       }
     }
 
-    if (!claudeLabel && rawName.startsWith('claude')) {
-      const verMatch = rawName.match(/claude-(?:sonnet|opus|haiku)?-?(\d+)(?:[-.](\d+))?/);
-      if (verMatch) {
-        claudeLabel = verMatch[2] ? `Claude ${verMatch[1]}.${verMatch[2]}` : `Claude ${verMatch[1]}`;
-      } else {
-        claudeLabel = 'Claude';
+    if (/\bgpt\b|gpt-/.test(text)) {
+      const sizeMatch = text.match(/(\d+[abkm])\b/i);
+      const nextGpt = sizeMatch ? `GPT-${sizeMatch[1].toUpperCase()}` : 'GPT';
+      if (!gptLabel || (gptLabel === 'GPT' && nextGpt !== 'GPT')) {
+        gptLabel = nextGpt;
       }
-    }
-
-    if (!gptLabel && rawName.startsWith('gpt')) {
-      const sizeMatch = rawName.match(/(\d+[abkm])\b/i);
-      gptLabel = sizeMatch ? `GPT-${sizeMatch[1].toUpperCase()}` : 'GPT';
     }
   }
 
-  if (g4Code) pills.push({ label: g4Code, tone: 'violet' });
-  if (claudeLabel) pills.push({ label: claudeLabel, tone: 'amber' });
+  const bestG4 = g4Priority.find((code) => g4Codes.includes(code)) || g4Codes[0] || '';
+  if (bestG4) pills.push({ label: bestG4.charAt(0).toUpperCase() + bestG4.slice(1), tone: 'violet' });
+  if (bestClaude?.label) pills.push({ label: bestClaude.label, tone: 'amber' });
+  else if (sawClaude) pills.push({ label: 'Claude', tone: 'amber' });
   if (gptLabel) pills.push({ label: gptLabel, tone: 'ok' });
   return pills.slice(0, 3);
 }
@@ -467,11 +504,19 @@ function renderSummaryAndControls() {
   } else if (latestAutoAt > state.lastAutoSwitchSeenAt) {
     state.lastAutoSwitchSeenAt = latestAutoAt;
     if (latestAuto?.ok) {
-      showToast(t('agManager.toast.autoSwitchOk', {
-        trigger: latestAuto.triggerLabel || 'Quota',
-        email: latestAuto.toEmail || '',
-        target: latestAuto.target || 'auto'
-      }));
+      const resumedCount = Number(latestAuto.resumedCount || 0);
+      showToast(resumedCount > 0
+        ? t('agManager.toast.autoSwitchOkResumed', {
+            trigger: latestAuto.triggerLabel || 'Quota',
+            email: latestAuto.toEmail || '',
+            target: latestAuto.target || 'auto',
+            count: resumedCount
+          })
+        : t('agManager.toast.autoSwitchOk', {
+            trigger: latestAuto.triggerLabel || 'Quota',
+            email: latestAuto.toEmail || '',
+            target: latestAuto.target || 'auto'
+          }));
     } else if (latestAuto?.error) {
       showToast(t('agManager.toast.autoSwitchFailed', { error: latestAuto.error }), true);
     }
@@ -488,6 +533,12 @@ function renderSummaryAndControls() {
   }
   if (document.activeElement !== els.autoSwitchCooldownInput) {
     els.autoSwitchCooldownInput.value = String(cfg.autoSwitchCooldownSeconds || 180);
+  }
+  if (els.autoResumeEnabledInput) {
+    els.autoResumeEnabledInput.checked = cfg.autoResumeEnabled !== false;
+  }
+  if (els.autoResumePromptInput && document.activeElement !== els.autoResumePromptInput) {
+    els.autoResumePromptInput.value = String(cfg.autoResumePrompt || '继续');
   }
   els.startupRefreshInput.checked = cfg.startupRefresh === true;
   els.autoRefreshInput.checked = cfg.autoRefresh === true;
@@ -518,12 +569,14 @@ function renderSummaryAndControls() {
 }
 
 function is5hBucket(b) {
-  const text = `${b?.window || ''} ${b?.bucketId || ''}`.toLowerCase();
-  return text.includes('5h') || text.includes('hour');
+  const win = String(b?.window || '').trim().toLowerCase();
+  if (win === 'session') return true;
+  const text = `${win} ${b?.bucketId || ''} ${b?.displayName || ''}`.toLowerCase();
+  return text.includes('5h') || text.includes('5-hour') || text.includes('five-hour') || text.includes('five hour') || text.includes('hour');
 }
 
 function isWeeklyBucket(b) {
-  const text = `${b?.window || ''} ${b?.bucketId || ''}`.toLowerCase();
+  const text = `${b?.window || ''} ${b?.bucketId || ''} ${b?.displayName || ''}`.toLowerCase();
   return text.includes('week') || text.includes('7d');
 }
 
@@ -534,7 +587,47 @@ function isClaudeOr3pGroup(g) {
 
 function isDedicatedCodenameGroup(g) {
   const text = `${g?.displayName || ''} ${(g?.buckets || []).map((b) => `${b.bucketId || ''} ${b.displayName || ''}`).join(' ')}`.toLowerCase();
-  return /\b(argon|hydrogen|carbon|helium|wtu)\b/.test(text);
+  return /\b(argon|neon|hydrogen|carbon|helium|wtu)\b/.test(text);
+}
+
+function normalizeQuotaGroupTitle(group) {
+  const raw = String(group?.displayName || '').trim().replace(/\s+/g, ' ');
+  const lower = raw.toLowerCase();
+  if (/^gemini(?:\s+models)?$/.test(lower)) return 'Gemini';
+  if (/^claude\s*(?:and|&|\/)\s*gpt(?:\s+models)?$/.test(lower)) return 'Claude / GPT';
+  if (/^gemini\s+4\s+argon$/.test(lower)) return 'Gemini 4 Argon';
+  return raw || 'Quota';
+}
+
+function extractQuotaGroupModelsHint(group) {
+  const desc = String(group?.description || '').trim();
+  const match = desc.match(/models within this group:\s*(.+)$/i);
+  if (!match) return '';
+  const seen = new Set();
+  const labels = [];
+  for (const part of match[1].split(',')) {
+    const clean = part.trim().replace(/[.。]+$/, '');
+    if (!clean) continue;
+    let label = clean;
+    const orchMatch = clean.match(/^orchestrator\s*\(([^)]+)\)$/i);
+    if (orchMatch) {
+      label = orchMatch[1].trim();
+    } else if (/^gemini\s+4(?:\.\d+)?\s+/i.test(clean)) {
+      label = clean.replace(/^gemini\s+4(?:\.\d+)?\s+/i, '').trim();
+    } else if (/^gemini\s+/i.test(clean)) {
+      label = clean.replace(/^gemini\s+/i, '').trim();
+    } else if (/^claude\s+(?:opus|sonnet|haiku)\s+(.+)$/i.test(clean)) {
+      label = `Claude ${clean.replace(/^claude\s+(?:opus|sonnet|haiku)\s+/i, '').trim()}`;
+    } else if (/^gpt-oss\s+/i.test(clean)) {
+      label = clean.replace(/^gpt-oss\s+/i, 'GPT-').trim();
+    }
+    const dedupeKey = label.toLowerCase();
+    if (label && !seen.has(dedupeKey)) {
+      seen.add(dedupeKey);
+      labels.push(label);
+    }
+  }
+  return labels.join(' · ');
 }
 
 function pctToneClass(pct) {
@@ -543,12 +636,24 @@ function pctToneClass(pct) {
   return '';
 }
 
-function renderQuotaGridCell({ icon, title = '', resetText = '—', resetTone = '', pct = 0, isFull = false, ariaLabel = '' }) {
+function renderQuotaGridCell({
+  icon = null,
+  periodLabel = '',
+  title = '',
+  resetText = '—',
+  resetTone = '',
+  pct = 0,
+  disabled = false,
+  superseded = false,
+  stateTag = '',
+  isFull = false,
+  ariaLabel = ''
+}) {
   const clamped = Math.max(0, Math.min(100, Math.round(Number(pct || 0))));
-  const toneCls = pctToneClass(clamped);
+  const toneCls = disabled ? 'is-disabled' : pctToneClass(clamped);
 
   const cell = document.createElement('div');
-  cell.className = `agm-quota-cell${isFull ? ' is-full' : ''}`;
+  cell.className = `agm-quota-cell${isFull ? ' is-full' : ''}${disabled ? ' is-disabled' : ''}${superseded ? ' is-superseded' : ''}`;
   if (ariaLabel) cell.setAttribute('aria-label', ariaLabel);
 
   const top = document.createElement('div');
@@ -557,34 +662,53 @@ function renderQuotaGridCell({ icon, title = '', resetText = '—', resetTone = 
   const label = document.createElement('div');
   label.className = 'agm-quota-cell-label';
   if (icon) label.appendChild(icon);
-  if (title) {
+  const labelText = periodLabel || title;
+  if (labelText) {
     const titleEl = document.createElement('span');
     titleEl.className = 'agm-quota-cell-title';
-    titleEl.textContent = title;
+    titleEl.textContent = labelText;
     label.appendChild(titleEl);
   }
+
+  const pctEl = document.createElement('span');
+  pctEl.className = `agm-quota-pct${toneCls ? ` ${toneCls}` : ''}`;
+  pctEl.textContent = disabled ? t('agManager.bucketDisabled') : `${clamped}%`;
+
+  top.append(label, pctEl);
+  cell.appendChild(top);
+
+  if (!disabled) {
+    const meter = document.createElement('div');
+    meter.className = 'agm-meter';
+    const fill = document.createElement('div');
+    fill.className = `agm-meter-fill${toneCls ? ` ${toneCls}` : ''}`;
+    fill.style.width = `${clamped}%`;
+    meter.appendChild(fill);
+    cell.appendChild(meter);
+  }
+
+  const foot = document.createElement('div');
+  foot.className = 'agm-quota-cell-foot';
+
+  const effectiveResetTone = disabled || clamped >= 100 || resetText === '—'
+    ? 'muted'
+    : (clamped <= 15 ? 'low' : resetTone);
   const reset = document.createElement('span');
-  reset.className = `agm-quota-reset${resetTone ? ` is-${resetTone}` : ''}`;
+  reset.className = `agm-quota-reset${effectiveResetTone ? ` is-${effectiveResetTone}` : ''}`;
   reset.appendChild(iconClock());
   const resetVal = document.createElement('span');
   resetVal.textContent = resetText;
   reset.appendChild(resetVal);
-  label.appendChild(reset);
+  foot.appendChild(reset);
 
-  const pctEl = document.createElement('span');
-  pctEl.className = `agm-quota-pct${toneCls ? ` ${toneCls}` : ''}`;
-  pctEl.textContent = `${clamped}%`;
+  if (stateTag) {
+    const tagEl = document.createElement('span');
+    tagEl.className = 'agm-quota-state-tag';
+    tagEl.textContent = stateTag;
+    foot.appendChild(tagEl);
+  }
 
-  top.append(label, pctEl);
-
-  const meter = document.createElement('div');
-  meter.className = 'agm-meter';
-  const fill = document.createElement('div');
-  fill.className = `agm-meter-fill${toneCls ? ` ${toneCls}` : ''}`;
-  fill.style.width = `${clamped}%`;
-  meter.appendChild(fill);
-
-  cell.append(top, meter);
+  cell.appendChild(foot);
   return cell;
 }
 
@@ -597,9 +721,11 @@ function renderQuotaGroups(acc, hasStatusMessage = false) {
     const nonClaude = groups.filter((g) => g !== claudeGroup);
     const geminiGroup = nonClaude.find((g) => !isDedicatedCodenameGroup(g) && String(g.displayName || '').toLowerCase().includes('gemini'))
       || nonClaude.find((g) => !isDedicatedCodenameGroup(g))
-      || nonClaude[0]
       || null;
-    const extraGroups = nonClaude.filter((g) => g !== geminiGroup);
+    const argonGroup = nonClaude.find((g) => g !== geminiGroup && `${g.displayName || ''} ${(g.buckets || []).map((b) => b.bucketId || '').join(' ')}`.toLowerCase().includes('argon'))
+      || null;
+    const extraGroups = groups.filter((g) => g !== geminiGroup && g !== claudeGroup && g !== argonGroup);
+    const orderedGroups = [geminiGroup, claudeGroup, argonGroup, ...extraGroups].filter(Boolean);
 
     const splitBuckets = (group) => {
       const buckets = Array.isArray(group?.buckets) ? group.buckets : [];
@@ -609,107 +735,115 @@ function renderQuotaGroups(acc, hasStatusMessage = false) {
       return { b5h, bWeekly, others };
     };
 
-    const gBuckets = splitBuckets(geminiGroup);
-    const cBuckets = splitBuckets(claudeGroup);
-
-    const toPct = (b) => Math.max(0, Math.min(100, Math.round(Number(b?.remainingFraction || 0) * 100)));
-    const cells = [];
-
-    if (gBuckets.b5h) {
-      const pct = toPct(gBuckets.b5h);
-      const resetText = formatResetCountdown(gBuckets.b5h.resetTime);
-      cells.push(renderQuotaGridCell({
-        icon: iconGemini(),
-        resetText,
-        resetTone: '5h',
-        pct,
-        ariaLabel: `Gemini 5h: ${pct}% (${resetText})`
-      }));
-    }
-    if (cBuckets.b5h) {
-      const pct = toPct(cBuckets.b5h);
-      const resetText = formatResetCountdown(cBuckets.b5h.resetTime);
-      cells.push(renderQuotaGridCell({
-        icon: iconClaude(),
-        resetText,
-        resetTone: '5h',
-        pct,
-        ariaLabel: `Claude / GPT 5h: ${pct}% (${resetText})`
-      }));
-    }
-    if (gBuckets.bWeekly) {
-      const pct = toPct(gBuckets.bWeekly);
-      const resetText = formatResetCountdown(gBuckets.bWeekly.resetTime);
-      cells.push(renderQuotaGridCell({
-        icon: iconGemini(),
-        resetText,
-        resetTone: 'weekly',
-        pct,
-        ariaLabel: `Gemini weekly: ${pct}% (${resetText})`
-      }));
-    }
-    if (cBuckets.bWeekly) {
-      const pct = toPct(cBuckets.bWeekly);
-      const resetText = formatResetCountdown(cBuckets.bWeekly.resetTime);
-      cells.push(renderQuotaGridCell({
-        icon: iconClaude(),
-        resetText,
-        resetTone: 'weekly',
-        pct,
-        ariaLabel: `Claude / GPT weekly: ${pct}% (${resetText})`
-      }));
-    }
-
-    const pushExtra = (groupTitle, b, useGeminiIcon) => {
-      const pct = toPct(b);
-      const resetText = formatResetCountdown(b.resetTime);
-      const label = [groupTitle, b.window || b.bucketId].filter(Boolean).join(' · ');
-      cells.push(renderQuotaGridCell({
-        icon: useGeminiIcon ? iconGemini() : iconClaude(),
-        title: label,
-        resetText,
-        resetTone: is5hBucket(b) ? '5h' : (isWeeklyBucket(b) ? 'weekly' : ''),
-        pct,
-        isFull: true,
-        ariaLabel: `${label}: ${pct}% (${resetText})`
-      }));
+    const toPct = (b) => {
+      if (b?.disabled === true || typeof b?.remainingFraction !== 'number' || !Number.isFinite(b.remainingFraction)) {
+        return null;
+      }
+      return Math.max(0, Math.min(100, Math.round(b.remainingFraction * 100)));
     };
 
-    for (const b of gBuckets.others) pushExtra(geminiGroup?.displayName || 'Gemini', b, true);
-    for (const b of cBuckets.others) pushExtra(claudeGroup?.displayName || 'Claude', b, false);
-    for (const g of extraGroups) {
-      for (const b of g.buckets || []) {
-        pushExtra(g.displayName || b.displayName || 'Quota', b, true);
+    const groupNodes = [];
+    for (const group of orderedGroups) {
+      const { b5h, bWeekly, others } = splitBuckets(group);
+      const bucketEntries = [];
+      if (b5h) bucketEntries.push({ bucket: b5h, periodKind: '5h', periodLabel: t('agManager.window.5h') });
+      if (bWeekly) bucketEntries.push({ bucket: bWeekly, periodKind: 'weekly', periodLabel: t('agManager.window.weekly') });
+      for (const b of others) {
+        bucketEntries.push({
+          bucket: b,
+          periodKind: is5hBucket(b) ? '5h' : (isWeeklyBucket(b) ? 'weekly' : ''),
+          periodLabel: String(b.displayName || b.window || b.bucketId || 'Quota')
+        });
       }
+      if (bucketEntries.length === 0) continue;
+
+      const groupTitle = normalizeQuotaGroupTitle(group);
+      const modelsHint = extractQuotaGroupModelsHint(group);
+      const isClaude = group === claudeGroup || isClaudeOr3pGroup(group);
+      const isGemini = !isClaude && (group === geminiGroup || isDedicatedCodenameGroup(group) || groupTitle.toLowerCase().includes('gemini'));
+      const b5hPct = b5h ? toPct(b5h) : null;
+      const fiveHourExhausted = Boolean(b5h && b5h.disabled !== true && b5hPct === 0);
+
+      const groupEl = document.createElement('section');
+      groupEl.className = 'agm-quota-group';
+
+      const headEl = document.createElement('div');
+      headEl.className = 'agm-quota-group-head';
+
+      const titleWrap = document.createElement('div');
+      titleWrap.className = 'agm-quota-group-title-wrap';
+      titleWrap.appendChild(isClaude ? iconClaude() : (isGemini ? iconGemini() : iconOtherQuota()));
+      const nameEl = document.createElement('span');
+      nameEl.className = 'agm-quota-group-name';
+      nameEl.textContent = groupTitle;
+      titleWrap.appendChild(nameEl);
+      headEl.appendChild(titleWrap);
+
+      if (modelsHint) {
+        const hintEl = document.createElement('span');
+        hintEl.className = 'agm-quota-group-models';
+        hintEl.textContent = modelsHint;
+        headEl.appendChild(hintEl);
+      }
+
+      groupEl.appendChild(headEl);
+
+      const gridEl = document.createElement('div');
+      gridEl.className = 'agm-quota-group-grid';
+
+      bucketEntries.forEach(({ bucket, periodKind, periodLabel }, idx) => {
+        const pct = toPct(bucket);
+        const disabled = bucket.disabled === true || pct === null;
+        const resetText = bucket.resetTime ? formatResetCountdown(bucket.resetTime) : '—';
+        const superseded = !disabled && periodKind === 'weekly' && fiveHourExhausted && pct > 0;
+        const stateTag = superseded ? t('agManager.weeklyPausedBy5h') : '';
+        const isLastOdd = bucketEntries.length % 2 === 1 && idx === bucketEntries.length - 1;
+        gridEl.appendChild(renderQuotaGridCell({
+          periodLabel,
+          resetText,
+          resetTone: periodKind,
+          pct: pct ?? 0,
+          disabled,
+          superseded,
+          stateTag,
+          isFull: bucketEntries.length === 1 || isLastOdd,
+          ariaLabel: `${groupTitle} ${periodLabel}: ${disabled ? t('agManager.bucketDisabled') : `${pct}%`} (${resetText})`
+        }));
+      });
+
+      groupEl.appendChild(gridEl);
+      groupNodes.push(groupEl);
     }
 
-    if (cells.length > 0) {
-      const grid = document.createElement('div');
-      grid.className = 'agm-quota-grid';
-      grid.append(...cells);
-      return grid;
+    if (groupNodes.length > 0) {
+      const container = document.createElement('div');
+      container.className = 'agm-quota-groups';
+      container.append(...groupNodes);
+      return container;
     }
   }
 
   if (models.length > 0) {
     const grid = document.createElement('div');
     grid.className = 'agm-quota-grid';
-    for (const m of models.slice(0, 4)) {
+    const slice = models.slice(0, 4);
+    slice.forEach((m, idx) => {
       const name = String(m.displayName || m.name || 'Model');
       const resetText = m.resetTime ? formatResetCountdown(m.resetTime) : '—';
       const pct = Math.max(0, Math.min(100, Math.round(Number(m.percentage || 0))));
       const useClaudeIcon = String(m.name || '').toLowerCase().startsWith('claude')
         || String(m.name || '').toLowerCase().startsWith('gpt');
+      const isLastOdd = slice.length % 2 === 1 && idx === slice.length - 1;
       grid.appendChild(renderQuotaGridCell({
         icon: useClaudeIcon ? iconClaude() : iconGemini(),
-        title: name,
+        periodLabel: name,
         resetText,
         resetTone: 'weekly',
         pct,
-        isFull: true,
+        isFull: slice.length === 1 || isLastOdd,
         ariaLabel: `${name}: ${pct}% (${resetText})`
       }));
-    }
+    });
     return grid;
   }
 
@@ -733,8 +867,8 @@ function buildCardSignature(acc, activeSlots) {
   const groups = Array.isArray(acc?.quota?.groups) ? acc.quota.groups : [];
   const models = Array.isArray(acc?.quota?.models) ? acc.quota.models : [];
   const groupsKey = groups.map((g) => (
-    `${g?.displayName || ''}:${(Array.isArray(g?.buckets) ? g.buckets : []).map((b) => (
-      `${b?.bucketId || ''}|${b?.window || ''}|${b?.remainingFraction ?? ''}|${b?.resetTime || ''}`
+    `${g?.displayName || ''}|${g?.description || ''}:${(Array.isArray(g?.buckets) ? g.buckets : []).map((b) => (
+      `${b?.bucketId || ''}|${b?.window || ''}|${b?.disabled ? 1 : 0}|${b?.remainingFraction ?? ''}|${b?.resetTime || ''}|${b?.description || ''}`
     )).join(';')}`
   )).join('/');
   const modelsKey = models.map((m) => (
@@ -1013,10 +1147,23 @@ function renderAccountCard(acc, activeAccounts) {
       const mRow = document.createElement('div');
       mRow.className = 'agm-model-row';
       const mName = document.createElement('span');
+      mName.className = 'agm-model-name';
       mName.textContent = m.displayName || m.name;
+      const mRight = document.createElement('span');
+      mRight.className = 'agm-model-meta';
+      if (m.resetTime) {
+        const mReset = document.createElement('span');
+        mReset.className = 'agm-model-reset';
+        mReset.textContent = formatResetCountdown(m.resetTime);
+        mRight.appendChild(mReset);
+      }
+      const mPctVal = Math.max(0, Math.min(100, Math.round(Number(m.percentage || 0))));
+      const mTone = pctToneClass(mPctVal);
       const mPct = document.createElement('span');
-      mPct.textContent = `${m.percentage}%${m.resetTime ? ` · ${formatResetCountdown(m.resetTime)}` : ''}`;
-      mRow.append(mName, mPct);
+      mPct.className = `agm-model-pct${mTone ? ` ${mTone}` : ''}`;
+      mPct.textContent = `${mPctVal}%`;
+      mRight.appendChild(mPct);
+      mRow.append(mName, mRight);
       grid.appendChild(mRow);
     }
     card.appendChild(grid);
@@ -1040,7 +1187,10 @@ function renderAccountCard(acc, activeAccounts) {
     try {
       const res = await agmApi().switchAccount(acc.id, els.targetClient.value);
       if (res?.ok) {
-        showToast(t('agManager.toast.switchSuccess', { email: acc.email, target: res.target, mode: res.mode }));
+        const resumedCount = Number(res.resumedCount || 0);
+        showToast(resumedCount > 0
+          ? t('agManager.toast.switchOkResumed', { email: acc.email, target: res.target, mode: res.mode, count: resumedCount })
+          : t('agManager.toast.switchSuccess', { email: acc.email, target: res.target, mode: res.mode }));
       } else {
         showToast(res?.error || t('agManager.toast.switchFailed'), true);
       }
@@ -1482,7 +1632,10 @@ function wireEvents() {
     try {
       const res = await agmApi().switchBestAccount(els.targetClient.value);
       if (res?.ok) {
-        showToast(t('agManager.toast.switchBestOk', { target: res.target, mode: res.mode }));
+        const resumedCount = Number(res.resumedCount || 0);
+        showToast(resumedCount > 0
+          ? t('agManager.toast.switchBestOkResumed', { target: res.target, mode: res.mode, count: resumedCount })
+          : t('agManager.toast.switchBestOk', { target: res.target, mode: res.mode }));
       } else {
         showToast(res?.error || t('agManager.toast.switchFailed'), true);
       }
@@ -1627,6 +1780,14 @@ function wireEvents() {
     const val = Number.isFinite(parsed) ? Math.max(30, Math.min(3600, Math.round(parsed))) : 180;
     els.autoSwitchCooldownInput.value = String(val);
     void persistConfigPatch({ autoSwitchCooldownSeconds: val });
+  });
+  els.autoResumeEnabledInput?.addEventListener('change', () => {
+    void persistConfigPatch({ autoResumeEnabled: els.autoResumeEnabledInput.checked });
+  });
+  els.autoResumePromptInput?.addEventListener('change', () => {
+    const cleaned = els.autoResumePromptInput.value.replace(/[\r\n]+/g, ' ').trim().slice(0, 500) || '继续';
+    els.autoResumePromptInput.value = cleaned;
+    void persistConfigPatch({ autoResumePrompt: cleaned });
   });
 
   els.startupRefreshInput.addEventListener('change', () => {

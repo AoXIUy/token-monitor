@@ -68,6 +68,9 @@ test('evaluateLocalQuotaTrigger enforces rpc-only source, 5h/weekly windows, sco
   assert.equal(thresholdTrigger.hardExhausted, false);
   assert.deepEqual(thresholdTrigger.exhaustedFamilies, ['claude']);
   assert.equal(autoSwitch.resolveSwitchTargetForTrigger('auto', thresholdTrigger.sourceDetail), 'agy');
+  assert.equal(autoSwitch.resolveSwitchTargetForTrigger('auto', 'cli', { classicRunning: true, ideRunning: false }), 'auto');
+  assert.equal(autoSwitch.resolveSwitchTargetForTrigger('auto', 'ide'), 'auto');
+  assert.equal(autoSwitch.resolveSwitchTargetForTrigger('auto', 'app'), 'auto');
   assert.equal(autoSwitch.resolveSwitchTargetForTrigger('acp', thresholdTrigger.sourceDetail), 'acp');
 
   // All scope requires every group to have at least one exhausted window
@@ -356,4 +359,503 @@ test('service auto-switches on local 5h/weekly limit after refreshing pool, resp
   assert.equal(resumed?.ok, true);
   assert.equal(resumed?.account?.email, 'full@example.com');
   assert.equal(service.getState().activeAccounts.agy, byEmail['full@example.com']);
+});
+
+test('Windows Antigravity.exe (sourceDetail=ide) targets Classic, writes keyring + DB, excludes keyring-detected account, and falls back from stale hot-switch to restart', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-win32-autoswitch-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const appDir = path.join(dir, 'Programs', 'Antigravity', 'resources', 'app');
+  fs.mkdirSync(appDir, { recursive: true });
+  fs.writeFileSync(path.join(appDir, 'package.json'), JSON.stringify({ version: '1.104.2' }));
+  fs.writeFileSync(path.join(appDir, 'product.json'), JSON.stringify({ ideVersion: '2.34.0' }));
+  const exePath = path.join(dir, 'Programs', 'Antigravity', 'Antigravity.exe');
+  fs.writeFileSync(exePath, '');
+
+  const processManager = require('../src/electron/antigravityManager/processManager');
+  assert.equal(processManager.detectAntigravityVersion(exePath), '2.34.0');
+  assert.equal(await processManager.detectAntigravityVersionAsync(exePath), '2.34.0');
+
+  let keyringCalls = 0;
+  const dbTargets = [];
+  let closedCount = 0;
+  let startedCount = 0;
+  let liveRpcEmail = 'win-cur@example.com';
+
+  const service = createAntigravityManagerService({
+    baseDir: path.join(dir, 'mgr'),
+    autoSwitchMonitorOptions: {
+      pollMs: 60_000,
+      activityDebounceMs: 25,
+      activityMinIntervalMs: 50,
+      turnEndDelayMs: 25,
+      startupDelayMs: 60_000,
+      hotSwitchVerifyDelayMs: 20
+    },
+    probeLocalLimits: async () => ({
+      updatedAt: new Date().toISOString(),
+      providers: [{
+        provider: 'antigravity',
+        source: 'rpc',
+        sourceDetail: 'ide', // Windows Antigravity.exe extensions\antigravity\bin\language_server_windows_x64.exe
+        status: 'ok',
+        accountEmail: liveRpcEmail === 'win-cur@example.com' ? '' : liveRpcEmail, // simulate initial GetUserStatus timeout, then post-hot-switch check
+        windows: [
+          { kind: 'session', label: 'Gemini 5-hour', usedPercent: 100, windowMinutes: 300, showMeter: true }
+        ]
+      }]
+    }),
+    switcherDeps: {
+      oauth: { ensureFreshToken: async (tok) => tok },
+      stateDb: {
+        getDbPath: (target) => {
+          const slot = target === 'ide' ? 'Antigravity IDE' : 'Antigravity';
+          return path.join(dir, 'Roaming', slot, 'User', 'globalStorage', 'state.vscdb');
+        },
+        injectTokenToDbAsync: async (dbPath, payload) => {
+          dbTargets.push({ dbPath, email: payload.email });
+        }
+      },
+      deviceProfile: {
+        getStoragePath: () => path.join(dir, 'Roaming', 'Antigravity', 'User', 'globalStorage', 'storage.json'),
+        readDeviceProfileAsync: async () => null,
+        writeDeviceProfileAsync: async () => {},
+        generateDeviceProfile: () => ({
+          machineId: 'auth0|user_w',
+          macMachineId: 'mac-w',
+          devDeviceId: 'dev-w',
+          sqmId: '{SQM-W}'
+        })
+      },
+      keyring: {
+        readFromSystemKeyringAsync: async () => ({ refreshToken: '1//win-cur', email: 'win-cur@example.com' }),
+        writeToSystemKeyringAsync: async () => { keyringCalls += 1; }
+      },
+      fileCredentials: {
+        readLocalCredentialFilesAsync: async () => [],
+        writeFileCredentialsAsync: async () => {}
+      },
+      fs: { existsSync: () => true },
+      processManager: {
+        listProcessesAsync: async () => [{
+          pid: 4100,
+          name: 'Antigravity.exe',
+          exePath,
+          argv0: exePath,
+          args: `"${exePath}"`
+        }],
+        isAntigravityRunning: (target) => target !== 'ide',
+        getAntigravityExecutablePathAsync: async () => exePath,
+        detectAntigravityVersionAsync: async () => '1.104.2', // Even if version < 2.0.0, keyring + DB both get written
+        compareSemver: processManager.compareSemver,
+        getArgsFromRunningProcess: () => [],
+        getUserDataDirFromProcess: () => null,
+        getLanguageServerPids: () => [4101],
+        killLanguageServerAsync: async () => {
+          // Simulate Electron keeping stale in-memory state.vscdb account across LS respawn
+          liveRpcEmail = ' stale-old@example.com '.trim();
+          return 1;
+        },
+        waitForLanguageServerRespawn: async () => true,
+        closeAntigravity: async () => { closedCount += 1; },
+        startAntigravity: () => {
+          startedCount += 1;
+          liveRpcEmail = 'win-fresh@example.com';
+        }
+      }
+    },
+    fetch: async (url, init) => {
+      const auth = String(init?.headers?.authorization || '');
+      const isFresh = auth.includes('ya29.win-fresh');
+      if (String(url).includes('loadCodeAssist')) {
+        return new Response(JSON.stringify({ currentTier: { id: 'pro-tier' } }), { status: 200 });
+      }
+      if (String(url).includes('retrieveUserQuotaSummary')) {
+        return new Response(JSON.stringify({
+          groups: [{
+            displayName: 'Gemini',
+            buckets: [{ window: '5h', remainingFraction: isFresh ? 0.95 : 0.9 }]
+          }]
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ models: {} }), { status: 200 });
+    }
+  });
+  t.after(() => service.stop());
+
+  const seedDir = path.join(dir, 'seed');
+  fs.mkdirSync(path.join(seedDir, 'accounts'), { recursive: true });
+  const exp = Math.floor(Date.now() / 1000) + 7200;
+  fs.writeFileSync(path.join(seedDir, 'accounts', 'cur.json'), JSON.stringify({
+    email: 'win-cur@example.com',
+    token: { access_token: 'ya29.win-cur', refresh_token: '1//win-cur', expiry_timestamp: exp }
+  }));
+  fs.writeFileSync(path.join(seedDir, 'accounts', 'fresh.json'), JSON.stringify({
+    email: 'win-fresh@example.com',
+    token: { access_token: 'ya29.win-fresh', refresh_token: '1//win-fresh', expiry_timestamp: exp }
+  }));
+  service.importDataDir(seedDir);
+
+  const switchedPromise = new Promise((resolve) => {
+    const check = setInterval(() => {
+      const last = service.getState().lastAutoSwitch;
+      if (last) {
+        clearInterval(check);
+        resolve(last);
+      }
+    }, 15);
+  });
+
+  // Enabling autoSwitchEnabled triggers immediate local RPC probe without manual widget Refresh click!
+  service.updateConfig({ autoSwitchEnabled: true, refreshSlideDelaySecs: 0 });
+  const last = await switchedPromise;
+
+  assert.equal(last.ok, true);
+  assert.equal(last.toEmail, 'win-fresh@example.com', 'excluded win-cur@example.com via Windows keyring hint');
+  assert.equal(last.target, 'classic', 'targeted running Classic Antigravity.exe instead of nonexistent Antigravity IDE');
+  assert.equal(last.mode, 'restart', 'fell back from stale hot-switch to full restart when live RPC email stayed mismatched');
+  assert.equal(closedCount, 1);
+  assert.equal(startedCount, 1);
+  assert.ok(keyringCalls >= 2, 'wrote Windows Credential Manager even when package.json reported 1.104.2');
+  assert.ok(dbTargets.every((d) => !d.dbPath.includes('Antigravity IDE')));
+});
+
+test('Linux / desktop turn-end session activity triggers standalone local RPC probe without manual Refresh click', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-linux-turnend-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  let probeCount = 0;
+  let currentUsedPct = 40;
+  let keyringPayload = null;
+
+  const service = createAntigravityManagerService({
+    baseDir: path.join(dir, 'mgr'),
+    autoSwitchMonitorOptions: {
+      pollMs: 60_000,
+      activityDebounceMs: 25,
+      activityMinIntervalMs: 5000,
+      turnEndDelayMs: 25,
+      startupDelayMs: 60_000
+    },
+    probeLocalLimits: async () => {
+      probeCount += 1;
+      return {
+        updatedAt: new Date().toISOString(),
+        providers: [{
+          provider: 'antigravity',
+          source: 'rpc',
+          sourceDetail: 'cli',
+          status: 'ok',
+          accountEmail: 'linux-a@example.com',
+          windows: [{ kind: 'session', label: 'Gemini 5-hour', usedPercent: currentUsedPct, windowMinutes: 300, showMeter: true }]
+        }]
+      };
+    },
+    switcherDeps: {
+      oauth: { ensureFreshToken: async (tok) => tok },
+      deviceProfile: {
+        getStoragePath: () => '',
+        readDeviceProfile: () => null,
+        generateDeviceProfile: () => ({ machineId: 'm', macMachineId: 'mm', devDeviceId: 'd', sqmId: '{S}' })
+      },
+      keyring: {
+        writeToSystemKeyring: (p) => { keyringPayload = p; },
+        readFromSystemKeyring: () => keyringPayload
+      },
+      fileCredentials: { writeFileCredentials: () => {} }
+    },
+    fetch: async (url) => {
+      if (String(url).includes('loadCodeAssist')) {
+        return new Response(JSON.stringify({ currentTier: { id: 'pro-tier' } }), { status: 200 });
+      }
+      if (String(url).includes('retrieveUserQuotaSummary')) {
+        return new Response(JSON.stringify({
+          groups: [{ displayName: 'Gemini', buckets: [{ window: '5h', remainingFraction: 0.9 }] }]
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ models: {} }), { status: 200 });
+    }
+  });
+  t.after(() => service.stop());
+
+  const seedDir = path.join(dir, 'seed');
+  fs.mkdirSync(path.join(seedDir, 'accounts'), { recursive: true });
+  const exp = Math.floor(Date.now() / 1000) + 7200;
+  fs.writeFileSync(path.join(seedDir, 'accounts', 'a.json'), JSON.stringify({
+    email: 'linux-a@example.com',
+    token: { access_token: 'ya29.la', refresh_token: '1//la', expiry_timestamp: exp }
+  }));
+  fs.writeFileSync(path.join(seedDir, 'accounts', 'b.json'), JSON.stringify({
+    email: 'linux-b@example.com',
+    token: { access_token: 'ya29.lb', refresh_token: '1//lb', expiry_timestamp: exp }
+  }));
+  service.importDataDir(seedDir);
+  service.updateConfig({ autoSwitchEnabled: true, refreshSlideDelaySecs: 0 });
+
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(probeCount, 1);
+  assert.equal(service.getState().lastAutoSwitch, null);
+
+  // Simulate session starting (busy=true), burning quota to 100%, then ending turn (busy=false) -> immediate turn_end probe
+  service.onLocalActivityChanged({ busy: true });
+  currentUsedPct = 100;
+  service.onLocalActivityChanged({ busy: false });
+
+  await new Promise((resolve) => {
+    const check = setInterval(() => {
+      if (service.getState().lastAutoSwitch) {
+        clearInterval(check);
+        resolve();
+      }
+    }, 15);
+  });
+
+  assert.equal(service.getState().lastAutoSwitch?.ok, true);
+  assert.equal(service.getState().lastAutoSwitch?.toEmail, 'linux-b@example.com');
+});
+
+test('auto-resume snapshots mid-run and quota-stopped top-level conversations, ignores finished/subagent threads, and wakes idle threads via agentapi after switch', async (t) => {
+  const http = require('node:http');
+  const sqlite = require('node:sqlite');
+  const taskResume = require('../src/electron/antigravityManager/taskResume');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-autoresume-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const agRoot = path.join(dir, '.gemini', 'antigravity');
+  const daemonDir = path.join(agRoot, 'daemon');
+  fs.mkdirSync(daemonDir, { recursive: true });
+  const fakeLsExe = path.join(dir, 'Antigravity', 'resources', 'bin', 'language_server');
+  fs.mkdirSync(path.dirname(fakeLsExe), { recursive: true });
+  fs.writeFileSync(fakeLsExe, '');
+
+  const dbPath = path.join(agRoot, 'conversation_summaries.db');
+  const db = new sqlite.DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE conversation_summaries (
+      conversation_id TEXT PRIMARY KEY,
+      title TEXT,
+      preview TEXT,
+      status TEXT,
+      not_fully_idle INTEGER,
+      killed INTEGER,
+      parent_conversation_id TEXT,
+      nesting_depth INTEGER,
+      last_modified_time TEXT,
+      last_user_input_time TEXT
+    );
+  `);
+  const nowIso = new Date().toISOString().replace('T', ' ').replace('Z', '+00:00');
+  const insert = db.prepare(`
+    INSERT INTO conversation_summaries
+      (conversation_id, title, preview, status, not_fully_idle, killed, parent_conversation_id, nesting_depth, last_modified_time, last_user_input_time)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  // 1. Interrupted by quota mid-turn (IDLE in DB, last step in transcript.jsonl is GENERIC/SYSTEM_MESSAGE without final PLANNER_RESPONSE)
+  insert.run('conv-quota-hit', 'Sync v0.99.0', '', 'CASCADE_RUN_STATUS_IDLE', 0, 0, '', 0, nowIso, nowIso);
+  // 2. Actively running right before switch kills language_server
+  insert.run('conv-mid-run', 'Refactor UI', '', 'CASCADE_RUN_STATUS_RUNNING', 1, 0, '', 0, nowIso, nowIso);
+  // 3. Cleanly finished conversation (must NOT be resumed!)
+  insert.run('conv-finished', 'Completed task', '', 'CASCADE_RUN_STATUS_IDLE', 0, 0, '', 0, nowIso, nowIso);
+  // 4. Subagent child conversation (must NOT be resumed directly!)
+  insert.run('conv-subagent', 'Subagent worker', '', 'CASCADE_RUN_STATUS_RUNNING', 1, 0, 'conv-quota-hit', 1, nowIso, '0001-01-01 00:00:00+00:00');
+  // 5. Already recovered/running after switch (GetConversation returns RUN_STATE_RUNNING -> must skip duplicate send!)
+  insert.run('conv-already-running', 'Already resumed', '', 'CASCADE_RUN_STATUS_RUNNING', 1, 0, '', 0, nowIso, nowIso);
+  db.close();
+
+  const writeTranscript = (cid, rows) => {
+    const logDir = path.join(agRoot, 'brain', cid, '.system_generated', 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(path.join(logDir, 'transcript.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  };
+  writeTranscript('conv-quota-hit', [
+    { step_index: 0, type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE' },
+    { step_index: 1, type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE', tool_calls: [{ name: 'run_command' }] },
+    { step_index: 2, type: 'GENERIC', source: 'MODEL', status: 'DONE' },
+    { step_index: 3, type: 'SYSTEM_MESSAGE', source: 'SYSTEM', status: 'DONE' }
+  ]);
+  writeTranscript('conv-finished', [
+    { step_index: 0, type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE' },
+    { step_index: 1, type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE' }
+  ]);
+
+  const snapped = taskResume.snapshotInterruptedConversations({ homeDir: dir, env: {}, maxResults: 5 });
+  assert.deepEqual(
+    snapped.map((s) => s.conversationId).sort(),
+    ['conv-already-running', 'conv-mid-run', 'conv-quota-hit'],
+    'must capture quota-stopped and mid-run top-level conversations while excluding finished and subagent threads'
+  );
+
+  // Start stub ConversationService HTTP server representing respawned language_server
+  const server = http.createServer((req, res) => {
+    assert.equal(req.headers['x-antigravity-csrf-token'], 'resume-csrf-123');
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      const body = JSON.parse(raw || '{}');
+      if (req.url === '/product.v1.ConversationService/ListConversations') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ conversations: [] }));
+        return;
+      }
+      if (req.url === '/product.v1.ConversationService/GetConversation') {
+        const state = body.conversationId === 'conv-already-running' ? 'RUN_STATE_RUNNING' : 'RUN_STATE_IDLE';
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ id: body.conversationId, state: { runState: state } }));
+        return;
+      }
+      res.writeHead(404);
+      res.end('{}');
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const port = /** @type {import('node:net').AddressInfo} */ (server.address()).port;
+
+  fs.writeFileSync(path.join(daemonDir, `hub_${port}.json`), JSON.stringify({
+    pid: 9901,
+    httpPort: port,
+    httpsPort: port + 1,
+    lsVersion: '2.35.0',
+    csrfToken: 'resume-csrf-123'
+  }));
+
+  const sentAgentApiCalls = [];
+  let keyringPayload = null;
+
+  const service = createAntigravityManagerService({
+    baseDir: path.join(dir, 'mgr'),
+    switcherDeps: {
+      oauth: { ensureFreshToken: async (tok) => tok },
+      deviceProfile: {
+        getStoragePath: () => '',
+        readDeviceProfile: () => null,
+        generateDeviceProfile: () => ({ machineId: 'm', macMachineId: 'mm', devDeviceId: 'd', sqmId: '{S}' })
+      },
+      keyring: {
+        writeToSystemKeyring: (p) => { keyringPayload = p; },
+        readFromSystemKeyring: () => keyringPayload
+      },
+      fileCredentials: { writeFileCredentials: () => {} }
+    },
+    taskResumeDeps: {
+      homeDir: dir,
+      env: {},
+      maxResults: 5,
+      listProcessesAsync: async () => [{
+        pid: 9901,
+        name: 'language_server',
+        exePath: fakeLsExe,
+        argv0: fakeLsExe,
+        args: `${fakeLsExe} --app_data_dir antigravity`
+      }],
+      execFile: (bin, args, opts, cb) => {
+        sentAgentApiCalls.push({
+          bin,
+          args,
+          lsAddress: opts.env.ANTIGRAVITY_LS_ADDRESS,
+          csrf: opts.env.ANTIGRAVITY_CSRF_TOKEN
+        });
+        cb(null, '{}', '');
+      }
+    },
+    fetch: async (url) => {
+      if (String(url).includes('loadCodeAssist')) {
+        return new Response(JSON.stringify({ currentTier: { id: 'ultra-tier' } }), { status: 200 });
+      }
+      if (String(url).includes('retrieveUserQuotaSummary')) {
+        return new Response(JSON.stringify({
+          groups: [{ displayName: 'Gemini', buckets: [{ window: '5h', remainingFraction: 0.95 }] }]
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ models: {} }), { status: 200 });
+    }
+  });
+  t.after(() => service.stop());
+
+  const seedDir = path.join(dir, 'seed');
+  fs.mkdirSync(path.join(seedDir, 'accounts'), { recursive: true });
+  const exp = Math.floor(Date.now() / 1000) + 7200;
+  fs.writeFileSync(path.join(seedDir, 'accounts', 'a.json'), JSON.stringify({
+    email: 'old@example.com',
+    token: { access_token: 'ya29.old', refresh_token: '1//old', expiry_timestamp: exp }
+  }));
+  fs.writeFileSync(path.join(seedDir, 'accounts', 'b.json'), JSON.stringify({
+    email: 'next@example.com',
+    token: { access_token: 'ya29.next', refresh_token: '1//next', expiry_timestamp: exp }
+  }));
+  service.importDataDir(seedDir);
+  service.updateConfig({
+    autoSwitchEnabled: true,
+    autoResumeEnabled: true,
+    autoResumePrompt: '继续完成剩余步骤',
+    refreshSlideDelaySecs: 0
+  });
+
+  const outcome = await service.onLocalLimitsUpdated({
+    providers: [{
+      provider: 'antigravity',
+      source: 'rpc',
+      sourceDetail: 'cli',
+      status: 'ok',
+      accountEmail: 'old@example.com',
+      windows: [{ kind: 'session', label: 'Gemini 5-hour', usedPercent: 100, windowMinutes: 300, showMeter: true }]
+    }]
+  });
+
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.lastAutoSwitch.resumedCount, 2);
+  assert.deepEqual(
+    sentAgentApiCalls.map((c) => c.args[2]).sort(),
+    ['conv-mid-run', 'conv-quota-hit'],
+    'resumed idle interrupted conversations and skipped conv-already-running'
+  );
+  for (const call of sentAgentApiCalls) {
+    assert.equal(call.bin, fakeLsExe);
+    assert.deepEqual(call.args.slice(0, 2), ['agentapi', 'send-message']);
+    assert.equal(call.args[3], '继续完成剩余步骤');
+    assert.equal(call.lsAddress, `127.0.0.1:${port}`);
+    assert.equal(call.csrf, 'resume-csrf-123');
+  }
+
+  // Disabling autoResumeEnabled skips sending resume messages on manual/auto switches
+  sentAgentApiCalls.length = 0;
+  service.updateConfig({ autoResumeEnabled: false });
+  const manualRes = await service.switchBestAccount('agy');
+  assert.equal(manualRes.ok, true);
+  assert.equal(sentAgentApiCalls.length, 0);
+});
+
+test('summarizePoolAccountQuota and isPoolAccountExhausted ignore disabled buckets with null remainingFraction', () => {
+  const account = {
+    id: 'acc-disabled-bucket',
+    email: 'disabled-bucket@example.com',
+    hasToken: true,
+    quota: {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          description: 'Models within this group: Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon, Gemini 4 Hydrogen',
+          buckets: [
+            { bucketId: 'gemini-5h', window: '5h', disabled: true, remainingFraction: null },
+            { bucketId: 'gemini-weekly', window: 'weekly', disabled: false, remainingFraction: 0.85 }
+          ]
+        },
+        {
+          displayName: 'Claude and GPT models',
+          buckets: [
+            { bucketId: '3p-5h', window: '5h', disabled: false, remainingFraction: 0.9 },
+            { bucketId: '3p-weekly', window: 'weekly', disabled: false, remainingFraction: 0.8 }
+          ]
+        }
+      ],
+      models: []
+    }
+  };
+
+  const summary = autoSwitch.summarizePoolAccountQuota(account);
+  assert.equal(summary.hasQuotaData, true);
+  assert.equal(summary.entries[0].family, 'gemini');
+  assert.equal(summary.entries[0].minPercent, 85);
+  assert.equal(autoSwitch.isPoolAccountExhausted(account, { scope: 'primary', thresholdPercent: 0 }), false);
 });
