@@ -128,6 +128,8 @@ function createAntigravityManagerService(options) {
   }
   /** @type {Array<() => void>} */
   const refreshWaiters = [];
+  /** @type {Set<() => void>} */
+  const stopWaiters = new Set();
   let started = false;
   let stopped = false;
 
@@ -136,6 +138,13 @@ function createAntigravityManagerService(options) {
       const next = refreshWaiters.shift();
       try { next?.(); } catch (_) {}
     }
+  }
+
+  function resolveStopWaiters() {
+    for (const finish of [...stopWaiters]) {
+      try { finish(); } catch (_) {}
+    }
+    stopWaiters.clear();
   }
 
   /**
@@ -757,13 +766,24 @@ function createAntigravityManagerService(options) {
   }
 
   /**
+   * Wait up to `ms` while keeping the event loop alive for awaited callers,
+   * settling early if `stop()` is called.
    * @param {number} ms
    * @returns {Promise<void>}
    */
-  function waitUnref(ms) {
+  function waitVerifyDelay(ms) {
+    if (stopped) return Promise.resolve();
     return new Promise((resolve) => {
-      const t = setTimeout(() => resolve(), ms);
-      t.unref?.();
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(t);
+        stopWaiters.delete(finish);
+        resolve();
+      };
+      const t = setTimeout(finish, ms);
+      stopWaiters.add(finish);
     });
   }
 
@@ -844,7 +864,7 @@ function createAntigravityManagerService(options) {
         const expectedEmail = String(account.email || '').trim().toLowerCase();
         let verifiedLiveEmail = '';
         for (let attempt = 0; attempt < HOT_SWITCH_VERIFY_ATTEMPTS; attempt += 1) {
-          await waitUnref(HOT_SWITCH_VERIFY_DELAY_MS);
+          await waitVerifyDelay(HOT_SWITCH_VERIFY_DELAY_MS);
           if (stopped) break;
           try {
             const verifySnapshot = await options.probeLocalLimits();
@@ -1398,6 +1418,7 @@ function createAntigravityManagerService(options) {
     clearAutoSwitchMonitorTimers();
     scheduler.stop();
     resolveRefreshWaiters();
+    resolveStopWaiters();
     clearRefreshStateTimer();
     if (hubSyncTimer) {
       clearTimeout(hubSyncTimer);

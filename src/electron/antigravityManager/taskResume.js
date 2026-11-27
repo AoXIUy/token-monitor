@@ -583,8 +583,7 @@ async function discoverLiveAgentApiEndpoint(options = {}) {
   const timeoutMs = Math.max(500, Number(options.timeoutMs || 18_000));
   const pollIntervalMs = Math.max(50, Number(options.pollIntervalMs || 1200));
   const sleepFn = options.sleep || ((ms) => new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
-    t.unref?.();
+    setTimeout(resolve, ms);
   }));
   const listProcsFn = options.listProcessesAsync || (() => processManager.listProcessesAsync({ platform: options.platform }));
   const callConv = options.callConversationService || callConversationServiceHttp;
