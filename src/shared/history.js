@@ -750,6 +750,9 @@ function coerceHistory(raw) {
       .filter(Boolean);
   }
   if (Number.isFinite(src.dailyTotalsOmitted)) history.dailyTotalsOmitted = src.dailyTotalsOmitted;
+  if (typeof src.dailyTotalsRevision === 'string' && /^[a-f0-9]{64}$/.test(src.dailyTotalsRevision)) {
+    history.dailyTotalsRevision = src.dailyTotalsRevision;
+  }
   return history;
 }
 

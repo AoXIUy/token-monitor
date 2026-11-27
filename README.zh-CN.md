@@ -321,8 +321,8 @@ Token Monitor 对 Token 用量、账户额度和 session 明细分别支持：
 | 输出速度／Token 消耗速率 | Claude Code, Codex, OpenCode, Antigravity, Kimi, GitHub Copilot, Pi, Oh My Pi, OmO Native, Kilo CLI, MiMo Code/MiMo Desktop, Muse Code, ZCode CLI, Kiro, DeepSeek Harness, Devin CLI | `tok/s` 为输出速度，`tok/min` 为总 Token 消耗速率；计时可能包含等待。 |
 | 会话模型与推理强度 | Claude Code, Codex | 仅显示会话中明确记录的模型与推理强度。 |
 | 推理 Token 数 | Codex, OpenCode, Pi, Oh My Pi, OmO Native, CodeBuddy, WorkBuddy, Reasonix, DeepSeek Harness | — |
-| 回合开始／完成识别 | Claude Code, Codex, OpenCode, Cursor, CodeBuddy, WorkBuddy, DeepSeek Harness | 依据工具记录的回合信号。其他工具或缺少有效信号时，最后活动后约 10 分钟内估算为运行中。 |
-| 原生运行中／等待输入状态 | Claude Code, Codex | — |
+| 回合开始／完成识别 | Claude Code, Codex, OpenCode, Cursor, Antigravity, CodeBuddy, WorkBuddy, DeepSeek Harness | 依据工具记录的回合信号。其他工具或缺少有效信号时，最后活动后约 10 分钟内估算为运行中。 |
+| 原生运行中／等待输入状态 | Claude Code, Codex, Antigravity | T3 Code 内的 Antigravity ACP 仅报告运行中和空闲状态。 |
 | 父会话／子代理分组 | Codex, Antigravity, Oh My Pi, ZCode；具有可验证父会话链接的 T3 Code 会话 | Claude Code 的分组通过 T3 Code 提供。 |
 | 同一对话的续接记录分组 | Codex；具有已验证线程链接的 T3 Code 会话 | — |
 | 切换本地账号 | Codex | 可切换至已添加到 Token Monitor 的账号。 |
@@ -392,7 +392,7 @@ npx wrangler deploy
 
 ### Headless agent
 
-在服务器、SSH 主机或 WSL 内——任何使用 AI 工具但没有桌面小部件的地方——运行 headless agent。它会采集该机器的用量并上传到你的 hub（方案 A、B 或 C）。需要 Node.js 22.15+ 与 git。
+在服务器、SSH 主机或 WSL 内——任何使用 AI 工具但没有桌面小部件的地方——运行 headless agent。它会采集该机器的用量并上传到你的 hub（方案 A、B 或 C）。需要 Node.js 22.22+ 与 git。
 
 ```bash
 git clone https://github.com/Javis603/token-monitor.git
@@ -416,7 +416,7 @@ App 状态保存在系统的用户数据目录——卸载时一并删除该目�
 
 ## 从源码构建
 
-如需自己从源码打包安装包，请在**对应的**操作系统上使用 Node.js 22.15+（electron-builder 无法在 Windows 上交叉构建 macOS 的 `.dmg`，反之亦然）。
+如需自己从源码打包安装包，请在**对应的**操作系统上使用 Node.js 22.22+（electron-builder 无法在 Windows 上交叉构建 macOS 的 `.dmg`，反之亦然）。
 
 ```bash
 npm install

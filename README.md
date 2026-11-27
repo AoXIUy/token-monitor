@@ -320,8 +320,8 @@ Token Monitor supports token usage, account-limit checks, and session details se
 | Output speed/token consumption rate | Claude Code, Codex, OpenCode, Antigravity, Kimi, GitHub Copilot, Pi, Oh My Pi, OmO Native, Kilo CLI, MiMo Code/MiMo Desktop, Muse Code, ZCode CLI, Kiro, DeepSeek Harness, Devin CLI | Output speed in `tok/s`, total token consumption in `tok/min`; timing can include waiting. |
 | Session model and reasoning effort | Claude Code, Codex | Only models and reasoning effort explicitly recorded in the session are shown. |
 | Reasoning token counts | Codex, OpenCode, Pi, Oh My Pi, OmO Native, CodeBuddy, WorkBuddy, Reasonix, DeepSeek Harness | — |
-| Turn start/completion detection | Claude Code, Codex, OpenCode, Cursor, CodeBuddy, WorkBuddy, DeepSeek Harness | Uses turn signals recorded by the tool. For other tools or without valid signals, running is estimated for about 10 minutes after the last activity. |
-| Native running/waiting-for-input status | Claude Code, Codex | — |
+| Turn start/completion detection | Claude Code, Codex, OpenCode, Cursor, Antigravity, CodeBuddy, WorkBuddy, DeepSeek Harness | Uses turn signals recorded by the tool. For other tools or without valid signals, running is estimated for about 10 minutes after the last activity. |
+| Native running/waiting-for-input status | Claude Code, Codex, Antigravity | Antigravity ACP in T3 Code reports running and idle only. |
 | Parent/subagent grouping | Codex, Antigravity, Oh My Pi, ZCode; T3 Code sessions with verifiable parent links | Claude Code grouping is available through T3 Code. |
 | Continuation-record grouping for the same conversation | Codex; T3 Code sessions with verified thread links | — |
 | Switch local accounts | Codex | Switches between accounts added in Token Monitor. |
@@ -385,7 +385,7 @@ On each Mac signed into the same Apple ID, choose **iCloud Drive** in Settings �
 
 ### Headless agent
 
-Run the headless agent on servers, SSH hosts, or inside WSL — anywhere you use AI tools without the desktop widget. It collects usage on that machine and posts it to your hub (Option A, B, or C). Requires Node.js 22.15+ and git.
+Run the headless agent on servers, SSH hosts, or inside WSL — anywhere you use AI tools without the desktop widget. It collects usage on that machine and posts it to your hub (Option A, B, or C). Requires Node.js 22.22+ and git.
 
 ```bash
 git clone https://github.com/Javis603/token-monitor.git
@@ -409,7 +409,7 @@ App state lives in the OS user-data dir — delete it along with the app to full
 
 ## Build from source
 
-To build your own installer, use Node.js 22.15+ on the **target** OS (electron-builder can't cross-build a macOS `.dmg` on Windows, or vice-versa).
+To build your own installer, use Node.js 22.22+ on the **target** OS (electron-builder can't cross-build a macOS `.dmg` on Windows, or vice-versa).
 
 ```bash
 npm install

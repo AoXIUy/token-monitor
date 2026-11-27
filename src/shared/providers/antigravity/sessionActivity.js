@@ -3,17 +3,20 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { readT3Activity } = require('../../t3/sessionActivity');
+const { nativeAccountingId } = require('../../t3/sessionIdentity');
 const {
   LIVE_ACTIVITY_TTL_MS,
   RUNNING_WINDOW_MS,
   isArchivedSession,
+  liveActivityExpiryAt,
   sessionActivityState
 } = require('../../sessionLive');
 const {
   activityEntries,
-  compactActivity,
+  applyActivityPatch,
   hasKnownSession,
-  nativeSessionsForPeriod,
+  projectNativeActivitySessions,
   rememberProjection
 } = require('../../sessionActivityProjection');
 const {
@@ -24,6 +27,7 @@ const {
   resolveSqlite
 } = require('./sessionMetadata');
 
+const CLIENT = 'antigravity';
 const RENEW_INTERVAL_MS = 10_000;
 const MAX_SESSIONS = 256;
 const ACTIVE_FRESHNESS_WINDOW_MS = 30 * 60 * 1000;
@@ -42,7 +46,7 @@ function parseSqliteTimestamp(value) {
     return Number.isFinite(ms) && ms > 0 ? ms : 0;
   }
   if (typeof value === 'number') {
-    return Number.isFinite(value) && value > 0 ? value : 0;
+    return Number.isFinite(value) && value > 0 ? msOrZero(value) : 0;
   }
   const raw = String(value || '').trim();
   if (!raw) return 0;
@@ -56,6 +60,10 @@ function parseSqliteTimestamp(value) {
     .replace(/(\.\d{3})\d+(?=[+-Z]|$)/, '$1');
   const ms = Date.parse(isoLike);
   return Number.isFinite(ms) && ms > 0 ? ms : 0;
+}
+
+function msOrZero(value) {
+  return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
 function readDbActivityRows(dbPath, sqlite, wantedIds, { discoverActive = false } = {}) {
@@ -137,13 +145,12 @@ function summaryState(row, clock, { forceIdleClock = false, allowIdle = false } 
       observedAt: new Date(clock).toISOString()
     };
   }
-  const withinWindow = modifiedMs > 0 && modifiedMs <= clock && clock - modifiedMs <= RUNNING_WINDOW_MS;
-  if (!allowIdle && !withinWindow) return null;
+  if (!allowIdle) return null;
   let observedAt;
-  if (modifiedMs > 0 && modifiedMs <= clock && clock - modifiedMs < LIVE_ACTIVITY_TTL_MS) {
-    observedAt = new Date(modifiedMs).toISOString();
-  } else if (forceIdleClock) {
+  if (forceIdleClock) {
     observedAt = new Date(clock).toISOString();
+  } else if (modifiedMs > 0 && modifiedMs <= clock && clock - modifiedMs < LIVE_ACTIVITY_TTL_MS) {
+    observedAt = new Date(modifiedMs).toISOString();
   } else {
     observedAt = new Date(modifiedMs > 0 && modifiedMs <= clock ? modifiedMs : clock).toISOString();
   }
@@ -154,7 +161,7 @@ function collectKnownStates(summary, clock) {
   const known = new Map();
   const periods = summary?.periods || summary;
   const checkRow = (session) => {
-    if (!session || session.client !== 'antigravity' || !session.sessionId || isArchivedSession(session)) return;
+    if (!session || session.client !== CLIENT || !session.sessionId || isArchivedSession(session)) return;
     const id = session.sessionId;
     const withoutLease = sessionActivityState({ ...session, liveActivity: undefined }, clock);
     const needsIdleOverride = withoutLease === 'running'
@@ -169,12 +176,12 @@ function collectKnownStates(summary, clock) {
       });
     }
   };
-  for (const { session } of activityEntries(summary, 'antigravity', [], true)) {
+  for (const { session } of activityEntries(summary, CLIENT, [], true)) {
     checkRow(session);
   }
   for (const periodName of ['today', 'month']) {
     for (const session of Object.values(periods?.[periodName]?.sessions || {})) {
-      if (session?.client !== 'antigravity') continue;
+      if (session?.client !== CLIENT) continue;
       const last = parseSqliteTimestamp(session.lastUsedAt);
       if (session.turnEnded === false || session.liveActivity?.state === 'running'
         || (last > 0 && clock - last <= RUNNING_WINDOW_MS)) {
@@ -188,12 +195,23 @@ function collectKnownStates(summary, clock) {
   return known;
 }
 
-function collectSummaryRows(options, wantedIds, discoverActive) {
+function localSummaryCandidates(options = {}) {
   const home = options.homeDir || os.homedir();
   const env = options.env || process.env;
+  // T3 Code ACP live runs are validated against T3's own statev2.sqlite + server PID;
+  // restrict direct catalog fast-lane polling to Desktop and CLI roots (excluding backup).
+  return antigravityConversationSummaryCandidates({
+    home,
+    env,
+    useEnvRoot: !options.scopedHome,
+    antigravityAcpPaths: []
+  }).filter((dbPath) => path.basename(path.dirname(dbPath)) !== 'antigravity-backup');
+}
+
+function collectSummaryRows(options, wantedIds, discoverActive) {
   const sqlite = resolveSqlite(options);
   if (typeof sqlite?.DatabaseSync !== 'function') return [];
-  const candidates = antigravityConversationSummaryCandidates({ home, env });
+  const candidates = localSummaryCandidates(options);
   const merged = new Map();
   for (const dbPath of candidates) {
     for (const [id, row] of readDbActivityRows(dbPath, sqlite, wantedIds, { discoverActive })) {
@@ -240,14 +258,14 @@ async function readSummaryActivity(summary, options = {}) {
   for (const { id, dbPath, row } of entries) {
     const knownMeta = known.get(id);
     const parsed = summaryState(row, clock, {
-      allowIdle: Boolean(knownMeta),
+      allowIdle: Boolean(knownMeta?.needsIdleOverride),
       forceIdleClock: Boolean(knownMeta?.needsIdleOverride)
     });
     if (!parsed) continue;
     const reading = { state: parsed.state, observedAt: parsed.observedAt };
     readings.set(id, reading);
 
-    if (parsed.state !== 'running' || hasKnownSession(summary, 'antigravity', id, 'today', false)) {
+    if (parsed.state !== 'running' || hasKnownSession(summary, CLIENT, id, 'today', false)) {
       continue;
     }
     const title = cleanTitle(row?.title) || cleanTitle(row?.preview) || cleanTitle(row?.agent_name);
@@ -266,9 +284,9 @@ async function readSummaryActivity(summary, options = {}) {
       const transcriptFile = path.join(path.dirname(dbPath), 'brain', id, '.system_generated', 'logs', 'transcript_full.jsonl');
       sessionDetailAvailable = fs.lstatSync(transcriptFile).isFile();
     } catch (_) {}
-    const existingNative = summary?.nativeSessions?.today?.[`antigravity:${id}`];
-    sessions[`antigravity:${id}`] = {
-      client: 'antigravity',
+    const existingNative = summary?.nativeSessions?.today?.[`${CLIENT}:${id}`];
+    sessions[`${CLIENT}:${id}`] = {
+      client: CLIENT,
       sessionId: id,
       native: true,
       totalTokens: 0,
@@ -289,82 +307,79 @@ async function readSummaryActivity(summary, options = {}) {
   return { readings, sessions };
 }
 
-function nextObservation(session, readings, now, renew) {
-  if (session.client !== 'antigravity' || isArchivedSession(session)) return null;
-  const previous = session.liveActivity;
-  const reading = readings.get(session.sessionId);
-  if (!reading && (!previous || previous.state === 'unknown')) return null;
-  const state = reading?.state || 'unknown';
-  const observedAt = state === 'idle' && reading ? reading.observedAt : new Date(now).toISOString();
-  if (previous?.state === state && previous.observedAt === observedAt) return null;
-  if (previous?.state === state && (!renew || state === 'unknown'
-    || now - Date.parse(previous.observedAt) < RENEW_INTERVAL_MS)) return null;
-  return { state, observedAt };
+async function readActivity(summary, options = {}) {
+  const [t3Readings, local] = await Promise.all([
+    readT3Activity(options, CLIENT),
+    readSummaryActivity(summary, options)
+  ]);
+  const readings = new Map(local.readings);
+  const sessions = { ...local.sessions };
+  for (const [sessionId, liveActivity] of t3Readings) {
+    readings.set(sessionId, liveActivity);
+    if (liveActivity.state !== 'running' || nativeAccountingId(CLIENT, sessionId) !== sessionId) continue;
+    const key = `${CLIENT}:${sessionId}`;
+    sessions[key] = sessions[key]
+      ? { ...sessions[key], liveActivity }
+      : {
+          client: CLIENT,
+          sessionId,
+          native: true,
+          totalTokens: 0,
+          costUsd: 0,
+          models: {},
+          tokenDataUnavailable: true,
+          lastUsedAt: summary?.nativeSessions?.today?.[key]?.lastUsedAt || liveActivity.observedAt,
+          liveActivity
+        };
+  }
+  return { readings, sessions };
 }
 
-function projectSessionActivity(summary, readings, now = Date.now(), nativeSessions) {
-  const sourcePeriods = summary?.periods || summary;
-  let next = null;
-  const observations = [];
-  const entries = activityEntries(summary, 'antigravity', readings.keys());
-  for (const name of ['today', 'month', 'allTime']) {
-    let sessions = null;
-    for (const { key, session } of entries.filter((row) => row.name === name)) {
-      const observation = nextObservation(session, readings, now, true);
-      if (!observation) continue;
-      sessions ||= compactActivity(sourcePeriods?.[name], now);
-      sessions[key] = observation;
-      observations.push({ client: 'antigravity', sessionId: session.sessionId, liveActivity: observation });
-    }
-    if (!sessions) continue;
-    next ||= summary?.periods
-      ? { ...summary, periods: { ...summary.periods }, updatedAt: new Date(now).toISOString() }
-      : { ...summary, updatedAt: new Date(now).toISOString() };
-    const targetPeriods = next.periods || next;
-    targetPeriods[name] = { ...sourcePeriods[name], sessionActivity: sessions };
-  }
-  if (nativeSessions) {
-    const oldNative = summary?.nativeSessions || {};
-    const antigravityOnly = (view) => Object.fromEntries(
-      Object.entries(view || {}).filter(([, session]) => session.client === 'antigravity')
-    );
-    const withoutClock = (view) => JSON.stringify(view, (key, value) => (key === 'observedAt' ? undefined : value));
-    const byPeriod = Object.fromEntries(['today', 'month', 'allTime'].map((name) => [
-      name,
-      nativeSessionsForPeriod(summary, 'antigravity', nativeSessions, name)
-    ]));
-    const changed = ['today', 'month', 'allTime'].some(
-      (name) => withoutClock(antigravityOnly(oldNative[name])) !== withoutClock(byPeriod[name])
-    );
-    const renew = Object.values(antigravityOnly(oldNative.today)).some(
-      (session) => now - Date.parse(session.liveActivity?.observedAt) >= RENEW_INTERVAL_MS
-    );
-    if (changed || renew) {
-      next ||= summary?.periods
-        ? { ...summary, periods: { ...summary.periods }, updatedAt: new Date(now).toISOString() }
-        : { ...summary, updatedAt: new Date(now).toISOString() };
-      next.nativeSessions = { ...oldNative };
-      for (const name of ['today', 'month', 'allTime']) {
-        const existing = Object.fromEntries(
-          Object.entries(oldNative[name] || {}).filter(([, session]) => session.client !== 'antigravity')
-        );
-        next.nativeSessions[name] = { ...existing, ...byPeriod[name] };
+function projectActivity(summary, { readings, sessions = {} }, now = Date.now()) {
+  const observations = new Map();
+  for (const { session } of activityEntries(summary, CLIENT, readings.keys())) {
+    const { sessionId, liveActivity: previous } = session;
+    if (observations.has(sessionId)) continue;
+    const reading = readings.get(sessionId);
+    // Keep permission and input prompts outside this adapter's running/idle
+    // scope. In the absence of live evidence, restore the ordinary turn state.
+    const hasLiveReading = (reading?.state === 'running' || reading?.state === 'idle')
+      && liveActivityExpiryAt({ ...session, liveActivity: reading }, now);
+    let liveActivity = hasLiveReading
+      ? reading
+      : { state: 'unknown', observedAt: new Date(now).toISOString() };
+    // T3 only returns recent completions. A recovered completion can replace
+    // the clearance once without advancing its clock on subsequent reads.
+    if (liveActivity.state === 'idle' && previous?.state === 'unknown') {
+      const clearedAt = Date.parse(previous.observedAt);
+      if (clearedAt <= now && Date.parse(liveActivity.observedAt) < clearedAt) {
+        liveActivity = { ...liveActivity, observedAt: previous.observedAt };
       }
     }
+    if (!previous && liveActivity.state === 'unknown') continue;
+    if (previous?.state === liveActivity.state && (liveActivity.state === 'unknown'
+      || Date.parse(liveActivity.observedAt) - Date.parse(previous.observedAt) < RENEW_INTERVAL_MS)) continue;
+    observations.set(sessionId, { client: CLIENT, sessionId, liveActivity });
   }
-  rememberProjection(summary, next, observations);
-  return next;
+  const next = applyActivityPatch(summary, { observations: [...observations.values()] });
+  // The lease can expire between reading SQLite and publishing the view.
+  const activeSessions = Object.fromEntries(
+    Object.entries(sessions).filter(([, row]) => liveActivityExpiryAt(row, now))
+  );
+  const nativeSessions = projectNativeActivitySessions(next, CLIENT, activeSessions, now, RENEW_INTERVAL_MS);
+  if (!nativeSessions) return next;
+  const projected = { ...next, nativeSessions };
+  rememberProjection(next, projected);
+  return projected;
 }
 
-function projectActivity(summary, activity, now) {
-  return projectSessionActivity(summary, activity.readings, now, activity.sessions);
+function projectSessionActivity(summary, readings, now = Date.now(), nativeSessions = {}) {
+  return projectActivity(summary, { readings, sessions: nativeSessions || {} }, now);
 }
 
 function activityWatchTargets(options = {}) {
   if (options.scopedHome) return [];
-  const home = options.homeDir || os.homedir();
-  const env = options.env || process.env;
-  return antigravityConversationSummaryCandidates({ home, env }).map((dbPath) => ({
+  return localSummaryCandidates(options).map((dbPath) => ({
     target: dbPath,
     floor: path.dirname(dbPath),
     kind: 'sqlite'
@@ -375,7 +390,7 @@ module.exports = {
   parseSqliteTimestamp,
   readSessionActivity,
   readSummaryActivity,
-  readActivity: readSummaryActivity,
+  readActivity,
   projectSessionActivity,
   projectActivity,
   activityWatchTargets

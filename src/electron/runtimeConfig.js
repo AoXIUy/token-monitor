@@ -50,6 +50,8 @@ const USAGE_STRUCTURAL_KEYS = Object.freeze([
 const USAGE_CONFIG_FINGERPRINT_KEYS = Object.freeze([
   'clients',
   'codexDotsEnabled',
+  'nativeRangesEnabled', 'dailySessionSyncEnabled',
+  'weekStartsOn',
   'customScanPaths',
   'allTimeSince',
   'intervalMs',
@@ -129,6 +131,9 @@ function usageConfigFromSettings(settings = {}, context = {}) {
     intervalRequiresActivity: Boolean(context.intervalRequiresActivity),
     watchDebounceMs: Number(context.watchDebounceMs || 1500),
     wslScanEnabled: settings.wslScanEnabled === true,
+    nativeRangesEnabled: context.nativeRangesEnabled === true,
+    dailySessionSyncEnabled: context.dailySessionSyncEnabled === true,
+    ...(Number.isInteger(context.weekStartsOn) ? { weekStartsOn: context.weekStartsOn } : {}),
     onError: context.onError,
     logger: context.logger
   };

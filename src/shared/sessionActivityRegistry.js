@@ -6,9 +6,9 @@ const { SESSION_ACTIVITY_PROVIDERS } = require('./sessionActivityProviders');
 // client loads no native activity adapter; portable consumers never load this
 // module. Keep file discovery and identity verification inside each adapter.
 const loaders = {
-  antigravity: () => require('./providers/antigravity/sessionActivity'),
   claude: () => require('./providers/claude/sessionActivity'),
-  codex: () => require('./providers/codex/sessionActivity')
+  codex: () => require('./providers/codex/sessionActivity'),
+  antigravity: () => require('./providers/antigravity/sessionActivity')
 };
 const SESSION_ACTIVITY_REGISTRY = Object.freeze(SESSION_ACTIVITY_PROVIDERS.map((entry) => {
   const load = loaders[entry.id];
@@ -63,6 +63,7 @@ async function refreshSessionActivity(summary, providers, options, shared, {
     }, targets, accounting);
     if ([...targets].some((row) => row.parentSessionId !== originals.get(row).parentSessionId
       || row.parentClient !== originals.get(row).parentClient
+      || row.t3ParentLink !== originals.get(row).t3ParentLink
       || row.t3ThreadId !== originals.get(row).t3ThreadId)) next = { ...next, nativeSessions };
   }
   return next;
