@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const protobuf = require('./protobuf');
 const { isGcpEnterpriseClient } = require('./oauth');
+const { renameAtomicAsync, renameAtomicSync } = require('./winFs');
 
 /** @type {any} */
 let defaultSqlite = null;
@@ -232,7 +233,7 @@ function runInjectTokenTransaction(dbPath, payload, deps = {}) {
   const db = new sqlite.DatabaseSync(dbPath);
   let inTx = false;
   try {
-    db.exec('PRAGMA busy_timeout = 2000;');
+    db.exec('PRAGMA busy_timeout = 5000;');
     db.exec('CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);');
 
     const oauthInfo = protobuf.createOAuthInfo({
@@ -335,7 +336,7 @@ function injectTokenToDb(dbPath, payload, deps = {}) {
     const backupTmp = `${dbPath}.backup.${process.pid}.${Date.now()}.tmp`;
     try {
       fs.copyFileSync(dbPath, backupTmp);
-      fs.renameSync(backupTmp, `${dbPath}.backup`);
+      renameAtomicSync(backupTmp, `${dbPath}.backup`);
     } catch (_) {
       try { fs.unlinkSync(backupTmp); } catch (_) {}
     }
@@ -393,7 +394,7 @@ async function injectTokenToDbAsync(dbPath, payload, deps = {}) {
         const backupTmp = `${dbPath}.backup.${process.pid}.${Date.now()}.tmp`;
         try {
           await fs.promises.copyFile(dbPath, backupTmp);
-          await fs.promises.rename(backupTmp, backupPath);
+          await renameAtomicAsync(backupTmp, backupPath);
         } catch (_) {
           try { await fs.promises.unlink(backupTmp); } catch (_) {}
         }
@@ -402,7 +403,19 @@ async function injectTokenToDbAsync(dbPath, payload, deps = {}) {
   }
 
   await fs.promises.mkdir(path.dirname(dbPath), { recursive: true });
-  return runInjectTokenTransaction(dbPath, payload, deps);
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return runInjectTokenTransaction(dbPath, payload, deps);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (!/SQLITE_BUSY|database is locked/i.test(msg) || attempt >= 3) {
+        throw error;
+      }
+      await new Promise((resolve) => {
+        setTimeout(resolve, 120 * (attempt + 1));
+      });
+    }
+  }
 }
 
 /**
@@ -418,7 +431,7 @@ function writeItemTableValue(dbPath, key, value, deps = {}) {
   }
   const db = new sqlite.DatabaseSync(dbPath);
   try {
-    db.exec('PRAGMA busy_timeout = 2000;');
+    db.exec('PRAGMA busy_timeout = 5000;');
     db.exec('CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);');
     db.prepare('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)').run(key, value);
   } finally {

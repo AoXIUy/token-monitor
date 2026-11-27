@@ -13,9 +13,10 @@ const {
   resolveMcpServerOptions
 } = require('../../src/mcp/server');
 const { resetHubClientFetchCache } = require('../../src/shared/hubClientFetch');
+const { OPENSSL_BIN } = require('../helpers/opensslBin');
 
 function runOpenssl(args, cwd) {
-  execFileSync('openssl', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+  execFileSync(OPENSSL_BIN, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 function generateLocalHttpsPki(dir) {

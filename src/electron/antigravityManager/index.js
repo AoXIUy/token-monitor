@@ -33,6 +33,7 @@ const {
  *   getDeviceIdentity?: () => { deviceId: string, hostname: string },
  *   getHubSyncTarget?: () => { mode: string, hubUrl?: string, secret?: string, embeddedHub?: any } | null,
  *   isLocalAntigravityBusy?: () => boolean,
+ *   isLocalAntigravityActivelyGenerating?: () => boolean,
  *   probeLocalLimits?: (opts?: { signal?: AbortSignal }) => Promise<any>,
  *   getLatestLocalLimits?: () => any,
  *   onAutoSwitchCompleted?: (result: any) => void,
@@ -830,6 +831,7 @@ function createAntigravityManagerService(options) {
           recentlyRunningIds: recentRunningConversations.keys(),
           nowMs: nowForRecent,
           onlyActivelyRunning: !switchOpts?.isAutoSwitch,
+          allowRecentQuotaExhausted: !switchOpts?.isAutoSwitch,
           targetClient: target
         })
       : [];
@@ -874,9 +876,15 @@ function createAntigravityManagerService(options) {
           }
           if (verifiedLiveEmail) break;
         }
-        if (!stopped && verifiedLiveEmail && expectedEmail && verifiedLiveEmail !== expectedEmail) {
+        const effectivePlatform = options.switcherDeps?.platform || (!options.switcherDeps ? process.platform : '');
+        const unverifiedOnWin32 = !verifiedLiveEmail && effectivePlatform === 'win32';
+        if (!stopped && expectedEmail && ((verifiedLiveEmail && verifiedLiveEmail !== expectedEmail) || unverifiedOnWin32)) {
           lastUnverifiedHotSwitch = null;
-          logger.warn?.(`Hot-switch kept ${verifiedLiveEmail} instead of ${expectedEmail}; falling back to full restart`);
+          logger.warn?.(
+            verifiedLiveEmail
+              ? `Hot-switch kept ${verifiedLiveEmail} instead of ${expectedEmail}; falling back to full restart`
+              : `Hot-switch left live RPC account unverified on Windows for ${expectedEmail}; falling back to full restart`
+          );
           res = await switcher.switchAccount({
             account,
             tokenData,
@@ -902,8 +910,13 @@ function createAntigravityManagerService(options) {
       }
       if (switchedOk && shouldAutoResume && interruptedBeforeSwitch.length > 0 && !stopped) {
         try {
+          const resumeTimeoutMs = res?.mode === 'restart'
+            ? Math.max(30_000, Number(options.taskResumeDeps?.timeoutMs || 0))
+            : options.taskResumeDeps?.timeoutMs;
           const resumeOutcome = await resumeApi.resumeInterruptedConversations(interruptedBeforeSwitch, {
             ...(options.taskResumeDeps || {}),
+            ...(resumeTimeoutMs ? { timeoutMs: resumeTimeoutMs } : {}),
+            customExecutablePaths: cfg.customExecutablePaths,
             prompt: cfg.autoResumePrompt,
             targetClient: String(res?.target || target)
           });
@@ -1226,11 +1239,31 @@ function createAntigravityManagerService(options) {
     if (lastAutoSwitchAttemptMs > 0 && now - lastAutoSwitchAttemptMs < effectiveCooldownMs) {
       return { triggered: true, skipped: 'cooldown' };
     }
-    if (options.isLocalAntigravityBusy?.() === true) {
+    const isBusy = options.isLocalAntigravityBusy?.() === true;
+    const resumeApiForBusy = /** @type {typeof taskResume} */ (options.taskResumeDeps?.api || taskResume);
+    const shouldDeferBusy = !evalRes.hardExhausted
+      ? isBusy
+      : (isBusy && (
+          typeof options.isLocalAntigravityActivelyGenerating === 'function'
+            ? options.isLocalAntigravityActivelyGenerating() === true
+            : (options.switcherDeps
+                ? true
+                : (typeof resumeApiForBusy.hasActivelyGeneratingTurn === 'function'
+                    ? resumeApiForBusy.hasActivelyGeneratingTurn({
+                        ...(options.taskResumeDeps || {}),
+                        nowMs: now,
+                        targetClient: cfg.defaultSwitchTarget
+                      })
+                    : true))
+        ));
+    if (shouldDeferBusy) {
       if (busyDeferralStartedAtMs <= 0) {
         busyDeferralStartedAtMs = now;
       }
-      if (!evalRes.hardExhausted || now - busyDeferralStartedAtMs < AUTO_SWITCH_MAX_BUSY_DEFERRAL_MS) {
+      const maxDeferMs = evalRes.hardExhausted && options.autoSwitchMonitorOptions?.maxBusyDeferralMs === undefined
+        ? Math.min(AUTO_SWITCH_MAX_BUSY_DEFERRAL_MS, 15_000)
+        : AUTO_SWITCH_MAX_BUSY_DEFERRAL_MS;
+      if (!evalRes.hardExhausted || now - busyDeferralStartedAtMs < maxDeferMs) {
         pendingAutoSwitchLimits = limits;
         return { triggered: true, skipped: 'session_busy' };
       }

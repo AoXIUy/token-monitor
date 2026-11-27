@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { renameAtomicAsync, renameAtomicSync } = require('./winFs');
 
 const AICODE_SCOPE = 'https://www.googleapis.com/auth/aicode';
 const DEFAULT_SCOPES = Object.freeze([
@@ -45,7 +46,7 @@ function writePrivateJsonFile(filePath, value) {
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`;
   try {
     fs.writeFileSync(tempPath, text, { encoding: 'utf8', ...(process.platform !== 'win32' ? { mode: 0o600 } : {}) });
-    fs.renameSync(tempPath, filePath);
+    renameAtomicSync(tempPath, filePath);
     if (process.platform !== 'win32') {
       try { fs.chmodSync(filePath, 0o600); } catch (_) {}
     }
@@ -274,7 +275,7 @@ async function writePrivateJsonFileAsync(filePath, value) {
       encoding: 'utf8',
       ...(process.platform !== 'win32' ? { mode: 0o600 } : {})
     });
-    await fs.promises.rename(tempPath, filePath);
+    await renameAtomicAsync(tempPath, filePath);
     if (process.platform !== 'win32') {
       try { await fs.promises.chmod(filePath, 0o600); } catch (_) {}
     }

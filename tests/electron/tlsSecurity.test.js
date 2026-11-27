@@ -28,9 +28,10 @@ const { probeHubBuild } = require('../../src/electron/hubBuildStatus');
 const { resolveCompleteHistory } = require('../../src/electron/historySource');
 const { createOpenClawBridge } = require('../../src/electron/openclawBridge');
 const { currentHubBuild } = require('../../src/shared/hubBuildIdentity');
+const { OPENSSL_BIN } = require('../helpers/opensslBin');
 
 function runOpenssl(args, cwd) {
-  execFileSync('openssl', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+  execFileSync(OPENSSL_BIN, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 function generateLocalPki(dir) {

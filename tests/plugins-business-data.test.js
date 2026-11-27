@@ -189,13 +189,14 @@ test('allTime detail cache overrides an existing summary and relation filters in
   service.dispose();
 });
 test('payload stays below transport budget and scope/loader failures are explicit', async () => {
-  let calls = 0;
-  const service = createBusinessDataService({ loadHistory: () => { calls++; throw new Error('credential-bearing-private-error'); } });
+  let calls = 0, now = 1000;
+  const service = createBusinessDataService({ now: () => now, loadHistory: () => { calls++; throw new Error('credential-bearing-private-error'); } });
   service.publish(fixture(700));
   const result = await service.query(q('sessions', { page: { limit: 500 } }), auth);
   assert.ok(Buffer.byteLength(JSON.stringify(result)) <= 56 * 1024);
   assert.equal((await service.query(q('history', { filter: { deviceId: 'missing' } }), auth)).availability, 'scopeUnavailable');
   assert.equal(calls, 0);
+  now += 10000;
   const failed = await service.query(q('history'), auth);
   assert.equal(failed.availability, 'temporarilyUnavailable');
   assert.doesNotMatch(JSON.stringify(failed), /credential-bearing/);

@@ -456,7 +456,112 @@ async function listeningPortsPosix(pid, deps = {}) {
   return [...ports].sort((a, b) => a - b);
 }
 
+let win32TcpApi;
+function getWin32TcpApi() {
+  if (win32TcpApi !== undefined) return win32TcpApi;
+  win32TcpApi = null;
+  if (process.platform !== 'win32') return null;
+  try {
+    const koffi = require('koffi');
+    const iphlpapi = koffi.load('iphlpapi.dll');
+    win32TcpApi = {
+      GetExtendedTcpTable: iphlpapi.func(
+        'uint32_t __stdcall GetExtendedTcpTable(_Out_ uint8_t *pTcpTable, _Inout_ uint32_t *pdwSize, int bOrder, uint32_t ulAf, int TableClass, uint32_t Reserved)'
+      )
+    };
+  } catch (_) {
+    win32TcpApi = null;
+  }
+  return win32TcpApi;
+}
+
+function readWin32ExtendedTcpTable(af, tableClass, api = getWin32TcpApi()) {
+  if (!api?.GetExtendedTcpTable) return null;
+  let size = [16 * 1024];
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const allocBytes = Math.max(256, (size[0] >>> 0) + 1024);
+    if (allocBytes > 16 * 1024 * 1024) return null;
+    const buf = Buffer.alloc(allocBytes);
+    size = [allocBytes];
+    const rc = api.GetExtendedTcpTable(buf, size, 0, af, tableClass, 0);
+    if (rc === 0) {
+      return buf.subarray(0, Math.min(buf.length, size[0] >>> 0));
+    }
+    if (rc !== 122) return null; // 122 = ERROR_INSUFFICIENT_BUFFER
+  }
+  return null;
+}
+
+function queryWin32ListeningPortsNative(pid, ipv4LoopbackOnly = false, api = getWin32TcpApi()) {
+  if (!api) return null;
+  const targetPid = Number(pid);
+  if (!Number.isSafeInteger(targetPid) || targetPid <= 0) return null;
+  // TCP_TABLE_OWNER_PID_LISTENER = 3, AF_INET = 2, AF_INET6 = 23
+  const v4Buf = readWin32ExtendedTcpTable(2, 3, api);
+  if (!v4Buf || v4Buf.length < 4) return null;
+  const ports = new Set();
+  const v4Count = v4Buf.readUInt32LE(0);
+  for (let i = 0; i < v4Count; i += 1) {
+    const off = 4 + i * 24;
+    if (off + 24 > v4Buf.length) break;
+    const owningPid = v4Buf.readUInt32LE(off + 20);
+    if (owningPid !== targetPid) continue;
+    if (ipv4LoopbackOnly && v4Buf.readUInt32BE(off + 4) !== 0x7f000001) continue;
+    const port = v4Buf.readUInt16BE(off + 8);
+    if (port > 0 && port < 65536) ports.add(port);
+  }
+  if (!ipv4LoopbackOnly) {
+    const v6Buf = readWin32ExtendedTcpTable(23, 3, api);
+    if (v6Buf && v6Buf.length >= 4) {
+      const v6Count = v6Buf.readUInt32LE(0);
+      for (let i = 0; i < v6Count; i += 1) {
+        const off = 4 + i * 56;
+        if (off + 56 > v6Buf.length) break;
+        const owningPid = v6Buf.readUInt32LE(off + 52);
+        if (owningPid !== targetPid) continue;
+        const port = v6Buf.readUInt16BE(off + 20);
+        if (port > 0 && port < 65536) ports.add(port);
+      }
+    }
+  }
+  return [...ports].sort((a, b) => a - b);
+}
+
+function checkWin32DesktopSocketOwnedNative(port, pid, localPort, api = getWin32TcpApi()) {
+  if (!api) return null;
+  const targetPid = Number(pid);
+  const targetLocalPort = Number(port);
+  const targetRemotePort = Number(localPort);
+  // TCP_TABLE_OWNER_PID_CONNECTIONS = 4, AF_INET = 2, MIB_TCP_STATE_ESTAB = 5
+  const v4Buf = readWin32ExtendedTcpTable(2, 4, api);
+  if (!v4Buf || v4Buf.length < 4) return null;
+  const count = v4Buf.readUInt32LE(0);
+  for (let i = 0; i < count; i += 1) {
+    const off = 4 + i * 24;
+    if (off + 24 > v4Buf.length) break;
+    if (v4Buf.readUInt32LE(off + 20) !== targetPid) continue;
+    if (v4Buf.readUInt32LE(off) !== 5) continue;
+    if (v4Buf.readUInt32BE(off + 4) !== 0x7f000001) continue;
+    if (v4Buf.readUInt16BE(off + 8) !== targetLocalPort) continue;
+    if (v4Buf.readUInt32BE(off + 12) !== 0x7f000001) continue;
+    if (v4Buf.readUInt16BE(off + 16) !== targetRemotePort) continue;
+    return true;
+  }
+  return false;
+}
+
 async function listeningPortsWin32(pid, deps = {}) {
+  if (!deps.spawn && (deps.win32TcpApi || process.platform === 'win32')) {
+    const nativePorts = queryWin32ListeningPortsNative(
+      pid,
+      Boolean(deps.ipv4LoopbackOnly),
+      deps.win32TcpApi || getWin32TcpApi()
+    );
+    if (Array.isArray(nativePorts)) {
+      if (nativePorts.length === 0) throw errorWithStatus('unavailable', 'no listening ports for antigravity LS');
+      return nativePorts;
+    }
+  }
   const loopbackFilter = deps.ipv4LoopbackOnly ? " | Where-Object LocalAddress -eq '127.0.0.1'" : '';
   const script = `Get-NetTCPConnection -OwningProcess ${pid} -State Listen -ErrorAction SilentlyContinue${loopbackFilter} | Select-Object -ExpandProperty LocalPort`;
   const stdout = await runProcessText('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
@@ -490,6 +595,15 @@ function statusFromHttpCode(code) {
 
 async function desktopSocketOwned(port, pid, localPort, timeoutMs, deps) {
   if ((deps.platform || process.platform) === 'win32') {
+    if (!deps.spawn && (deps.win32TcpApi || process.platform === 'win32')) {
+      const nativeOwned = checkWin32DesktopSocketOwnedNative(
+        port,
+        pid,
+        localPort,
+        deps.win32TcpApi || getWin32TcpApi()
+      );
+      if (typeof nativeOwned === 'boolean') return nativeOwned;
+    }
     const script = `Get-NetTCPConnection -OwningProcess ${pid} -State Established -LocalAddress 127.0.0.1 -LocalPort ${port} -RemoteAddress 127.0.0.1 -RemotePort ${localPort} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess`;
     const output = await runProcessText('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs, deps });
     return output.split(/\r?\n/).some((line) => line.trim() === String(pid));

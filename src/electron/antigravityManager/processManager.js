@@ -131,6 +131,10 @@ function isHelperProcess(name, argsStr, exePath) {
   const exeL = String(exePath || '').toLowerCase();
   return (
     argsL.includes('--type=')
+    || argsL.includes('--ms-enable-electron-run-as-node')
+    || argsL.includes('--utility-sub-type=')
+    || argsL.includes('app.asar\\')
+    || argsL.includes('app.asar/')
     || argsL.includes('node-ipc')
     || argsL.includes('nodeipc')
     || argsL.includes('max-old-space-size')
@@ -185,7 +189,7 @@ function sanitizeRestartArgs(args) {
 const WIN32_PS_LIST_SCRIPT = [
   '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
   '$OutputEncoding = [System.Text.Encoding]::UTF8',
-  'Get-CimInstance Win32_Process | Select-Object ProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress'
+  'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress'
 ].join('; ');
 
 const WIN32_PS_REGISTRY_SCRIPT = [
@@ -226,6 +230,7 @@ function parseWin32ProcessOutput(out) {
     const cmd = String(row?.CommandLine || '');
     return {
       pid: Number(row?.ProcessId || 0),
+      ppid: Number(row?.ParentProcessId || 0),
       name: String(row?.Name || ''),
       exePath: String(row?.ExecutablePath || ''),
       argv0: String(row?.ExecutablePath || row?.Name || ''),
@@ -282,6 +287,7 @@ function buildPosixProcessRecord(pid, fullArgs, comm, procExePath) {
   const argv0 = exePath || fullArgs.split(/\s+/)[0] || comm;
   return {
     pid,
+    ppid: 0,
     name,
     exePath,
     argv0,
@@ -291,7 +297,7 @@ function buildPosixProcessRecord(pid, fullArgs, comm, procExePath) {
 
 /**
  * @param {{ platform?: NodeJS.Platform, execFileSync?: typeof execFileSync, readlinkSync?: typeof fs.readlinkSync }} [deps]
- * @returns {Array<{ pid: number, name: string, exePath: string, argv0: string, args: string }>}
+ * @returns {Array<{ pid: number, ppid?: number, name: string, exePath: string, argv0: string, args: string }>}
  */
 function listProcesses(deps = {}) {
   const platform = deps.platform || process.platform;
@@ -357,7 +363,7 @@ function listProcesses(deps = {}) {
  *   readlinkSync?: typeof fs.readlinkSync,
  *   listProcesses?: () => ReturnType<typeof listProcesses> | Promise<ReturnType<typeof listProcesses>>
  * }} [deps]
- * @returns {Promise<Array<{ pid: number, name: string, exePath: string, argv0: string, args: string }>>}
+ * @returns {Promise<Array<{ pid: number, ppid?: number, name: string, exePath: string, argv0: string, args: string }>>}
  */
 async function listProcessesAsync(deps = {}) {
   if (deps.listProcesses) {
@@ -447,7 +453,16 @@ function getRunningInstances(targetIde = null, procs = listProcesses()) {
  * @param {ReturnType<typeof listProcesses>} [procs]
  */
 function getMainRunningInstances(targetIde = null, procs = listProcesses()) {
-  return getRunningInstances(targetIde, procs).filter((p) => !isHelperProcess(p.name, p.args, p.exePath));
+  const running = getRunningInstances(targetIde, procs);
+  const runningPids = new Set(running.map((p) => p.pid));
+  const nonHelpers = running.filter((p) => !isHelperProcess(p.name, p.args, p.exePath));
+  if (nonHelpers.length <= 1) return nonHelpers;
+  return [...nonHelpers].sort((a, b) => {
+    const aChild = Number(a.ppid || 0) > 0 && runningPids.has(Number(a.ppid || 0));
+    const bChild = Number(b.ppid || 0) > 0 && runningPids.has(Number(b.ppid || 0));
+    if (aChild !== bChild) return aChild ? 1 : -1;
+    return a.pid - b.pid;
+  });
 }
 
 /**
@@ -776,34 +791,147 @@ function extractManifestVersion(parsed, isProductJson) {
 }
 
 /**
+ * Read a top-level JSON entry (`product.json` / `package.json`) directly from an Electron
+ * `app.asar` Chromium Pickle header so version detection works both inside Electron and
+ * under plain Node.js without external ASAR dependencies.
+ *
+ * @param {string} asarPath
+ * @param {string} entryName
+ * @returns {any | null}
+ */
+function readJsonFromAsarFileSync(asarPath, entryName) {
+  let fd = -1;
+  try {
+    fd = fs.openSync(asarPath, 'r');
+    const pre = Buffer.alloc(16);
+    if (fs.readSync(fd, pre, 0, 16, 0) < 16) return null;
+    const headerSize = pre.readUInt32LE(4);
+    const jsonByteLen = pre.readUInt32LE(12);
+    if (headerSize <= 0 || jsonByteLen <= 0 || jsonByteLen > 16 * 1024 * 1024 || jsonByteLen > headerSize) {
+      return null;
+    }
+    const headerBuf = Buffer.alloc(jsonByteLen);
+    if (fs.readSync(fd, headerBuf, 0, jsonByteLen, 16) < jsonByteLen) return null;
+    const index = JSON.parse(headerBuf.toString('utf8'));
+    const entry = index?.files?.[entryName];
+    if (!entry || typeof entry !== 'object') return null;
+    if (entry.unpacked === true) {
+      const unpackedPath = path.join(`${asarPath}.unpacked`, entryName);
+      if (!fs.existsSync(unpackedPath)) return null;
+      return JSON.parse(fs.readFileSync(unpackedPath, 'utf8'));
+    }
+    const offset = Number(entry.offset);
+    const size = Number(entry.size);
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(size) || size <= 0 || size > 1024 * 1024) {
+      return null;
+    }
+    const contentBuf = Buffer.alloc(size);
+    const dataOffset = 8 + headerSize + offset;
+    if (fs.readSync(fd, contentBuf, 0, size, dataOffset) < size) return null;
+    return JSON.parse(contentBuf.toString('utf8'));
+  } catch (_) {
+    return null;
+  } finally {
+    if (fd >= 0) {
+      try { fs.closeSync(fd); } catch (_) {}
+    }
+  }
+}
+
+/**
+ * Async variant of `readJsonFromAsarFileSync`.
+ *
+ * @param {string} asarPath
+ * @param {string} entryName
+ * @returns {Promise<any | null>}
+ */
+async function readJsonFromAsarFileAsync(asarPath, entryName) {
+  /** @type {import('node:fs').promises.FileHandle | null} */
+  let handle = null;
+  try {
+    handle = await fs.promises.open(asarPath, 'r');
+    const pre = Buffer.alloc(16);
+    const preRead = await handle.read(pre, 0, 16, 0);
+    if (preRead.bytesRead < 16) return null;
+    const headerSize = pre.readUInt32LE(4);
+    const jsonByteLen = pre.readUInt32LE(12);
+    if (headerSize <= 0 || jsonByteLen <= 0 || jsonByteLen > 16 * 1024 * 1024 || jsonByteLen > headerSize) {
+      return null;
+    }
+    const headerBuf = Buffer.alloc(jsonByteLen);
+    const headerRead = await handle.read(headerBuf, 0, jsonByteLen, 16);
+    if (headerRead.bytesRead < jsonByteLen) return null;
+    const index = JSON.parse(headerBuf.toString('utf8'));
+    const entry = index?.files?.[entryName];
+    if (!entry || typeof entry !== 'object') return null;
+    if (entry.unpacked === true) {
+      const unpackedPath = path.join(`${asarPath}.unpacked`, entryName);
+      return JSON.parse(await fs.promises.readFile(unpackedPath, 'utf8'));
+    }
+    const offset = Number(entry.offset);
+    const size = Number(entry.size);
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(size) || size <= 0 || size > 1024 * 1024) {
+      return null;
+    }
+    const contentBuf = Buffer.alloc(size);
+    const contentRead = await handle.read(contentBuf, 0, size, 8 + headerSize + offset);
+    if (contentRead.bytesRead < size) return null;
+    return JSON.parse(contentBuf.toString('utf8'));
+  } catch (_) {
+    return null;
+  } finally {
+    if (handle) {
+      try { await handle.close(); } catch (_) {}
+    }
+  }
+}
+
+/**
  * @param {string | null} exePath
  * @returns {string | null}
  */
 function detectAntigravityVersion(exePath) {
   if (!exePath) return null;
+  const baseDir = path.dirname(exePath);
   const dirs = [
-    path.dirname(exePath),
-    path.resolve(path.dirname(exePath), '..'),
-    path.resolve(path.dirname(exePath), '..', 'Resources', 'app'),
-    path.resolve(path.dirname(exePath), 'resources', 'app')
+    baseDir,
+    path.resolve(baseDir, '..'),
+    path.resolve(baseDir, '..', 'Resources', 'app'),
+    path.resolve(baseDir, 'resources', 'app'),
+    path.resolve(baseDir, '..', 'Resources', 'app.asar'),
+    path.resolve(baseDir, 'resources', 'app.asar')
+  ];
+  const asarFiles = [
+    path.resolve(baseDir, '..', 'Resources', 'app.asar'),
+    path.resolve(baseDir, 'resources', 'app.asar')
   ];
   for (const dir of dirs) {
     const productPath = path.join(dir, 'product.json');
-    if (fs.existsSync(productPath)) {
-      try {
+    try {
+      if (fs.existsSync(productPath)) {
         const ver = extractManifestVersion(JSON.parse(fs.readFileSync(productPath, 'utf8')), true);
         if (ver) return ver;
-      } catch (_) {}
-    }
+      }
+    } catch (_) {}
+  }
+  for (const asarPath of asarFiles) {
+    const parsed = readJsonFromAsarFileSync(asarPath, 'product.json');
+    const ver = parsed ? extractManifestVersion(parsed, true) : null;
+    if (ver) return ver;
   }
   for (const dir of dirs) {
     const pkgPath = path.join(dir, 'package.json');
-    if (fs.existsSync(pkgPath)) {
-      try {
+    try {
+      if (fs.existsSync(pkgPath)) {
         const ver = extractManifestVersion(JSON.parse(fs.readFileSync(pkgPath, 'utf8')), false);
         if (ver) return ver;
-      } catch (_) {}
-    }
+      }
+    } catch (_) {}
+  }
+  for (const asarPath of asarFiles) {
+    const parsed = readJsonFromAsarFileSync(asarPath, 'package.json');
+    const ver = parsed ? extractManifestVersion(parsed, false) : null;
+    if (ver) return ver;
   }
   return null;
 }
@@ -814,11 +942,18 @@ function detectAntigravityVersion(exePath) {
  */
 async function detectAntigravityVersionAsync(exePath) {
   if (!exePath) return null;
+  const baseDir = path.dirname(exePath);
   const dirs = [
-    path.dirname(exePath),
-    path.resolve(path.dirname(exePath), '..'),
-    path.resolve(path.dirname(exePath), '..', 'Resources', 'app'),
-    path.resolve(path.dirname(exePath), 'resources', 'app')
+    baseDir,
+    path.resolve(baseDir, '..'),
+    path.resolve(baseDir, '..', 'Resources', 'app'),
+    path.resolve(baseDir, 'resources', 'app'),
+    path.resolve(baseDir, '..', 'Resources', 'app.asar'),
+    path.resolve(baseDir, 'resources', 'app.asar')
+  ];
+  const asarFiles = [
+    path.resolve(baseDir, '..', 'Resources', 'app.asar'),
+    path.resolve(baseDir, 'resources', 'app.asar')
   ];
   for (const dir of dirs) {
     const productPath = path.join(dir, 'product.json');
@@ -827,12 +962,22 @@ async function detectAntigravityVersionAsync(exePath) {
       if (ver) return ver;
     } catch (_) {}
   }
+  for (const asarPath of asarFiles) {
+    const parsed = await readJsonFromAsarFileAsync(asarPath, 'product.json');
+    const ver = parsed ? extractManifestVersion(parsed, true) : null;
+    if (ver) return ver;
+  }
   for (const dir of dirs) {
     const pkgPath = path.join(dir, 'package.json');
     try {
       const ver = extractManifestVersion(JSON.parse(await fs.promises.readFile(pkgPath, 'utf8')), false);
       if (ver) return ver;
     } catch (_) {}
+  }
+  for (const asarPath of asarFiles) {
+    const parsed = await readJsonFromAsarFileAsync(asarPath, 'package.json');
+    const ver = parsed ? extractManifestVersion(parsed, false) : null;
+    if (ver) return ver;
   }
   return null;
 }
@@ -923,6 +1068,23 @@ function matchesLanguageServerTarget(proc, targetIde) {
 function getLanguageServerPids(targetIde = null, deps = {}) {
   const procs = deps.listProcesses ? deps.listProcesses() : listProcesses(deps);
   return procs.filter((p) => matchesLanguageServerTarget(p, targetIde)).map((p) => p.pid);
+}
+
+/**
+ * Detect whether the target's running `language_server` receives its host bridge token
+ * over stdin (`--read_host_bridge_token_from_stdin`, Antigravity 2.x desktop), where
+ * killing only `language_server` leaves the Electron host's cached OAuth bridge stale.
+ *
+ * @param {string | null} [targetIde]
+ * @param {{ platform?: NodeJS.Platform, execFileSync?: typeof execFileSync, listProcesses?: () => ReturnType<typeof listProcesses> }} [deps]
+ * @returns {boolean}
+ */
+function hasStdinBridgeLanguageServer(targetIde = null, deps = {}) {
+  const procs = deps.listProcesses ? deps.listProcesses() : listProcesses(deps);
+  return procs.some((p) => (
+    matchesLanguageServerTarget(p, targetIde)
+    && String(p.args || '').toLowerCase().includes('--read_host_bridge_token_from_stdin')
+  ));
 }
 
 /**
@@ -1054,6 +1216,13 @@ async function closeAntigravity(timeoutSec = 20, targetIde = null, deps = {}) {
   const initial = getRunningInstances(targetIde, await listFn());
   if (initial.length === 0) {
     await killLanguageServerAsync(targetIde, deps);
+    const lsDeadline = Date.now() + 1500;
+    for (let attempt = 0; attempt < 4 && Date.now() < lsDeadline; attempt += 1) {
+      const remainingLs = (await listFn()).filter((p) => matchesLanguageServerTarget(p, targetIde));
+      if (remainingLs.length === 0) break;
+      await Promise.all(remainingLs.map((p) => killFn(p.pid, true)));
+      await sleepFn(200);
+    }
     return;
   }
 
@@ -1069,6 +1238,13 @@ async function closeAntigravity(timeoutSec = 20, targetIde = null, deps = {}) {
       await sleepFn(250);
     }
     await killLanguageServerAsync(targetIde, deps);
+    const lsDeadline = Date.now() + 1500;
+    for (let attempt = 0; attempt < 4 && Date.now() < lsDeadline; attempt += 1) {
+      const remainingLs = (await listFn()).filter((p) => matchesLanguageServerTarget(p, targetIde));
+      if (remainingLs.length === 0) break;
+      await Promise.all(remainingLs.map((p) => killFn(p.pid, true)));
+      await sleepFn(200);
+    }
     return;
   }
 
@@ -1205,6 +1381,7 @@ function getArgsFromRunningProcess(targetIde = null, deps = {}) {
 }
 
 module.exports = {
+  buildExecutableCandidates,
   chromiumUserDataDir,
   classifyProcess,
   cleanSpawnEnv,
@@ -1221,6 +1398,7 @@ module.exports = {
   getMainRunningInstances,
   getRunningInstances,
   getUserDataDirFromProcess,
+  hasStdinBridgeLanguageServer,
   isAntigravityIdePath,
   isAntigravityIdeStr,
   isAntigravityRunning,

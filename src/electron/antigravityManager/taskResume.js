@@ -50,12 +50,16 @@ function normalizeAutoResumePrompt(value, fallback = DEFAULT_AUTO_RESUME_PROMPT)
  * @returns {number}
  */
 function parseSqliteTimestampMs(raw) {
-  if (typeof raw === 'number') return Number.isFinite(raw) && raw > 0 ? raw : 0;
+  if (typeof raw === 'number') {
+    if (!Number.isFinite(raw) || raw <= 0) return 0;
+    return raw < 10_000_000_000 ? Math.trunc(raw * 1000) : Math.trunc(raw);
+  }
   const text = String(raw || '').trim();
   if (!text) return 0;
   if (/^\d+$/.test(text)) {
     const n = Number(text);
-    return Number.isFinite(n) && n > 0 ? n : 0;
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return n < 10_000_000_000 ? Math.trunc(n * 1000) : Math.trunc(n);
   }
   const isoLike = text
     .replace(/^(\d{4}-\d{2}-\d{2})\s+/, '$1T')
@@ -65,6 +69,7 @@ function parseSqliteTimestampMs(raw) {
 }
 
 const USER_CANCEL_MESSAGE_RE = /\b(cancel(?:l)?ed by user|user cancel(?:l)?ed|aborted by user|request cancel(?:l)?ed|turn cancel(?:l)?ed)\b/i;
+const QUOTA_ERROR_MESSAGE_RE = /\b(individual quota reached|quota exceeded|quota exhausted|resource_exhausted|rate[ _-]?limit(?:ed)?|too many requests|http 429|status 429)\b|配额.{0,8}(?:上限|用尽|耗尽|不足)|触发.{0,6}限额/i;
 const INTERACTIVE_USER_WAIT_TOOLS = new Set([
   'ask_question',
   'ask_user',
@@ -114,6 +119,16 @@ function isStepUserCanceled(step) {
  * @param {Record<string, any>} step
  * @returns {boolean}
  */
+function isStepQuotaExhausted(step) {
+  if (!step || typeof step !== 'object') return false;
+  const text = `${step.error || ''} ${step.error_message || ''} ${step.failure || ''} ${step.message || ''} ${step.content || ''}`;
+  return QUOTA_ERROR_MESSAGE_RE.test(text);
+}
+
+/**
+ * @param {Record<string, any>} step
+ * @returns {boolean}
+ */
 function isStepWaitingOnUserPrompt(step) {
   if (!step || typeof step !== 'object' || !Array.isArray(step.tool_calls)) return false;
   return step.tool_calls.some((/** @type {any} */ tc) => {
@@ -133,7 +148,7 @@ function isStepWaitingOnUserPrompt(step) {
  * @param {string} rootDir
  * @param {string} conversationId
  * @param {Pick<typeof fs, 'existsSync' | 'openSync' | 'fstatSync' | 'readSync' | 'closeSync'>} [fsApi]
- * @returns {{ interrupted: boolean, definitive: boolean, reason: string }}
+ * @returns {{ interrupted: boolean, definitive: boolean, reason: string, quotaExhausted?: boolean }}
  */
 function inspectTranscriptTailInterruption(rootDir, conversationId, fsApi = fs) {
   const logsDir = path.join(rootDir, 'brain', conversationId, '.system_generated', 'logs');
@@ -204,6 +219,9 @@ function inspectTranscriptTailInterruption(rootDir, conversationId, fsApi = fs) 
     if (turnSteps.some(isStepUserCanceled)) {
       return { interrupted: false, definitive: true, reason: '' };
     }
+    if (turnSteps.some(isStepQuotaExhausted)) {
+      return { interrupted: true, definitive: true, reason: 'quota_exhausted', quotaExhausted: true };
+    }
 
     let lastPlannerIdx = -1;
     for (let i = turnSteps.length - 1; i >= 0; i -= 1) {
@@ -254,6 +272,80 @@ function inspectTranscriptTailInterruption(rootDir, conversationId, fsApi = fs) 
 }
 
 /**
+ * Check whether any local top-level Antigravity conversation is genuinely mid-LLM-generation
+ * (`CASCADE_RUN_STATUS_RUNNING` / `CASCADE_RUN_STATUS_BUSY`), ignoring conversations whose
+ * model turn already halted (`CASCADE_RUN_STATUS_IDLE`) while background shell tasks keep
+ * `not_fully_idle = 1`.
+ *
+ * @param {{
+ *   homeDir?: string,
+ *   env?: NodeJS.ProcessEnv,
+ *   sqlite?: any,
+ *   fs?: typeof fs,
+ *   nowMs?: number,
+ *   maxAgeMs?: number,
+ *   targetClient?: string | null
+ * }} [options]
+ * @returns {boolean}
+ */
+function hasActivelyGeneratingTurn(options = {}) {
+  const sqlite = resolveSqlite(options);
+  if (!sqlite || typeof sqlite.DatabaseSync !== 'function') return false;
+  const fsApi = options.fs || fs;
+  const nowMs = Number.isFinite(options.nowMs) ? Number(options.nowMs) : Date.now();
+  const maxAgeMs = Number.isFinite(options.maxAgeMs) ? Number(options.maxAgeMs) : 5 * 60 * 1000;
+
+  for (const rootDir of candidateAntigravityRoots(options)) {
+    if (path.basename(rootDir) === 'antigravity-backup') continue;
+    const dbPath = path.join(rootDir, 'conversation_summaries.db');
+    try {
+      if (!fsApi.existsSync(dbPath)) continue;
+    } catch (_) {
+      continue;
+    }
+    let db = null;
+    try {
+      db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
+      try { db.exec('PRAGMA busy_timeout = 250;'); } catch (_) {}
+      const hasTable = Boolean(
+        db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'conversation_summaries'").get()
+      );
+      if (!hasTable) continue;
+      const columns = new Set(
+        db.prepare('PRAGMA table_info(conversation_summaries)').all().map((/** @type {any} */ c) => String(c.name))
+      );
+      if (!columns.has('conversation_id') || !columns.has('status')) continue;
+      const wantedCols = [
+        'conversation_id',
+        'status',
+        'killed',
+        'parent_conversation_id',
+        'nesting_depth',
+        'last_modified_time'
+      ].filter((c) => columns.has(c));
+      const orderClause = columns.has('last_modified_time') ? ' ORDER BY last_modified_time DESC' : '';
+      const rows = db.prepare(`SELECT ${wantedCols.join(', ')} FROM conversation_summaries${orderClause} LIMIT 24`).all();
+      for (const row of rows) {
+        if (row?.killed === 1 || row?.killed === true) continue;
+        if (String(row?.parent_conversation_id || '').trim()) continue;
+        if (columns.has('nesting_depth') && Number(row?.nesting_depth || 0) > 0) continue;
+        const modifiedMs = parseSqliteTimestampMs(row?.last_modified_time);
+        if (modifiedMs > 0 && nowMs - modifiedMs > maxAgeMs) continue;
+        const statusUpper = String(row?.status || '').trim().toUpperCase();
+        if (statusUpper === 'CASCADE_RUN_STATUS_RUNNING' || statusUpper === 'CASCADE_RUN_STATUS_BUSY') {
+          return true;
+        }
+      }
+    } catch (_) {
+      // Ignore locked or unreadable summary DBs.
+    } finally {
+      try { db?.close(); } catch (_) {}
+    }
+  }
+  return false;
+}
+
+/**
  * Capture top-level interactive Antigravity conversations that were either mid-run right
  * before an account switch or stopped mid-turn (e.g. `Individual quota reached`).
  *
@@ -267,6 +359,7 @@ function inspectTranscriptTailInterruption(rootDir, conversationId, fsApi = fs) 
  *   maxAgeMs?: number,
  *   maxResults?: number,
  *   onlyActivelyRunning?: boolean,
+ *   allowRecentQuotaExhausted?: boolean,
  *   targetClient?: string | null
  * }} [options]
  * @returns {Array<{ conversationId: string, title: string, reason: string, modifiedMs: number, rootDir: string }>}
@@ -279,6 +372,7 @@ function snapshotInterruptedConversations(options = {}) {
   const maxAgeMs = Number.isFinite(options.maxAgeMs) ? Number(options.maxAgeMs) : MAX_INTERRUPTED_CONVERSATION_AGE_MS;
   const maxResults = Number.isFinite(options.maxResults) ? Math.max(1, Number(options.maxResults)) : MAX_CONVERSATIONS_TO_RESUME;
   const onlyActivelyRunning = options.onlyActivelyRunning === true;
+  const allowRecentQuotaExhausted = options.allowRecentQuotaExhausted === true;
   const recentRunning = new Set(Array.from(options.recentlyRunningIds || [], (id) => String(id || '').trim()).filter(Boolean));
 
   /** @type {Map<string, { conversationId: string, title: string, reason: string, modifiedMs: number, rootDir: string }>} */
@@ -369,6 +463,15 @@ function snapshotInterruptedConversations(options = {}) {
             interrupted = true;
             reason = 'recent_running_turn';
           }
+        } else if (allowRecentQuotaExhausted && modifiedMs > 0 && nowMs - modifiedMs <= 5 * 60 * 1000) {
+          const tailCheck = inspectTranscriptTailInterruption(rootDir, id, fsApi);
+          if (tailCheck.quotaExhausted) {
+            interrupted = true;
+            reason = tailCheck.reason || 'quota_exhausted';
+          } else if (recentRunning.has(id) && modifiedMs > 0 && nowMs - modifiedMs <= 3 * 60 * 1000 && tailCheck.interrupted) {
+            interrupted = true;
+            reason = tailCheck.reason || 'recent_running_turn';
+          }
         }
 
         if (!interrupted) continue;
@@ -452,8 +555,10 @@ function callConversationServiceHttp({ port, csrfToken, method, body, timeoutMs 
  * @param {{
  *   platform?: NodeJS.Platform,
  *   homeDir?: string,
+ *   env?: NodeJS.ProcessEnv,
  *   procs?: Array<{ pid: number, name: string, exePath: string, argv0: string, args: string }>,
- *   fs?: Pick<typeof fs, 'existsSync'>,
+ *   fs?: Pick<typeof fs, 'existsSync'> & Partial<Pick<typeof fs, 'readFileSync'>>,
+ *   customExecutablePaths?: { classic?: string, ide?: string, cli?: string },
  *   targetClient?: string | null
  * }} [opts]
  * @returns {{ bin: string, prefixArgs: string[] } | null}
@@ -462,6 +567,7 @@ function resolveAgentApiCommand(opts = {}) {
   const platform = opts.platform || process.platform;
   const home = opts.homeDir || os.homedir();
   const existsSync = opts.fs?.existsSync || fs.existsSync;
+  const readFileSync = opts.fs?.readFileSync || (!opts.fs ? fs.readFileSync : null);
   const pathApi = platform === 'win32' ? path.win32 : path;
   const target = String(opts.targetClient || '').trim().toLowerCase();
   const rawProcs = opts.procs || [];
@@ -486,7 +592,7 @@ function resolveAgentApiCommand(opts = {}) {
     }
   }
 
-  // 2. Check `~/.gemini/antigravity/bin/agentapi(.exe)` wrapper installed by Antigravity.
+  // 2. Check `~/.gemini/antigravity/bin/agentapi(.exe/.bat/.cmd)` wrapper installed by Antigravity.
   const binDir = pathApi.join(home, '.gemini', 'antigravity', 'bin');
   const wrapperCandidates = platform === 'win32'
     ? [pathApi.join(binDir, 'agentapi.exe')]
@@ -496,26 +602,63 @@ function resolveAgentApiCommand(opts = {}) {
       return { bin: candidate, prefixArgs: [] };
     }
   }
+  if (platform === 'win32' && typeof readFileSync === 'function') {
+    for (const scriptName of ['agentapi.bat', 'agentapi.cmd']) {
+      const scriptPath = pathApi.join(binDir, scriptName);
+      if (!existsSync(scriptPath)) continue;
+      try {
+        const rawScript = String(readFileSync(scriptPath, 'utf8') || '');
+        const match = rawScript.match(/"([^"\r\n]*language[_-]server[^"\r\n]*\.exe)"\s+agentapi\b/i);
+        if (match?.[1] && existsSync(match[1])) {
+          return { bin: match[1], prefixArgs: ['agentapi'] };
+        }
+      } catch (_) {}
+    }
+  }
 
   // 3. Derive language_server path relative to Classic/IDE executable if running or installed.
+  const lsNames = platform === 'win32'
+    ? ['language_server_windows_x64.exe', 'language_server.exe']
+    : ['language_server', 'language_server_linux_x64', 'language_server_macos_arm', 'language_server_macos_x64'];
+  /** @type {string[]} */
+  const candidateExes = [];
   for (const proc of orderedProcs) {
     const kind = processManager.classifyProcess(proc.name, proc.exePath, proc.argv0, proc.args);
     if ((kind === 'classic' || kind === 'ide') && proc.exePath) {
-      const appDir = pathApi.dirname(proc.exePath);
-      const lsNames = platform === 'win32'
-        ? ['language_server_windows_x64.exe', 'language_server.exe']
-        : ['language_server', 'language_server_linux_x64', 'language_server_macos_arm', 'language_server_macos_x64'];
-      for (const lsName of lsNames) {
-        const relatives = [
-          pathApi.join(appDir, 'resources', 'bin', lsName),
-          pathApi.join(appDir, 'resources', 'app', 'extensions', 'antigravity', 'bin', lsName),
-          pathApi.join(appDir, '..', 'Resources', 'bin', lsName),
-          pathApi.join(appDir, '..', 'Resources', 'app', 'extensions', 'antigravity', 'bin', lsName)
-        ];
-        for (const rel of relatives) {
-          if (existsSync(rel)) {
-            return { bin: rel, prefixArgs: ['agentapi'] };
-          }
+      candidateExes.push(proc.exePath);
+    }
+  }
+  if (opts.customExecutablePaths) {
+    if (target === 'ide' && opts.customExecutablePaths.ide) candidateExes.push(opts.customExecutablePaths.ide);
+    else if (opts.customExecutablePaths.classic) candidateExes.push(opts.customExecutablePaths.classic);
+  }
+  if (typeof processManager.buildExecutableCandidates === 'function') {
+    const targetOrder = target === 'ide' ? ['ide'] : (target === 'classic' ? ['classic'] : ['classic', 'ide']);
+    for (const slot of targetOrder) {
+      candidateExes.push(...processManager.buildExecutableCandidates(slot === 'ide' ? 'ide' : null, {
+        platform,
+        home,
+        env: opts.env
+      }));
+    }
+  }
+
+  const checkedAppDirs = new Set();
+  for (const exe of candidateExes) {
+    if (!exe) continue;
+    const appDir = pathApi.dirname(exe);
+    if (!appDir || checkedAppDirs.has(appDir)) continue;
+    checkedAppDirs.add(appDir);
+    for (const lsName of lsNames) {
+      const relatives = [
+        pathApi.join(appDir, 'resources', 'bin', lsName),
+        pathApi.join(appDir, 'resources', 'app', 'extensions', 'antigravity', 'bin', lsName),
+        pathApi.join(appDir, '..', 'Resources', 'bin', lsName),
+        pathApi.join(appDir, '..', 'Resources', 'app', 'extensions', 'antigravity', 'bin', lsName)
+      ];
+      for (const rel of relatives) {
+        if (existsSync(rel)) {
+          return { bin: rel, prefixArgs: ['agentapi'] };
         }
       }
     }
@@ -575,6 +718,7 @@ function readCandidateHttpEndpointsFromDaemonDirs(opts = {}) {
  *   listProcessesAsync?: () => Promise<Array<{ pid: number, name: string, exePath: string, argv0: string, args: string }>>,
  *   callConversationService?: typeof callConversationServiceHttp,
  *   sleep?: (ms: number) => Promise<void>,
+ *   customExecutablePaths?: { classic?: string, ide?: string, cli?: string },
  *   targetClient?: string | null
  * }} [options]
  * @returns {Promise<{ port: number, csrfToken: string, command: { bin: string, prefixArgs: string[] } } | null>}
@@ -596,8 +740,10 @@ async function discoverLiveAgentApiEndpoint(options = {}) {
       const command = resolveAgentApiCommand({
         platform: options.platform,
         homeDir: options.homeDir,
+        env: options.env,
         procs,
         fs: options.fs,
+        customExecutablePaths: options.customExecutablePaths,
         targetClient: options.targetClient
       });
 
@@ -723,6 +869,7 @@ function runAgentApiSendMessage(command, conversationId, prompt, ctx) {
  *   callConversationService?: typeof callConversationServiceHttp,
  *   discoverEndpoint?: typeof discoverLiveAgentApiEndpoint,
  *   sleep?: (ms: number) => Promise<void>,
+ *   customExecutablePaths?: { classic?: string, ide?: string, cli?: string },
  *   targetClient?: string | null
  * }} [options]
  * @returns {Promise<{ ok: boolean, resumedIds: string[], skippedIds: string[], error?: string }>}
@@ -801,10 +948,13 @@ module.exports = {
   MAX_AUTO_RESUME_PROMPT_LENGTH,
   MAX_CONVERSATIONS_TO_RESUME,
   MAX_INTERRUPTED_CONVERSATION_AGE_MS,
+  QUOTA_ERROR_MESSAGE_RE,
   callConversationServiceHttp,
   discoverLiveAgentApiEndpoint,
+  hasActivelyGeneratingTurn,
   inspectTranscriptTailInterruption,
   normalizeAutoResumePrompt,
+  parseSqliteTimestampMs,
   resolveAgentApiCommand,
   resumeInterruptedConversations,
   snapshotInterruptedConversations

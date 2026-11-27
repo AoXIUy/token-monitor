@@ -37,7 +37,8 @@ function fixture(t, options = {}) {
       const socket = net.connect({ host: '127.0.0.1', port: hub.server.address().port });
       sockets.push(socket);
       socket.on('error', () => {});
-      await Promise.all([once(socket, 'connect'), connected]);
+      const [, [serverSocket]] = await Promise.all([once(socket, 'connect'), connected]);
+      socket.serverSocket = serverSocket;
       return socket;
     }
   };
@@ -173,7 +174,9 @@ for (const endpoint of ['/api/stats/stream', '/api/ingest']) {
     const closed = once(socket, 'close');
     const method = endpoint.endsWith('stream') ? 'GET' : 'POST';
     const body = JSON.stringify({ deviceId: 'late-upload', today: { totalTokens: 100 } });
+    const serverReceivedPartialHeaders = once(socket.serverSocket, 'data');
     socket.write(`${method} ${endpoint} HTTP/1.1\r\nHost: localhost\r\nContent-Length: ${method === 'POST' ? Buffer.byteLength(body) : 0}\r\n`);
+    await serverReceivedPartialHeaders;
     const stopped = hub.stop();
     const requested = once(hub.server, 'request');
     socket.write(`\r\n${method === 'POST' ? body : ''}`);

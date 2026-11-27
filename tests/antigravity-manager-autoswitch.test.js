@@ -1312,3 +1312,256 @@ test('hot-switch verification retries empty RPC email before succeeding/restarti
   assert.equal(verifyProbeCalls, 2, 'retried after initial empty RPC email and caught stale hot-switch on attempt 2');
   assert.equal(restarted, 1);
 });
+
+test('Windows 0% quota bypasses background-only busy state, unverified Win32 hot-switch restarts, and manual switch resumes recent quota-stopped turns via agentapi.bat', async (t) => {
+  const http = require('node:http');
+  const sqlite = require('node:sqlite');
+  const taskResume = require('../src/electron/antigravityManager/taskResume');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-win-deadlock-resume-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  // 1. Unix-second SQLite timestamps normalize to milliseconds
+  assert.equal(taskResume.parseSqliteTimestampMs(1_770_000_000), 1_770_000_000_000);
+  assert.equal(taskResume.parseSqliteTimestampMs('1770000000'), 1_770_000_000_000);
+
+  // 2. Setup classic conversation_summaries.db where turn crashed with quota error (`IDLE`),
+  // while a background shell command keeps `not_fully_idle = 1`
+  const agRoot = path.join(dir, '.gemini', 'antigravity');
+  const binDir = path.join(agRoot, 'bin');
+  const daemonDir = path.join(agRoot, 'daemon');
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.mkdirSync(daemonDir, { recursive: true });
+
+  const fakeLsExe = path.join(dir, 'Programs', 'antigravity', 'resources', 'bin', 'language_server.exe');
+  fs.mkdirSync(path.dirname(fakeLsExe), { recursive: true });
+  fs.writeFileSync(fakeLsExe, '');
+  fs.writeFileSync(
+    path.join(binDir, 'agentapi.bat'),
+    `@echo off\r\n"${fakeLsExe}" agentapi %*\r\n`,
+    'utf8'
+  );
+
+  // Verify resolveAgentApiCommand parses Windows agentapi.bat when no language_server is in procs yet
+  const resolvedCmd = taskResume.resolveAgentApiCommand({
+    platform: 'win32',
+    homeDir: dir,
+    env: {},
+    procs: []
+  });
+  assert.deepEqual(resolvedCmd, { bin: fakeLsExe, prefixArgs: ['agentapi'] });
+
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString().replace('T', ' ').replace('Z', '+00:00');
+  const dbPath = path.join(agRoot, 'conversation_summaries.db');
+  const db = new sqlite.DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE conversation_summaries (
+      conversation_id TEXT PRIMARY KEY,
+      title TEXT,
+      preview TEXT,
+      status TEXT,
+      not_fully_idle INTEGER,
+      killed INTEGER,
+      parent_conversation_id TEXT,
+      nesting_depth INTEGER,
+      last_modified_time TEXT,
+      last_user_input_time TEXT
+    );
+  `);
+  const ins = db.prepare(`
+    INSERT INTO conversation_summaries
+      (conversation_id, title, preview, status, not_fully_idle, killed, parent_conversation_id, nesting_depth, last_modified_time, last_user_input_time)
+    VALUES (?, ?, ?, ?, ?, 0, '', 0, ?, ?)
+  `);
+  ins.run('conv-bg-task-stalled', 'Background test task', '', 'CASCADE_RUN_STATUS_IDLE', 1, nowIso, nowIso);
+  ins.run('conv-manual-quota-err', 'Hit 429 quota', '', 'CASCADE_RUN_STATUS_IDLE', 0, nowIso, nowIso);
+  ins.run('conv-old-idle', 'Finished cleanly', '', 'CASCADE_RUN_STATUS_IDLE', 0, nowIso, nowIso);
+  db.close();
+
+  const writeTranscript = (cid, rows) => {
+    const logDir = path.join(agRoot, 'brain', cid, '.system_generated', 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(path.join(logDir, 'transcript.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  };
+  writeTranscript('conv-manual-quota-err', [
+    { step_index: 0, type: 'USER_INPUT', status: 'DONE' },
+    { step_index: 1, type: 'ERROR', status: 'ERROR', error_message: 'Individual quota reached. Please upgrade your subscription.' }
+  ]);
+  writeTranscript('conv-old-idle', [
+    { step_index: 0, type: 'USER_INPUT', status: 'DONE' },
+    { step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE' }
+  ]);
+
+  assert.equal(
+    taskResume.hasActivelyGeneratingTurn({ homeDir: dir, env: {}, nowMs }),
+    false,
+    'IDLE conversation with not_fully_idle=1 background command is NOT actively generating LLM tokens'
+  );
+
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      const body = JSON.parse(raw || '{}');
+      if (req.url === '/product.v1.ConversationService/ListConversations') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ conversations: [] }));
+        return;
+      }
+      if (req.url === '/product.v1.ConversationService/GetConversation') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ id: body.conversationId, state: { runState: 'RUN_STATE_IDLE' } }));
+        return;
+      }
+      res.writeHead(404);
+      res.end('{}');
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const port = /** @type {import('node:net').AddressInfo} */ (server.address()).port;
+  fs.writeFileSync(path.join(daemonDir, `hub_${port}.json`), JSON.stringify({
+    pid: 7788,
+    httpPort: port,
+    csrfToken: 'win-resume-csrf'
+  }));
+
+  let restarted = 0;
+  const resumedCalls = [];
+  const svc = createAntigravityManagerService({
+    baseDir: path.join(dir, 'mgr'),
+    isLocalAntigravityBusy: () => true, // Collector still sees not_fully_idle=1 / 30s lease
+    isLocalAntigravityActivelyGenerating: () => taskResume.hasActivelyGeneratingTurn({ homeDir: dir, env: {}, nowMs }),
+    autoSwitchMonitorOptions: {
+      hotSwitchVerifyDelayMs: 15,
+      hotSwitchVerifyAttempts: 2,
+      maxBusyDeferralMs: 180_000
+    },
+    probeLocalLimits: async () => ({
+      providers: [{
+        provider: 'antigravity',
+        source: 'rpc',
+        sourceDetail: 'app',
+        status: 'ok',
+        accountEmail: '', // Unverified empty email on Windows after hot-switch must force full restart
+        windows: [{ kind: 'session', label: 'Gemini 5-hour', usedPercent: 100, windowMinutes: 300, showMeter: true }]
+      }]
+    }),
+    switcherDeps: {
+      platform: 'win32',
+      oauth: { ensureFreshToken: async (tok) => tok },
+      stateDb: { getDbPath: () => path.join(dir, 'state.vscdb'), injectTokenToDbAsync: async () => {} },
+      deviceProfile: {
+        getStoragePath: () => path.join(dir, 'storage.json'),
+        readDeviceProfileAsync: async () => null,
+        writeDeviceProfileAsync: async () => {},
+        generateDeviceProfile: () => ({ machineId: 'm', macMachineId: 'mm', devDeviceId: 'd', sqmId: '{S}' })
+      },
+      keyring: {
+        readFromSystemKeyringAsync: async () => ({ refreshToken: '1//old', email: 'old@example.com' }),
+        writeToSystemKeyringAsync: async () => {}
+      },
+      fileCredentials: {
+        readLocalCredentialFilesAsync: async () => [],
+        writeFileCredentialsAsync: async () => {}
+      },
+      fs: { existsSync: () => true },
+      processManager: {
+        listProcessesAsync: async () => [{
+          pid: 7700,
+          name: 'Antigravity.exe',
+          exePath: 'C:\\Apps\\Antigravity\\Antigravity.exe',
+          argv0: 'Antigravity.exe',
+          args: '"C:\\Apps\\Antigravity\\Antigravity.exe"'
+        }],
+        isAntigravityRunning: (target) => target !== 'ide',
+        getAntigravityExecutablePathAsync: async () => 'C:\\Apps\\Antigravity\\Antigravity.exe',
+        detectAntigravityVersionAsync: async () => '2.36.0',
+        compareSemver: () => 1,
+        getArgsFromRunningProcess: () => [],
+        getUserDataDirFromProcess: () => null,
+        getLanguageServerPids: () => [7788],
+        killLanguageServerAsync: async () => 1,
+        waitForLanguageServerRespawn: async () => true,
+        closeAntigravity: async () => {},
+        startAntigravity: () => { restarted += 1; }
+      }
+    },
+    taskResumeDeps: {
+      platform: 'win32',
+      homeDir: dir,
+      env: {},
+      listProcessesAsync: async () => [{
+        pid: 7788,
+        name: 'language_server.exe',
+        exePath: '',
+        argv0: 'language_server.exe',
+        args: 'language_server.exe --app_data_dir antigravity'
+      }],
+      execFile: (bin, args, _opts, cb) => {
+        resumedCalls.push({ bin, args });
+        cb(null, '{}', '');
+      }
+    },
+    fetch: async (url) => {
+      if (String(url).includes('loadCodeAssist')) {
+        return new Response(JSON.stringify({ currentTier: { id: 'pro-tier' } }), { status: 200 });
+      }
+      if (String(url).includes('retrieveUserQuotaSummary')) {
+        return new Response(JSON.stringify({
+          groups: [{ displayName: 'Gemini', buckets: [{ window: '5h', remainingFraction: 1 }] }]
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ models: {} }), { status: 200 });
+    }
+  });
+  t.after(() => svc.stop());
+
+  const seedDir = path.join(dir, 'seed');
+  fs.mkdirSync(path.join(seedDir, 'accounts'), { recursive: true });
+  const exp = Math.floor(nowMs / 1000) + 7200;
+  fs.writeFileSync(path.join(seedDir, 'accounts', 'old.json'), JSON.stringify({
+    email: 'old@example.com',
+    token: { access_token: 'ya29.old', refresh_token: '1//old', expiry_timestamp: exp }
+  }));
+  fs.writeFileSync(path.join(seedDir, 'accounts', 'next.json'), JSON.stringify({
+    email: 'next@example.com',
+    token: { access_token: 'ya29.next', refresh_token: '1//next', expiry_timestamp: exp }
+  }));
+  fs.writeFileSync(path.join(seedDir, 'accounts', 'third.json'), JSON.stringify({
+    email: 'third@example.com',
+    token: { access_token: 'ya29.third', refresh_token: '1//third', expiry_timestamp: exp }
+  }));
+  svc.importDataDir(seedDir);
+  const byEmail = Object.fromEntries(svc.getState().accounts.map((a) => [a.email, a.id]));
+  svc.updateConfig({
+    autoSwitchEnabled: true,
+    autoResumeEnabled: true,
+    autoResumePrompt: '继续',
+    refreshSlideDelaySecs: 0
+  });
+
+  // Immediate auto-switch at 0% despite isLocalAntigravityBusy()===true + Win32 unverified email fallback to restart!
+  const autoRes = await svc.onLocalLimitsUpdated({
+    providers: [{
+      provider: 'antigravity',
+      source: 'rpc',
+      sourceDetail: 'app',
+      status: 'ok',
+      accountEmail: 'old@example.com',
+      windows: [{ kind: 'session', label: 'Gemini 5-hour', usedPercent: 100, windowMinutes: 300, showMeter: true }]
+    }]
+  });
+  assert.equal(autoRes.ok, true);
+  assert.equal(autoRes.mode, 'restart', 'unverified empty email on Windows fell back from hot-switch to full restart');
+  assert.equal(restarted, 1);
+
+  // Manual switch ALSO resumes conv-manual-quota-err (explicit 429 error) + conv-bg-task-stalled, while ignoring conv-old-idle!
+  resumedCalls.length = 0;
+  const manualSw = await svc.switchAccountTo(byEmail['third@example.com'], 'classic', { forceRestart: true });
+  assert.equal(manualSw.ok, true);
+  const resumedIds = resumedCalls.map((c) => c.args[2]).sort();
+  assert.deepEqual(resumedIds, ['conv-bg-task-stalled', 'conv-manual-quota-err']);
+  assert.equal(resumedCalls[0].bin, fakeLsExe);
+});

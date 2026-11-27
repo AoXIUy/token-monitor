@@ -4,6 +4,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { renameAtomicSync } = require('./winFs');
 const { normalizeSubscriptionTier } = require('../../shared/antigravityManagerProtocol');
 const {
   DEFAULT_ACCOUNT_WEIGHT,
@@ -115,7 +116,7 @@ function writeJsonAtomic(filePath, value, privateMode = false) {
       encoding: 'utf8',
       ...(privateMode && process.platform !== 'win32' ? { mode: 0o600 } : {})
     });
-    fs.renameSync(tempPath, filePath);
+    renameAtomicSync(tempPath, filePath);
     if (privateMode && process.platform !== 'win32') {
       try { fs.chmodSync(filePath, 0o600); } catch (_) {}
     }

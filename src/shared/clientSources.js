@@ -126,8 +126,8 @@ function xdgDataHome(home, env = process.env) {
 // hides them when they are missing rather than showing them struck through
 // beside a real "Codex wrote nothing here". A configured root is the opposite:
 // the user named that path, so its absence is exactly what they want to see.
-function tokscaleHeadlessRoots(home) {
-  const configured = nonBlankEnvPath('TOKSCALE_HEADLESS_DIR', null);
+function tokscaleHeadlessRoots(home, env = process.env) {
+  const configured = nonBlankEnvPath('TOKSCALE_HEADLESS_DIR', null, env);
   if (configured) return [{ dir: configured, optional: false }];
   return [
     { dir: path.join(home, '.config', 'tokscale', 'headless'), optional: true },
@@ -135,8 +135,8 @@ function tokscaleHeadlessRoots(home) {
   ];
 }
 
-function copilotExporterPath() {
-  const configured = process.env.COPILOT_OTEL_FILE_EXPORTER_PATH;
+function copilotExporterPath(env = process.env) {
+  const configured = env.COPILOT_OTEL_FILE_EXPORTER_PATH;
   if (typeof configured !== 'string') return null;
   const trimmed = configured.trim();
   return trimmed ? path.resolve(trimmed) : null;
@@ -156,8 +156,8 @@ function hasWatchableParent(file) {
 // tokscale reads exactly the file this env var names (`path.is_file()`, no glob,
 // no directory walk), so the watch is pinned to that one file. Anything under
 // ~/.copilot/otel is already covered recursively and returns null here.
-function copilotExporterWatch(home) {
-  const file = copilotExporterPath();
+function copilotExporterWatch(home, env = process.env) {
+  const file = copilotExporterPath(env);
   if (!file || !hasWatchableParent(file)) return null;
   const otelRoot = path.resolve(canonicalWatchPath(path.join(home, '.copilot', 'otel')));
   const canonicalFile = canonicalWatchFilePath(file);
@@ -204,12 +204,12 @@ function copilotExporterWatch(home) {
   return { file, canonicalFile, dir: path.dirname(file), matches, rememberExistingAlias };
 }
 
-function clineCliSessionRoot(home) {
-  const sessionDataDir = nonBlankEnvPath('CLINE_SESSION_DATA_DIR', null);
+function clineCliSessionRoot(home, env = process.env) {
+  const sessionDataDir = nonBlankEnvPath('CLINE_SESSION_DATA_DIR', null, env);
   if (sessionDataDir) return sessionDataDir;
-  const dataDir = nonBlankEnvPath('CLINE_DATA_DIR', null);
+  const dataDir = nonBlankEnvPath('CLINE_DATA_DIR', null, env);
   if (dataDir) return path.join(dataDir, 'sessions');
-  const clineDir = nonBlankEnvPath('CLINE_DIR', null);
+  const clineDir = nonBlankEnvPath('CLINE_DIR', null, env);
   if (clineDir) return path.join(clineDir, 'data', 'sessions');
   return path.join(home, '.cline', 'data', 'sessions');
 }
@@ -245,14 +245,14 @@ function clientSourceRoots(clientsCsv, options = {}) {
   add('claude', ['claude-projects', claudeRoots.projects], ['claude-transcripts', claudeRoots.transcripts],
     ...simpleHostSourceRoots('claude', tokscaleHomeDir({ env, platform, homeDir: home }))
       .map(([id, dir]) => [id, dir, null, true]));
-  const codexHome = nonBlankEnvPath('CODEX_HOME', path.join(home, '.codex'));
+  const codexHome = nonBlankEnvPath('CODEX_HOME', path.join(home, '.codex'), env);
   add(
     'codex',
     ['codex-sessions', path.join(codexHome, 'sessions')],
     ['codex-sessions', path.join(codexHome, 'archived_sessions')],
-    ...tokscaleHeadlessRoots(home).map(({ dir, optional }) => ['codex-sessions', path.join(dir, 'codex'), null, optional])
+    ...tokscaleHeadlessRoots(home, env).map(({ dir, optional }) => ['codex-sessions', path.join(dir, 'codex'), null, optional])
   );
-  const hermesHome = resolveHermesHome({ env: process.env, homeDir: home });
+  const hermesHome = resolveHermesHome({ env, homeDir: home });
   add('hermes', ['hermes-home', hermesHome], ...hermesProfileWatchDirs(hermesHome).map((dir) => ['hermes-profile', dir]));
   // Within the default OpenCode data root, Tokscale reads the direct
   // opencode*.db family and the legacy storage/message/*/*.json source. The
@@ -324,7 +324,7 @@ function clientSourceRoots(clientsCsv, options = {}) {
     ...kimiWorkRoots.map((root) => ['kimi-code-sessions', root, null, true])
   );
   add('qwen', ...simpleHostSourceRoots('qwen', home));
-  const grokHome = nonBlankEnvPath('GROK_HOME', path.join(home, '.grok'));
+  const grokHome = nonBlankEnvPath('GROK_HOME', path.join(home, '.grok'), env);
   add(
     'grok',
     ['grok-sessions', path.join(grokHome, 'sessions')],
@@ -337,8 +337,8 @@ function clientSourceRoots(clientsCsv, options = {}) {
   const copilotWorkspaceRoots = [
     path.join(home, 'Library', 'Application Support', 'Code', 'User', 'workspaceStorage'),
     path.join(home, '.config', 'Code', 'User', 'workspaceStorage'),
-    ...(process.platform === 'win32'
-      ? [path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Code', 'User', 'workspaceStorage')]
+    ...(platform === 'win32' && env.APPDATA
+      ? [path.join(env.APPDATA, 'Code', 'User', 'workspaceStorage')]
       : []),
     path.join(home, 'AppData', 'Roaming', 'Code', 'User', 'workspaceStorage')
   ];
@@ -357,7 +357,7 @@ function clientSourceRoots(clientsCsv, options = {}) {
   // the exact file is the source. watchAttributionRootsForClients() keeps that
   // parent from becoming a copilot attribution prefix — it is an arbitrary
   // user-chosen directory and can be $HOME.
-  const exporter = copilotExporterWatch(home);
+  const exporter = copilotExporterWatch(home, env);
   if (exporter) copilotRoots.push(['copilot-otel-exporter', exporter.dir, exporter.file]);
   add('copilot', ...copilotRoots);
   // Pi and Oh My Pi are two products with two fixed roots. Oh My Pi reads
@@ -375,7 +375,7 @@ function clientSourceRoots(clientsCsv, options = {}) {
     'zed',
     ['zed-threads', path.join(xdgHome, 'zed', 'threads')],
     ['zed-threads', path.join(home, 'Library', 'Application Support', 'Zed', 'threads')],
-    ['zed-threads', path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'Zed', 'threads')]
+    ['zed-threads', path.join(env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'Zed', 'threads')]
   );
   // Kilo joins the CLI's XDG database with every extension task root the
   // scanner reads. Native macOS/Windows roots are home-relative on all hosts;
@@ -431,9 +431,9 @@ function clientSourceRoots(clientsCsv, options = {}) {
   // absent, which is the usual case for the Windows-shaped one.
   const codebuddyExtLogRoots = [
     path.join(home, 'AppData', 'Local', 'CodeBuddyExtension', 'Logs'),
-    process.platform === 'win32'
-      ? path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'CodeBuddyExtension', 'Logs')
-      : process.platform === 'darwin'
+    platform === 'win32'
+      ? path.join(env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'CodeBuddyExtension', 'Logs')
+      : platform === 'darwin'
         ? path.join(home, 'Library', 'Application Support', 'CodeBuddyExtension', 'Logs')
         : path.join(xdgHome, 'CodeBuddyExtension', 'Logs')
   ];
@@ -481,17 +481,17 @@ function clientSourceRoots(clientsCsv, options = {}) {
   add(
     'mcode',
     ...mcodeSessionDirs({ env, homeDir: tokscaleHome }).map((dir, index) => [MCODE_SOURCE_CHECK_ID, dir, null, index > 0]),
-    ...tokscaleHeadlessRoots(home).map(({ dir, optional }) => [MCODE_SOURCE_CHECK_ID, path.join(dir, 'mcode'), null, optional])
+    ...tokscaleHeadlessRoots(home, env).map(({ dir, optional }) => [MCODE_SOURCE_CHECK_ID, path.join(dir, 'mcode'), null, optional])
   );
   add('reasonix', [
     REASONIX_SOURCE_CHECK_ID,
-    resolveReasonixStatsDir({ env: process.env, homeDir: home, platform: process.platform, cwdDir: process.cwd() })
+    resolveReasonixStatsDir({ env, homeDir: home, platform, cwdDir: options.cwdDir || process.cwd() })
   ]);
   // DeepSeek Harness (DSH) — zstd JSONL session transcripts at
   // `<dshHome>/sessions/` (default `~/.dsh`, overridable via `DSH_HOME`).
   add('dsh', [
     DSH_SOURCE_CHECK_ID,
-    resolveDshSessionsDir({ env: process.env, homeDir: home, platform: process.platform })
+    resolveDshSessionsDir({ env, homeDir: home, platform })
   ]);
   // Kiro (AWS): tokscale reads home-relative roots — the sessions tree used by
   // both CLI and IDE, the Kiro IDE globalStorage root (native macOS / Linux /
@@ -522,7 +522,7 @@ function clientSourceRoots(clientsCsv, options = {}) {
     ['kiro-ide-globalstorage', path.join(home, 'Library', 'Application Support', 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent')],
     ['kiro-ide-globalstorage', path.join(home, '.config', 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent')],
     ['kiro-ide-globalstorage', path.join(home, '.config', 'kiro', 'User', 'globalStorage', 'kiro.kiroagent')],
-    ['kiro-ide-globalstorage', path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent')],
+    ['kiro-ide-globalstorage', path.join(env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent')],
     ['kiro-cli-data', path.join(home, '.local', 'share', 'kiro-cli')],
     ['kiro-cli-data', path.join(home, 'Library', 'Application Support', 'kiro-cli')]
   );
@@ -530,9 +530,9 @@ function clientSourceRoots(clientsCsv, options = {}) {
     'cline',
     ['cline-tasks', path.join(home, '.config', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'tasks')],
     ['cline-tasks', path.join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'tasks')],
-    ['cline-tasks', path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'tasks')],
+    ['cline-tasks', path.join(env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'tasks')],
     ['cline-tasks', path.join(home, '.vscode-server', 'data', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'tasks')],
-    ['cline-cli-sessions', clineCliSessionRoot(home)]
+    ['cline-cli-sessions', clineCliSessionRoot(home, env)]
   );
   // Cherry Studio (Electron desktop) writes standard Claude Code transcripts
   // under its per-user app-data directory: %APPDATA%\CherryStudio\.claude\

@@ -13,6 +13,7 @@ const tls = require('node:tls');
 const { createHub } = require('../../src/hub/server');
 const { importManagedTlsMaterials } = require('../../src/hub/tls');
 const { createHubClientFetch } = require('../../src/shared/hubClientFetch');
+const { OPENSSL_BIN } = require('../helpers/opensslBin');
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'tm-hub-tls-test-'));
@@ -21,7 +22,7 @@ function makeTempDir() {
 function generateTlsFixtures(dir) {
   const caKey = path.join(dir, 'ca.key.pem');
   const caCert = path.join(dir, 'ca.cert.pem');
-  execFileSync('openssl', [
+  execFileSync(OPENSSL_BIN, [
     'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
     '-nodes', '-keyout', caKey, '-out', caCert,
     '-days', '365', '-subj', '/CN=Hub Test CA',
@@ -34,11 +35,11 @@ function generateTlsFixtures(dir) {
     const certPath = path.join(dir, `${name}.cert.pem`);
     const extPath = path.join(dir, `${name}.ext`);
     fs.writeFileSync(extPath, `basicConstraints=critical,CA:FALSE\nsubjectAltName=${sanLine}\n`);
-    execFileSync('openssl', [
+    execFileSync(OPENSSL_BIN, [
       'req', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
       '-nodes', '-keyout', keyPath, '-out', csrPath, '-subj', `/CN=${name}`
     ]);
-    execFileSync('openssl', [
+    execFileSync(OPENSSL_BIN, [
       'x509', '-req', '-in', csrPath, '-CA', caCert, '-CAkey', caKey,
       '-CAcreateserial', '-out', certPath, '-days', '90', '-extfile', extPath
     ]);
@@ -50,7 +51,7 @@ function generateTlsFixtures(dir) {
   const leaf2 = issueLeaf('leaf2', 'DNS:localhost,DNS:rotated.local,IP:127.0.0.1');
 
   const pfxPath = path.join(dir, 'server.p12');
-  execFileSync('openssl', [
+  execFileSync(OPENSSL_BIN, [
     'pkcs12', '-export', '-inkey', leaf1.keyPath, '-in', leaf1.certPath, '-certfile', caCert,
     '-passout', 'pass:pfx-secret-123', '-out', pfxPath
   ]);

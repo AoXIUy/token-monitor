@@ -23,6 +23,7 @@ const {
   validatePemBundle,
   validatePkcs12Bundle
 } = require('../../src/shared/tlsCert');
+const { OPENSSL_BIN } = require('../helpers/opensslBin');
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'tm-tlscert-test-'));
@@ -31,7 +32,7 @@ function makeTempDir() {
 function generateCertMaterial(dir) {
   const caKey = path.join(dir, 'ca.key.pem');
   const caCert = path.join(dir, 'ca.cert.pem');
-  execFileSync('openssl', [
+  execFileSync(OPENSSL_BIN, [
     'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
     '-nodes', '-keyout', caKey, '-out', caCert,
     '-days', '365', '-subj', '/CN=Token Monitor Test Root CA',
@@ -46,30 +47,30 @@ function generateCertMaterial(dir) {
     'basicConstraints=critical,CA:FALSE',
     'subjectAltName=DNS:hub.example.test,DNS:*.wild.test,IP:127.0.0.1'
   ].join('\n'));
-  execFileSync('openssl', [
+  execFileSync(OPENSSL_BIN, [
     'req', '-newkey', 'rsa:2048', '-nodes',
     '-keyout', leafKey, '-out', leafCsr,
     '-subj', '/CN=hub.example.test'
   ]);
-  execFileSync('openssl', [
+  execFileSync(OPENSSL_BIN, [
     'x509', '-req', '-in', leafCsr, '-CA', caCert, '-CAkey', caKey,
     '-CAcreateserial', '-out', leafCert, '-days', '60', '-extfile', extFile
   ]);
 
   const encKey = path.join(dir, 'leaf.enc.key.pem');
-  execFileSync('openssl', [
+  execFileSync(OPENSSL_BIN, [
     'rsa', '-in', leafKey, '-aes256', '-passout', 'pass:s3cret-pass', '-out', encKey
   ]);
 
   const pfxFile = path.join(dir, 'bundle.p12');
-  execFileSync('openssl', [
+  execFileSync(OPENSSL_BIN, [
     'pkcs12', '-export', '-inkey', leafKey, '-in', leafCert, '-certfile', caCert,
     '-passout', 'pass:p12-pass', '-out', pfxFile
   ]);
 
   const selfLeafKey = path.join(dir, 'self.key.pem');
   const selfLeafCert = path.join(dir, 'self.cert.pem');
-  execFileSync('openssl', [
+  execFileSync(OPENSSL_BIN, [
     'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
     '-nodes', '-keyout', selfLeafKey, '-out', selfLeafCert,
     '-days', '60', '-subj', '/CN=127.0.0.1',
@@ -79,14 +80,14 @@ function generateCertMaterial(dir) {
 
   const weakKey = path.join(dir, 'weak.key.pem');
   const weakCert = path.join(dir, 'weak.cert.pem');
-  execFileSync('openssl', [
+  execFileSync(OPENSSL_BIN, [
     'req', '-x509', '-newkey', 'rsa:1024', '-nodes',
     '-keyout', weakKey, '-out', weakCert,
     '-days', '30', '-subj', '/CN=weak.test'
   ]);
 
   const certDer = path.join(dir, 'ca.cert.der');
-  execFileSync('openssl', ['x509', '-in', caCert, '-outform', 'DER', '-out', certDer]);
+  execFileSync(OPENSSL_BIN, ['x509', '-in', caCert, '-outform', 'DER', '-out', certDer]);
 
   fs.chmodSync(leafKey, 0o600);
   fs.chmodSync(encKey, 0o600);
@@ -278,7 +279,17 @@ test('validateClientCaCertBuffer/File accepts PEM & DER, enforces size/block cap
 
     // Symlink rejected when noFollow: true
     const symlinkPath = path.join(dir, 'ca-link.pem');
-    fs.symlinkSync(m.caCert, symlinkPath);
+    try {
+      fs.symlinkSync(m.caCert, symlinkPath, 'file');
+    } catch (err) {
+      if (process.platform === 'win32' && (err.code === 'EPERM' || err.code === 'ENOSYS')) {
+        const targetDir = path.join(dir, 'ca-link-target');
+        fs.mkdirSync(targetDir, { recursive: true });
+        fs.symlinkSync(targetDir, symlinkPath, 'junction');
+      } else {
+        throw err;
+      }
+    }
     assert.throws(
       () => validateClientCaCertFile(symlinkPath),
       (err) => err.code === TLS_ERROR_CODES.FILE_NOT_REGULAR

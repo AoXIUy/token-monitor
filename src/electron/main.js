@@ -8515,6 +8515,14 @@ function ensureAntigravityManagerService() {
       return null;
     },
     isLocalAntigravityBusy: () => hasRunningLocalAntigravitySession(lastCollectedDevice),
+    isLocalAntigravityActivelyGenerating: () => {
+      try {
+        const taskResume = require('./antigravityManager/taskResume');
+        return taskResume.hasActivelyGeneratingTurn();
+      } catch (_) {
+        return false;
+      }
+    },
     getLatestLocalLimits: () => settingsLocalLimits?.limits || lastCollectedDevice?.limits || null,
     probeLocalLimits: (opts) => probeLocalAntigravityLimitsForManager(opts),
     onAutoSwitchCompleted: (result) => {

@@ -52,7 +52,19 @@ test('store fails closed without overwriting unreadable or symlinked tokens.enc 
   fs.mkdirSync(linkBase, { recursive: true });
   const targetFile = path.join(dir, 'target-secret.txt');
   fs.writeFileSync(targetFile, 'do-not-overwrite', 'utf8');
-  fs.symlinkSync(targetFile, path.join(linkBase, 'tokens.enc'));
+  const tokensLinkPath = path.join(linkBase, 'tokens.enc');
+  try {
+    fs.symlinkSync(targetFile, tokensLinkPath, 'file');
+  } catch (err) {
+    if (process.platform === 'win32' && (err.code === 'EPERM' || err.code === 'ENOSYS')) {
+      const targetDir = path.join(dir, 'target-secret-dir');
+      fs.mkdirSync(targetDir, { recursive: true });
+      fs.writeFileSync(path.join(targetDir, 'nested.txt'), 'do-not-overwrite', 'utf8');
+      fs.symlinkSync(targetDir, tokensLinkPath, 'junction');
+    } else {
+      throw err;
+    }
+  }
   const symlinkStore = createAntigravityManagerStore({
     baseDir: linkBase,
     logger: { warn: () => {}, error: () => {} }

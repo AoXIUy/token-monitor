@@ -541,8 +541,11 @@ async function switchAccount({ account, tokenData, targetClient = 'auto', forceR
 
   let hotSwitched = false;
   let launched = false;
+  const stdinBridgeLs = typeof pm.hasStdinBridgeLanguageServer === 'function'
+    ? Boolean(pm.hasStdinBridgeLanguageServer(effectiveTarget, snapshotDeps))
+    : false;
 
-  if (running && !forceRestart && !deps.forceRestart) {
+  if (running && !forceRestart && !deps.forceRestart && !stdinBridgeLs) {
     try {
       // Pre-write credentials once before killing language_server so supervisor respawns with new account
       await applyAccountCredentialsAsync(activeAccount, freshToken, { isIde, effectiveTarget, activeExePath, deps: credDeps });

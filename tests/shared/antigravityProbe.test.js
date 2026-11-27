@@ -1472,3 +1472,59 @@ test('win32 probe sets UTF-8 PowerShell output, unwraps quoted flags, and keeps 
   assert.equal(result.accountEmail, 'win-user@example.com');
   assert.ok(identityTimeoutObserved > 1000, `expected win32/desktopPid GetUserStatus budget > 1000ms, got ${identityTimeoutObserved}`);
 });
+
+test('win32 native iphlpapi GetExtendedTcpTable decodes listener and established loopback tables without spawning PowerShell', async () => {
+  // Build MIB_TCPTABLE_OWNER_PID (AF_INET=2): 4-byte count + 24-byte rows
+  const buildIpv4Table = (rows) => {
+    const buf = Buffer.alloc(4 + rows.length * 24);
+    buf.writeUInt32LE(rows.length, 0);
+    rows.forEach((r, idx) => {
+      const off = 4 + idx * 24;
+      buf.writeUInt32LE(r.state, off);
+      buf.writeUInt32BE(r.localAddr, off + 4);
+      buf.writeUInt16BE(r.localPort, off + 8);
+      buf.writeUInt32BE(r.remoteAddr || 0, off + 12);
+      buf.writeUInt16BE(r.remotePort || 0, off + 16);
+      buf.writeUInt32LE(r.pid, off + 20);
+    });
+    return buf;
+  };
+
+  let resizedOnce = false;
+  const mockTcpApi = {
+    GetExtendedTcpTable(outBuf, sizeRef, _order, af, tableClass) {
+      if (af !== 2) {
+        sizeRef[0] = 4;
+        outBuf.writeUInt32LE(0, 0);
+        return 0;
+      }
+      const data = tableClass === 3
+        ? buildIpv4Table([
+            { state: 2, localAddr: 0x7f000001, localPort: 49152, pid: 7777 },
+            { state: 2, localAddr: 0x00000000, localPort: 49153, pid: 7777 },
+            { state: 2, localAddr: 0x7f000001, localPort: 50000, pid: 9999 }
+          ])
+        : buildIpv4Table([
+            { state: 5, localAddr: 0x7f000001, localPort: 49152, remoteAddr: 0x7f000001, remotePort: 61000, pid: 7777 }
+          ]);
+      if (!resizedOnce) {
+        resizedOnce = true;
+        sizeRef[0] = data.length;
+        return 122; // ERROR_INSUFFICIENT_BUFFER
+      }
+      data.copy(outBuf, 0);
+      sizeRef[0] = data.length;
+      return 0;
+    }
+  };
+
+  const allPorts = await probe.listeningPorts(7777, { platform: 'win32', win32TcpApi: mockTcpApi });
+  assert.deepEqual(allPorts, [49152, 49153]);
+
+  const loopbackPorts = await probe.listeningPorts(7777, {
+    platform: 'win32',
+    ipv4LoopbackOnly: true,
+    win32TcpApi: mockTcpApi
+  });
+  assert.deepEqual(loopbackPorts, [49152]);
+});

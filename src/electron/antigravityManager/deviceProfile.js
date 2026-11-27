@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const stateDb = require('./stateDb');
+const { renameAtomicAsync, renameAtomicSync } = require('./winFs');
 
 /**
  * Generate a fresh VS Code / Antigravity device fingerprint profile matching device.rs.
@@ -100,7 +101,7 @@ function writeDeviceProfile(storagePath, profile, deps = {}) {
   const tempPath = `${storagePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`;
   try {
     fs.writeFileSync(tempPath, `${JSON.stringify(json, null, 2)}\n`, 'utf8');
-    fs.renameSync(tempPath, storagePath);
+    renameAtomicSync(tempPath, storagePath);
   } catch (error) {
     try { fs.unlinkSync(tempPath); } catch (_) {}
     throw error;
@@ -179,7 +180,7 @@ async function writeDeviceProfileAsync(storagePath, profile, deps = {}) {
   const tempPath = `${storagePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`;
   try {
     await fs.promises.writeFile(tempPath, `${JSON.stringify(json, null, 2)}\n`, 'utf8');
-    await fs.promises.rename(tempPath, storagePath);
+    await renameAtomicAsync(tempPath, storagePath);
   } catch (error) {
     try { await fs.promises.unlink(tempPath); } catch (_) {}
     throw error;

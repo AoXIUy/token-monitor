@@ -694,3 +694,161 @@ test('Windows keyring CredReadW decodes UTF-8 and UTF-16LE blobs via koffi.decod
   assert.equal(emptyCase.viewCalled, 0);
   assert.equal(emptyCase.freedPtr, emptyCase.rawStruct);
 });
+
+test('Windows app.asar version parser, stdin-bridge desktop restart, child-worker filter, and atomic rename retry work end-to-end', async (t) => {
+  const winFs = require('../src/electron/antigravityManager/winFs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-win-asar-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  // 1. Build a Chromium Pickle app.asar with NO unpacked resources/app directory
+  const resourcesDir = path.join(dir, 'Programs', 'antigravity', 'resources');
+  fs.mkdirSync(resourcesDir, { recursive: true });
+  const exePath = path.join(dir, 'Programs', 'antigravity', 'Antigravity.exe');
+  fs.writeFileSync(exePath, '');
+
+  const pkgBytes = Buffer.from(JSON.stringify({ name: 'antigravity', productName: 'Antigravity', version: '2.36.0' }), 'utf8');
+  const headerJsonBytes = Buffer.from(JSON.stringify({
+    files: {
+      'package.json': { size: pkgBytes.length, offset: '0' }
+    }
+  }), 'utf8');
+  const alignedJsonLen = Math.ceil(headerJsonBytes.length / 4) * 4;
+  const headerPayloadSize = 4 + alignedJsonLen;
+  const headerTotalSize = 4 + headerPayloadSize;
+  const preamble = Buffer.alloc(16 + alignedJsonLen);
+  preamble.writeUInt32LE(4, 0);
+  preamble.writeUInt32LE(headerTotalSize, 4);
+  preamble.writeUInt32LE(headerPayloadSize, 8);
+  preamble.writeUInt32LE(headerJsonBytes.length, 12);
+  headerJsonBytes.copy(preamble, 16);
+  fs.writeFileSync(path.join(resourcesDir, 'app.asar'), Buffer.concat([preamble, pkgBytes]));
+
+  assert.equal(processManager.detectAntigravityVersion(exePath), '2.36.0');
+  assert.equal(await processManager.detectAntigravityVersionAsync(exePath), '2.36.0');
+
+  // 2. Filter Electron --ms-enable-electron-run-as-node / app.asar workers and prefer root GUI PID over child PID
+  const mockWinProcs = [
+    {
+      pid: 3002,
+      ppid: 3000,
+      name: 'Antigravity.exe',
+      exePath,
+      argv0: exePath,
+      args: `"${exePath}" --ms-enable-electron-run-as-node "${resourcesDir}\\app.asar\\out\\bootstrap-fork.js"`
+    },
+    {
+      pid: 3003,
+      ppid: 3000,
+      name: 'Antigravity.exe',
+      exePath,
+      argv0: exePath,
+      args: `"${exePath}" -- inspect-child`
+    },
+    {
+      pid: 3000,
+      ppid: 900,
+      name: 'Antigravity.exe',
+      exePath,
+      argv0: exePath,
+      args: `"${exePath}" --reuse-window`
+    },
+    {
+      pid: 3010,
+      ppid: 3000,
+      name: 'language_server.exe',
+      exePath: path.join(resourcesDir, 'bin', 'language_server.exe'),
+      argv0: 'language_server.exe',
+      args: `"${path.join(resourcesDir, 'bin', 'language_server.exe')}" --read_host_bridge_token_from_stdin --app_data_dir antigravity`
+    }
+  ];
+  assert.equal(processManager.isHelperProcess(mockWinProcs[0].name, mockWinProcs[0].args, mockWinProcs[0].exePath), true);
+  const mainRunning = processManager.getMainRunningInstances('classic', mockWinProcs);
+  assert.equal(mainRunning[0].pid, 3000, 'root GUI process precedes child Antigravity.exe');
+  assert.deepEqual(processManager.getArgsFromRunningProcess('classic', { listProcesses: () => mockWinProcs }), ['--reuse-window']);
+  assert.equal(processManager.hasStdinBridgeLanguageServer('classic', { listProcesses: () => mockWinProcs }), true);
+
+  // 3. When language_server uses --read_host_bridge_token_from_stdin, switchAccount skips doomed hot-switch and restarts cleanly
+  const store = createAntigravityManagerStore({ baseDir: path.join(dir, 'store') });
+  const saved = store.upsertAccount(
+    { email: 'win236@example.com', subscriptionTier: 'PRO' },
+    { accessToken: 'ya29.236', refreshToken: '1//236', expiryTimestamp: Math.floor(Date.now() / 1000) + 3600 }
+  );
+  let hotKillCalled = 0;
+  let closedCount = 0;
+  let startedCount = 0;
+  let keyringWrites = 0;
+  const sw = await switcher.switchAccount({
+    account: saved,
+    tokenData: store.getAccountToken(saved.id),
+    targetClient: 'auto',
+    store,
+    deps: {
+      oauth: { ensureFreshToken: async (tok) => tok },
+      stateDb: {
+        getDbPath: () => path.join(dir, 'Roaming', 'Antigravity', 'User', 'globalStorage', 'state.vscdb'),
+        injectTokenToDbAsync: async () => {}
+      },
+      deviceProfile: {
+        getStoragePath: () => path.join(dir, 'Roaming', 'Antigravity', 'User', 'globalStorage', 'storage.json'),
+        readDeviceProfileAsync: async () => null,
+        writeDeviceProfileAsync: async () => {},
+        generateDeviceProfile: () => ({ machineId: 'm', macMachineId: 'mm', devDeviceId: 'd', sqmId: '{S}' })
+      },
+      keyring: { writeToSystemKeyringAsync: async () => { keyringWrites += 1; } },
+      fileCredentials: { writeFileCredentialsAsync: async () => {} },
+      fs: { existsSync: () => true },
+      processManager: {
+        listProcessesAsync: async () => mockWinProcs,
+        isAntigravityRunning: (target) => target !== 'ide',
+        getAntigravityExecutablePathAsync: async () => exePath,
+        detectAntigravityVersionAsync: processManager.detectAntigravityVersionAsync,
+        compareSemver: processManager.compareSemver,
+        getArgsFromRunningProcess: (target, d) => processManager.getArgsFromRunningProcess(target, d),
+        getUserDataDirFromProcess: () => null,
+        hasStdinBridgeLanguageServer: (target, d) => processManager.hasStdinBridgeLanguageServer(target, d),
+        killLanguageServerAsync: async () => { hotKillCalled += 1; return 1; },
+        closeAntigravity: async () => { closedCount += 1; },
+        startAntigravity: () => { startedCount += 1; }
+      }
+    }
+  });
+  assert.equal(sw.ok, true);
+  assert.equal(sw.mode, 'restart');
+  assert.equal(hotKillCalled, 0, 'skipped doomed hot-switch on stdin-bridge desktop server');
+  assert.equal(closedCount, 1);
+  assert.equal(startedCount, 1);
+  assert.equal(keyringWrites, 1, 'detected 2.36.0 from app.asar and wrote Windows keyring');
+
+  // 4. Atomic rename retries transient Windows EPERM / EBUSY before succeeding
+  let syncAttempts = 0;
+  winFs.renameAtomicSync('a.tmp', 'a.json', {
+    platform: 'win32',
+    sleepSync: () => {},
+    fs: {
+      renameSync: () => {
+        syncAttempts += 1;
+        if (syncAttempts < 3) {
+          const err = new Error('locked');
+          err.code = syncAttempts === 1 ? 'EPERM' : 'EBUSY';
+          throw err;
+        }
+      }
+    }
+  });
+  assert.equal(syncAttempts, 3);
+
+  let asyncAttempts = 0;
+  await winFs.renameAtomicAsync('b.tmp', 'b.json', {
+    platform: 'win32',
+    sleep: async () => {},
+    rename: async () => {
+      asyncAttempts += 1;
+      if (asyncAttempts < 2) {
+        const err = new Error('locked');
+        err.code = 'EACCES';
+        throw err;
+      }
+    }
+  });
+  assert.equal(asyncAttempts, 2);
+});

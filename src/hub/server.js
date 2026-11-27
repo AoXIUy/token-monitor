@@ -332,11 +332,59 @@ function parseOptionalBoolParam(raw, fallback) {
   throw makeQueryParamError(`Invalid boolean query parameter value: ${raw}`);
 }
 
+const MAX_POST_413_DRAIN_BYTES = 4 * 1024 * 1024;
+const POST_413_DRAIN_TIMEOUT_MS = 250;
+
 function sendPayloadTooLarge(req, res, payload, extraHeaders = {}) {
   res.shouldKeepAlive = false;
+  let drainedBytes = 0;
+  let reqEnded = Boolean(req?.complete || req?.readableEnded);
+  let finishFired = false;
+  let drainTimer = null;
+  const finalizeDestroy = () => {
+    if (drainTimer) {
+      clearTimeout(drainTimer);
+      drainTimer = null;
+    }
+    req?.removeListener?.('data', onDrainChunk);
+    req?.removeListener?.('end', onReqEnd);
+    try { req?.destroy?.(); } catch (_) {}
+  };
+  const onDrainChunk = (chunk) => {
+    drainedBytes += chunk?.length || 0;
+    if (drainedBytes > MAX_POST_413_DRAIN_BYTES && finishFired) {
+      finalizeDestroy();
+    }
+  };
+  const onReqEnd = () => {
+    reqEnded = true;
+    if (finishFired) {
+      if (drainTimer) {
+        clearTimeout(drainTimer);
+        drainTimer = null;
+      }
+      req?.removeListener?.('data', onDrainChunk);
+    }
+  };
+  if (!reqEnded && typeof req?.on === 'function') {
+    req.on('data', onDrainChunk);
+    req.once('end', onReqEnd);
+    try { req.resume?.(); } catch (_) {}
+  }
   rawSendJson(res, 413, payload, { ...extraHeaders, connection: 'close' });
   res.once?.('finish', () => {
-    try { req.destroy?.(); } catch (_) {}
+    finishFired = true;
+    if (reqEnded || req?.complete || req?.readableEnded) {
+      if (drainTimer) clearTimeout(drainTimer);
+      req?.removeListener?.('data', onDrainChunk);
+      return;
+    }
+    if (drainedBytes > MAX_POST_413_DRAIN_BYTES) {
+      finalizeDestroy();
+      return;
+    }
+    drainTimer = setTimeout(finalizeDestroy, POST_413_DRAIN_TIMEOUT_MS);
+    drainTimer.unref?.();
   });
 }
 
