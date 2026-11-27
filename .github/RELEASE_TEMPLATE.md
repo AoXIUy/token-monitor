@@ -10,10 +10,10 @@
 <!-- app-update-notes:en:end -->
 ## Download
 
-- **Windows Installer** — [Token-Monitor-Setup-0.106.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-Setup-0.106.2.exe) (recommended)
-- **Windows Portable** — [Token-Monitor-0.106.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-0.106.2.exe) (no install required)
-- **Linux amd64** — [Token-Monitor-0.106.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-0.106.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.106.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-0.106.2-x86_64.AppImage)
+- **Windows Installer** — [Token-Monitor-Setup-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-Setup-0.106.3.exe) (recommended)
+- **Windows Portable** — [Token-Monitor-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3.exe) (no install required)
+- **Linux amd64** — [Token-Monitor-0.106.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.106.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-x86_64.AppImage)
 
 <details>
 <summary><strong>First launch and other notes</strong></summary>
@@ -22,7 +22,7 @@
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.106.2-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.106.2-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.106.3-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.106.3-x86_64.AppImage` then run it.
 
 ### Other notes
 
@@ -49,10 +49,10 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 ## 下载
 
-- **Windows 安装版** — [Token-Monitor-Setup-0.106.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-Setup-0.106.2.exe)（推荐）
-- **Windows 便携版** — [Token-Monitor-0.106.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-0.106.2.exe)（免安装）
-- **Linux amd64** — [Token-Monitor-0.106.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-0.106.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.106.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-0.106.2-x86_64.AppImage)
+- **Windows 安装版** — [Token-Monitor-Setup-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-Setup-0.106.3.exe)（推荐）
+- **Windows 便携版** — [Token-Monitor-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3.exe)（免安装）
+- **Linux amd64** — [Token-Monitor-0.106.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.106.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-x86_64.AppImage)
 
 <details>
 <summary><strong>首次启动与其他说明</strong></summary>
@@ -61,7 +61,7 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.106.2-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.106.2-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.106.3-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.106.3-x86_64.AppImage` then run it.
 
 ### 其他说明
 
@@ -76,7 +76,7 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ---
 
 <details>
-<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.106.1...v0.106.2">v0.106.1...v0.106.2</a></summary>
+<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.106.1...v0.106.3">v0.106.1...v0.106.3</a></summary>
 
 <!-- github-generated-release-notes -->
 
@@ -101,10 +101,10 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 ## 下載
 
-- **Windows 安裝版** — [Token-Monitor-Setup-0.106.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-Setup-0.106.2.exe)（推薦）
-- **Windows 便攜版** — [Token-Monitor-0.106.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-0.106.2.exe)（免安裝）
-- **Linux amd64** — [Token-Monitor-0.106.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-0.106.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.106.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-0.106.2-x86_64.AppImage)
+- **Windows 安裝版** — [Token-Monitor-Setup-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-Setup-0.106.3.exe)（推薦）
+- **Windows 便攜版** — [Token-Monitor-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3.exe)（免安裝）
+- **Linux amd64** — [Token-Monitor-0.106.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.106.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-x86_64.AppImage)
 
 </details>
 
@@ -124,10 +124,10 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 ## 다운로드
 
-- **Windows 설치 버전** — [Token-Monitor-Setup-0.106.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-Setup-0.106.2.exe) (권장)
-- **Windows 포터블 버전** — [Token-Monitor-0.106.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-0.106.2.exe) (설치 필요 없음)
-- **Linux amd64** — [Token-Monitor-0.106.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-0.106.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.106.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-0.106.2-x86_64.AppImage)
+- **Windows 설치 버전** — [Token-Monitor-Setup-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-Setup-0.106.3.exe) (권장)
+- **Windows 포터블 버전** — [Token-Monitor-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3.exe) (설치 필요 없음)
+- **Linux amd64** — [Token-Monitor-0.106.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.106.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-x86_64.AppImage)
 
 </details>
 
@@ -147,10 +147,10 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 ## ダウンロード
 
-- **Windows インストーラー** — [Token-Monitor-Setup-0.106.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-Setup-0.106.2.exe)（推奨）
-- **Windows ポータブル版** — [Token-Monitor-0.106.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-0.106.2.exe)（インストール不要）
-- **Linux amd64** — [Token-Monitor-0.106.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-0.106.2-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.106.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.2/Token-Monitor-0.106.2-x86_64.AppImage)
+- **Windows インストーラー** — [Token-Monitor-Setup-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-Setup-0.106.3.exe)（推奨）
+- **Windows ポータブル版** — [Token-Monitor-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3.exe)（インストール不要）
+- **Linux amd64** — [Token-Monitor-0.106.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.106.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-x86_64.AppImage)
 
 </details>
 
