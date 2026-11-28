@@ -88,6 +88,10 @@
               <span data-i18n="agManager.autoResumePrompt">Resume prompt</span>
               <input id="agmAutoResumePromptInput" type="text" maxlength="500" value="继续" data-i18n-placeholder="agManager.autoResumePromptPlaceholder" placeholder="Continue" />
             </label>
+            <div class="agm-history agm-toggle-divider">
+              <div class="agm-history-title" data-i18n="agManager.autoSwitchHistoryTitle">Recent auto-switches</div>
+              <ol id="agmAutoSwitchHistory" class="agm-history-list"></ol>
+            </div>
           </div>
         </div>
       </div>
@@ -151,23 +155,35 @@
         <input id="agmSearchInput" class="agm-search" type="search" autocomplete="off" spellcheck="false" data-i18n-placeholder="agManager.searchPlaceholder" placeholder="Search by email or name..." data-i18n-aria-label="agManager.aria.searchAccounts" aria-label="Search accounts" />
       </div>
       <div id="agmFilterChips" class="agm-filter-chips" role="group" data-i18n-aria-label="agManager.aria.filterAccounts" aria-label="Filter accounts">
-        <button class="agm-chip active" type="button" data-filter="all" aria-pressed="true" data-i18n="agManager.filter.all">All</button>
-        <button class="agm-chip" type="button" data-filter="ULTRA" aria-pressed="false">Ultra</button>
-        <button class="agm-chip" type="button" data-filter="PRO" aria-pressed="false">Pro</button>
-        <button class="agm-chip" type="button" data-filter="FREE" aria-pressed="false">Free</button>
-        <button class="agm-chip" type="button" data-filter="abnormal" aria-pressed="false" data-i18n="agManager.filter.abnormal">Abnormal</button>
+        <button class="agm-chip active" type="button" data-filter="all" aria-pressed="true"><span data-i18n="agManager.filter.all">All</span><span class="agm-chip-count" data-count-for="all"></span></button>
+        <button class="agm-chip" type="button" data-filter="ULTRA" aria-pressed="false"><span>Ultra</span><span class="agm-chip-count" data-count-for="ULTRA"></span></button>
+        <button class="agm-chip" type="button" data-filter="PRO" aria-pressed="false"><span>Pro</span><span class="agm-chip-count" data-count-for="PRO"></span></button>
+        <button class="agm-chip" type="button" data-filter="FREE" aria-pressed="false"><span>Free</span><span class="agm-chip-count" data-count-for="FREE"></span></button>
+        <button class="agm-chip" type="button" data-filter="abnormal" aria-pressed="false"><span data-i18n="agManager.filter.abnormal">Abnormal</span><span class="agm-chip-count" data-count-for="abnormal"></span></button>
       </div>
+      <label class="agm-sort-wrap">
+        <span class="agm-label" data-i18n="agManager.sortLabel">Sort</span>
+        <select id="agmSortSelect" class="agm-select" data-i18n-aria-label="agManager.aria.sortAccounts" aria-label="Sort accounts">
+          <option value="default" data-i18n="agManager.sort.default">Pool order</option>
+          <option value="quota" data-i18n="agManager.sort.quota">Most quota left</option>
+          <option value="tier" data-i18n="agManager.sort.tier">Plan tier</option>
+          <option value="email" data-i18n="agManager.sort.email">Email (A–Z)</option>
+          <option value="updated" data-i18n="agManager.sort.updated">Recently updated</option>
+        </select>
+      </label>
       <div class="agm-batch-bar">
         <label class="agm-select-all">
           <input id="agmSelectAllInput" type="checkbox" />
           <span data-i18n="agManager.selectAll">Select all</span>
         </label>
+        <span id="agmSelectedCount" class="agm-pill agm-pill-sm agm-pill-accent hidden" aria-live="polite"></span>
+        <button id="agmClearSelectionBtn" class="agm-btn agm-btn-sm hidden" type="button" data-i18n="agManager.clearSelection">Clear</button>
         <button id="agmBatchDeleteBtn" class="agm-btn agm-btn-sm agm-btn-danger hidden" type="button" data-i18n="agManager.deleteSelected">Delete selected</button>
       </div>
     </section>
 
     <div id="agmProgressBar" class="agm-progress-banner hidden" role="status" aria-live="polite"></div>
-    <div id="agmToast" class="agm-toast hidden" role="status" aria-live="polite"></div>
+    <div id="agmToast" class="agm-toast" popover="manual" role="status" aria-live="polite"></div>
 
     <main id="agmAccountList" class="agm-account-list"></main>
 
@@ -181,6 +197,7 @@
         <button id="agmTabBtnDb" class="agm-dialog-tab" type="button" role="tab" aria-selected="false" aria-controls="agmImportTabDb" tabindex="-1" data-import-tab="db" data-i18n="agManager.tab.db">Database / Data Dir</button>
         <button id="agmTabBtnOauth" class="agm-dialog-tab" type="button" role="tab" aria-selected="false" aria-controls="agmImportTabOauth" tabindex="-1" data-import-tab="oauth" data-i18n="agManager.tab.oauth">Google OAuth</button>
       </div>
+      <div id="agmImportStatus" class="agm-dialog-status hidden" role="status" aria-live="polite"></div>
 
       <div id="agmImportTabJson" class="agm-dialog-body" role="tabpanel" aria-labelledby="agmTabBtnJson">
         <p class="agm-hint" data-i18n="agManager.jsonHint">Import Antigravity-Manager exported JSON (antigravity_accounts_*.json) or paste refresh tokens (1//...).</p>

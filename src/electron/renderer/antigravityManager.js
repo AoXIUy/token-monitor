@@ -15,6 +15,7 @@ const state = {
   activeClients: null,
   search: '',
   filter: 'all',
+  sort: 'default',
   selectedIds: new Set(),
   expandedModels: new Set(),
   openMoreId: '',
@@ -22,6 +23,7 @@ const state = {
   batchDeleteConfirm: false,
   toastTimer: null,
   searchTimer: null,
+  liveTimer: 0,
   rafStateId: 0,
   pendingPushedState: null,
   stateRevision: 0,
@@ -77,13 +79,19 @@ const els = {
   restoreDeviceBtn: document.getElementById('agmRestoreDeviceBtn'),
   searchInput: document.getElementById('agmSearchInput'),
   filterChips: Array.from(document.querySelectorAll('#agmFilterChips .agm-chip')),
+  chipCounts: Array.from(document.querySelectorAll('[data-count-for]')),
+  sortSelect: document.getElementById('agmSortSelect'),
   selectAllInput: document.getElementById('agmSelectAllInput'),
+  selectedCount: document.getElementById('agmSelectedCount'),
+  clearSelectionBtn: document.getElementById('agmClearSelectionBtn'),
   batchDeleteBtn: document.getElementById('agmBatchDeleteBtn'),
   progressBar: document.getElementById('agmProgressBar'),
   toast: document.getElementById('agmToast'),
   accountList: document.getElementById('agmAccountList'),
+  autoSwitchHistory: document.getElementById('agmAutoSwitchHistory'),
   importDialog: document.getElementById('agmImportDialog'),
   closeImportDialog: document.getElementById('agmCloseImportDialog'),
+  importStatus: document.getElementById('agmImportStatus'),
   importTabs: Array.from(document.querySelectorAll('[data-import-tab]')),
   importTabJson: document.getElementById('agmImportTabJson'),
   importTabDb: document.getElementById('agmImportTabDb'),
@@ -104,6 +112,16 @@ const els = {
   closeDeviceDialog: document.getElementById('agmCloseDeviceDialog'),
   deviceBody: document.getElementById('agmDeviceBody')
 };
+
+const importButtons = [
+  els.pickJsonFileBtn,
+  els.submitPasteBtn,
+  els.importDefaultDirBtn,
+  els.pickDataDirBtn,
+  els.scanLocalBtn,
+  els.pickStateDbBtn,
+  els.pickV1DirBtn
+].filter(Boolean);
 
 function agmApi() {
   return window.tokenMonitor?.antigravityManager;
@@ -168,27 +186,78 @@ function applyAppearance(settings) {
   els.body.classList.toggle('flat', state.flat);
 }
 
-function showToast(text, isError = false) {
-  if (!els.toast) return;
-  els.toast.textContent = String(text || '');
-  els.toast.classList.toggle('is-error', Boolean(isError));
-  els.toast.classList.toggle('hidden', !text);
+function hideToast() {
   if (state.toastTimer) {
     clearTimeout(state.toastTimer);
     state.toastTimer = null;
   }
-  if (text) {
-    state.toastTimer = setTimeout(() => {
-      state.toastTimer = null;
-      els.toast.classList.add('hidden');
-    }, 4000);
+  if (!els.toast) return;
+  if (typeof els.toast.hidePopover === 'function') {
+    try {
+      if (els.toast.matches(':popover-open')) els.toast.hidePopover();
+    } catch (_) {}
+  } else {
+    els.toast.classList.add('hidden');
   }
+}
+
+function showToast(text, isError = false) {
+  if (!els.toast) return;
+  if (state.toastTimer) {
+    clearTimeout(state.toastTimer);
+    state.toastTimer = null;
+  }
+  const msg = String(text || '');
+  if (!msg) {
+    hideToast();
+    return;
+  }
+  els.toast.textContent = msg;
+  els.toast.classList.toggle('is-error', Boolean(isError));
+  els.toast.setAttribute('role', isError ? 'alert' : 'status');
+  if (typeof els.toast.showPopover === 'function') {
+    try {
+      if (els.toast.matches(':popover-open')) els.toast.hidePopover();
+      els.toast.showPopover();
+    } catch (_) {
+      els.toast.classList.remove('hidden');
+    }
+  } else {
+    els.toast.classList.remove('hidden');
+  }
+  state.toastTimer = setTimeout(() => {
+    state.toastTimer = null;
+    hideToast();
+  }, isError ? 8000 : 4000);
 }
 
 function hideProgressBar() {
   if (!els.progressBar) return;
   els.progressBar.classList.add('hidden');
   els.progressBar.textContent = '';
+}
+
+function showProgress(text, current, total) {
+  if (!els.progressBar) return;
+  const totalNum = Number(total);
+  const curNum = Number(current);
+  const pct = Number.isFinite(totalNum) && totalNum > 0 && Number.isFinite(curNum)
+    ? Math.max(0, Math.min(100, Math.round((curNum / totalNum) * 100)))
+    : 0;
+  const label = document.createElement('span');
+  label.className = 'agm-progress-text';
+  label.textContent = String(text || '');
+  const track = document.createElement('span');
+  track.className = 'agm-progress-track';
+  const fill = document.createElement('span');
+  fill.className = 'agm-progress-fill';
+  fill.style.width = `${pct}%`;
+  track.appendChild(fill);
+  els.progressBar.classList.remove('hidden');
+  els.progressBar.replaceChildren(label, track);
+  if (state.importBusy && els.importDialog?.open) {
+    setImportStatus(text);
+  }
 }
 
 async function copyEmailText(text) {
@@ -224,7 +293,7 @@ function isAbnormalAccount(acc) {
 function filteredAccounts() {
   const accounts = state.manager?.accounts || [];
   const q = state.search.trim().toLowerCase();
-  return accounts.filter((acc) => {
+  const filtered = accounts.filter((acc) => {
     if (q) {
       const email = String(acc.email || '').toLowerCase();
       const name = String(acc.name || '').toLowerCase();
@@ -233,6 +302,73 @@ function filteredAccounts() {
     if (state.filter === 'abnormal') return isAbnormalAccount(acc);
     if (state.filter !== 'all') return acc.subscriptionTier === state.filter;
     return true;
+  });
+  return sortAccounts(filtered);
+}
+
+function accountQuotaScore(acc) {
+  if (acc?.hasToken === false || isAbnormalAccount(acc)) return -2;
+  const groups = Array.isArray(acc?.quota?.groups) ? acc.quota.groups : [];
+  let bestGroupScore = -1;
+  for (const g of groups) {
+    const buckets = Array.isArray(g?.buckets) ? g.buckets : [];
+    let groupMin = Infinity;
+    let hasBucket = false;
+    for (const b of buckets) {
+      if (b?.disabled !== true && typeof b?.remainingFraction === 'number' && Number.isFinite(b.remainingFraction)) {
+        hasBucket = true;
+        if (b.remainingFraction < groupMin) groupMin = b.remainingFraction;
+      }
+    }
+    if (hasBucket) {
+      const clamped = Math.max(0, Math.min(1, groupMin));
+      if (clamped > bestGroupScore) bestGroupScore = clamped;
+    }
+  }
+  if (bestGroupScore >= 0) return bestGroupScore;
+
+  const models = Array.isArray(acc?.quota?.models) ? acc.quota.models : [];
+  let bestModelScore = -1;
+  for (const m of models) {
+    if (typeof m?.percentage === 'number' && Number.isFinite(m.percentage)) {
+      const frac = Math.max(0, Math.min(1, m.percentage / 100));
+      if (frac > bestModelScore) bestModelScore = frac;
+    }
+  }
+  return bestModelScore;
+}
+
+function accountUpdatedMs(acc) {
+  const raw = Number(acc?.quota?.lastUpdatedAt || acc?.lastUsedAt || 0);
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  return raw < 1e12 ? raw * 1000 : raw;
+}
+
+function sortAccounts(list) {
+  const mode = state.sort || 'default';
+  if (mode === 'default' || list.length <= 1) return list;
+  const tierRank = (tier) => (tier === 'ULTRA' ? 3 : (tier === 'PRO' ? 2 : (tier === 'FREE' ? 1 : 0)));
+  const compareEmail = (a, b) => String(a?.email || a?.id || '').localeCompare(String(b?.email || b?.id || ''));
+  return [...list].sort((a, b) => {
+    if (mode === 'quota') {
+      const diff = accountQuotaScore(b) - accountQuotaScore(a);
+      if (diff !== 0) return diff;
+      return compareEmail(a, b);
+    }
+    if (mode === 'tier') {
+      const diff = tierRank(b?.subscriptionTier) - tierRank(a?.subscriptionTier);
+      if (diff !== 0) return diff;
+      return compareEmail(a, b);
+    }
+    if (mode === 'email') {
+      return compareEmail(a, b);
+    }
+    if (mode === 'updated') {
+      const diff = accountUpdatedMs(b) - accountUpdatedMs(a);
+      if (diff !== 0) return diff;
+      return compareEmail(a, b);
+    }
+    return 0;
   });
 }
 
@@ -365,6 +501,30 @@ function formatCompactTimestamp(rawTs) {
   return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+function formatRelativeAge(rawTs) {
+  const num = Number(rawTs || 0);
+  if (!Number.isFinite(num) || num <= 0) return '';
+  const ms = num < 1e12 ? num * 1000 : num;
+  if (!Number.isFinite(ms)) return '';
+  const diffSec = Math.round((ms - Date.now()) / 1000);
+  const absSec = Math.abs(diffSec);
+  const locale = state.locale || 'en';
+  try {
+    if (!formatRelativeAge.cache) formatRelativeAge.cache = new Map();
+    let rtf = formatRelativeAge.cache.get(locale);
+    if (!rtf) {
+      rtf = new Intl.RelativeTimeFormat(locale, { numeric: 'auto', style: 'narrow' });
+      formatRelativeAge.cache.set(locale, rtf);
+    }
+    if (absSec < 60) return rtf.format(0, 'second');
+    if (absSec < 3600) return rtf.format(Math.trunc(diffSec / 60), 'minute');
+    if (absSec < 86400) return rtf.format(Math.trunc(diffSec / 3600), 'hour');
+    return rtf.format(Math.trunc(diffSec / 86400), 'day');
+  } catch (_) {
+    return formatCompactTimestamp(rawTs);
+  }
+}
+
 function inferCapabilityPills(acc) {
   const models = Array.isArray(acc?.quota?.models) ? acc.quota.models : [];
   const groups = Array.isArray(acc?.quota?.groups) ? acc.quota.groups : [];
@@ -450,52 +610,85 @@ function renderSummaryAndControls() {
   const cfg = mgr.config || {};
   const active = mgr.activeAccounts || {};
 
-  const counts = { total: accounts.length, ULTRA: 0, PRO: 0, FREE: 0, abnormal: 0 };
+  const counts = { total: accounts.length, ULTRA: 0, PRO: 0, FREE: 0, abnormal: 0, available: 0, lowQuota: 0 };
   let hasSwitchable = false;
   for (const a of accounts) {
     if (a.subscriptionTier === 'ULTRA') counts.ULTRA += 1;
     else if (a.subscriptionTier === 'PRO') counts.PRO += 1;
     else if (a.subscriptionTier === 'FREE') counts.FREE += 1;
-    if (isAbnormalAccount(a)) counts.abnormal += 1;
+    const abnormal = isAbnormalAccount(a);
+    if (abnormal) counts.abnormal += 1;
+    if (a.hasToken !== false && !abnormal) {
+      counts.available += 1;
+      const score = accountQuotaScore(a);
+      if (score >= 0 && score <= 0.15) counts.lowQuota += 1;
+    }
     if (a.hasToken && !a.disabled && !a.banned && !a.validationBlocked) hasSwitchable = true;
   }
 
   els.statsPills.replaceChildren(
     makePill(`${t('agManager.statTotal')}: ${counts.total}`),
-    makePill(`Ultra: ${counts.ULTRA}`, 'accent'),
-    makePill(`Pro: ${counts.PRO}`, 'ok'),
-    makePill(`Free: ${counts.FREE}`, 'muted'),
-    ...(counts.abnormal > 0 ? [makePill(`${t('agManager.filter.abnormal')}: ${counts.abnormal}`, 'warn')] : [])
+    makePill(`${t('agManager.statAvailable')}: ${counts.available}`, 'ok'),
+    ...(counts.lowQuota > 0 ? [makePill(`${t('agManager.statLowQuota')}: ${counts.lowQuota}`, 'danger')] : [])
   );
 
-  const metaParts = [];
+  const chipCountMap = {
+    all: counts.total,
+    ULTRA: counts.ULTRA,
+    PRO: counts.PRO,
+    FREE: counts.FREE,
+    abnormal: counts.abnormal
+  };
+  for (const node of els.chipCounts || []) {
+    const key = node.dataset.countFor;
+    const val = chipCountMap[key];
+    node.textContent = counts.total > 0 && typeof val === 'number' ? String(val) : '';
+  }
+  for (const chip of els.filterChips) {
+    if (chip.dataset.filter === 'abnormal') {
+      chip.classList.toggle('has-alert', counts.abnormal > 0);
+    }
+  }
+
+  const metaNodes = [];
+  const makeMetaItem = (text, tone = '') => {
+    const span = document.createElement('span');
+    span.className = `agm-meta-item${tone ? ` is-${tone}` : ''}`;
+    span.textContent = text;
+    return span;
+  };
   if (cfg.autoRefresh) {
-    metaParts.push(t('agManager.autoRefreshOn', { minutes: cfg.refreshIntervalMinutes || 10 }));
+    metaNodes.push(makeMetaItem(t('agManager.autoRefreshOn', { minutes: cfg.refreshIntervalMinutes || 10 }), 'on'));
   } else {
-    metaParts.push(t('agManager.autoRefreshOff'));
+    metaNodes.push(makeMetaItem(t('agManager.autoRefreshOff')));
   }
   const autoSwitchOn = cfg.autoSwitchEnabled === true;
   const selectionMode = cfg.selectionMode === 'weighted' ? 'weighted' : 'auto';
   if (autoSwitchOn) {
-    metaParts.push(selectionMode === 'weighted' ? t('agManager.autoSwitchMetaWeighted') : t('agManager.autoSwitchMetaAuto'));
+    metaNodes.push(makeMetaItem(selectionMode === 'weighted' ? t('agManager.autoSwitchMetaWeighted') : t('agManager.autoSwitchMetaAuto'), 'on'));
   }
   if (mgr.lastAutoSwitch?.ok && mgr.lastAutoSwitch?.toEmail) {
-    metaParts.push(t('agManager.lastAutoSwitchMeta', { email: mgr.lastAutoSwitch.toEmail }));
+    metaNodes.push(makeMetaItem(t('agManager.lastAutoSwitchMeta', { email: mgr.lastAutoSwitch.toEmail })));
+  } else if (mgr.lastAutoSwitch && mgr.lastAutoSwitch.ok === false && mgr.lastAutoSwitch.error) {
+    metaNodes.push(makeMetaItem(t('agManager.autoSwitchHistoryFailed', { error: mgr.lastAutoSwitch.error }), 'warn'));
   }
   if (mgr.lastRefreshAt > 0) {
-    metaParts.push(`${t('agManager.lastRefresh')}: ${new Date(mgr.lastRefreshAt * 1000).toLocaleTimeString()}`);
+    let timeStr;
+    try {
+      timeStr = new Date(mgr.lastRefreshAt * 1000).toLocaleTimeString(state.locale || undefined);
+    } catch (_) {
+      timeStr = new Date(mgr.lastRefreshAt * 1000).toLocaleTimeString();
+    }
+    metaNodes.push(makeMetaItem(`${t('agManager.lastRefresh')}: ${timeStr}`));
   }
-  const activeSummary = Object.entries(active)
-    .filter(([, id]) => Boolean(id))
-    .map(([slot, id]) => {
-      const found = accounts.find((a) => a.id === id);
-      return found ? `${formatSlotLabel(slot)}: ${found.email}` : '';
-    })
-    .filter(Boolean);
-  if (activeSummary.length > 0) {
-    metaParts.push(activeSummary.join(' · '));
+  for (const [slot, id] of Object.entries(active)) {
+    if (!id) continue;
+    const found = accounts.find((a) => a.id === id);
+    if (found) metaNodes.push(makeMetaItem(`${formatSlotLabel(slot)}: ${found.email}`));
   }
-  els.runtimeMeta.textContent = metaParts.join(' · ');
+  els.runtimeMeta.replaceChildren(...metaNodes);
+
+  renderAutoSwitchHistory(mgr.autoSwitchHistory);
 
   const latestAuto = mgr.lastAutoSwitch || null;
   const latestAutoAt = Number(latestAuto?.at || 0);
@@ -559,6 +752,15 @@ function renderSummaryAndControls() {
   els.switchBestBtn.disabled = Boolean(state.switchBestBusy || state.switchingId || mgr.isSwitching || mgr.isAutoSwitching || !hasSwitchable);
   els.switchBestBtn.textContent = switchingBest ? t('agManager.switching') : t('agManager.switchBest');
   els.exportBtn.disabled = accounts.length === 0;
+  els.exportBtn.textContent = selectedCount > 0
+    ? t('agManager.exportSelected', { count: selectedCount })
+    : t('agManager.exportJson');
+
+  if (els.selectedCount) {
+    els.selectedCount.textContent = selectedCount > 0 ? t('agManager.selectedCount', { count: selectedCount }) : '';
+    els.selectedCount.classList.toggle('hidden', selectedCount === 0);
+  }
+  els.clearSelectionBtn?.classList.toggle('hidden', selectedCount === 0);
 
   if (selectedCount === 0) state.batchDeleteConfirm = false;
   els.batchDeleteBtn.classList.toggle('hidden', selectedCount === 0);
@@ -566,6 +768,52 @@ function renderSummaryAndControls() {
   els.batchDeleteBtn.textContent = state.batchDeleteConfirm && selectedCount > 0
     ? t('agManager.confirmDeleteSelected', { count: selectedCount })
     : t('agManager.deleteSelectedCount', { count: selectedCount });
+}
+
+function renderAutoSwitchHistory(historyList) {
+  if (!els.autoSwitchHistory) return;
+  const entries = Array.isArray(historyList) ? historyList.slice(0, 5) : [];
+  if (entries.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'agm-history-empty';
+    empty.textContent = t('agManager.autoSwitchHistoryEmpty');
+    els.autoSwitchHistory.replaceChildren(empty);
+    return;
+  }
+  const nodes = entries.map((item) => {
+    const li = document.createElement('li');
+    li.className = `agm-history-item ${item?.ok ? 'is-ok' : 'is-failed'}`;
+
+    const main = document.createElement('div');
+    main.className = 'agm-history-main';
+    main.textContent = `${item?.fromEmail || '—'} → ${item?.toEmail || '—'}`;
+    li.appendChild(main);
+
+    const sub = document.createElement('div');
+    sub.className = 'agm-history-sub';
+    if (item?.at) {
+      const ageSpan = document.createElement('span');
+      ageSpan.dataset.ageTs = String(item.at);
+      ageSpan.textContent = formatRelativeAge(item.at) || formatCompactTimestamp(item.at);
+      sub.appendChild(ageSpan);
+    }
+    const tailParts = [];
+    if (item?.triggerLabel) tailParts.push(item.triggerLabel);
+    if (item?.target) tailParts.push(item.target);
+    const errMsg = item?.error || item?.resumeError || '';
+    if (!item?.ok && errMsg) {
+      tailParts.push(t('agManager.autoSwitchHistoryFailed', { error: errMsg }));
+    }
+    if (tailParts.length > 0) {
+      if (sub.childNodes.length > 0) sub.appendChild(document.createTextNode(' '));
+      const detail = document.createElement('span');
+      detail.textContent = tailParts.join(' ');
+      sub.appendChild(detail);
+    }
+    if (sub.childNodes.length > 0) li.appendChild(sub);
+    return li;
+  });
+  els.autoSwitchHistory.replaceChildren(...nodes);
 }
 
 function is5hBucket(b) {
@@ -641,20 +889,28 @@ function renderQuotaGridCell({
   periodLabel = '',
   title = '',
   resetText = '—',
+  resetIso = '',
   resetTone = '',
   pct = 0,
   disabled = false,
   superseded = false,
   stateTag = '',
   isFull = false,
-  ariaLabel = ''
+  ariaLabel = '',
+  ariaBase = ''
 }) {
   const clamped = Math.max(0, Math.min(100, Math.round(Number(pct || 0))));
   const toneCls = disabled ? 'is-disabled' : pctToneClass(clamped);
 
   const cell = document.createElement('div');
   cell.className = `agm-quota-cell${isFull ? ' is-full' : ''}${disabled ? ' is-disabled' : ''}${superseded ? ' is-superseded' : ''}`;
-  if (ariaLabel) cell.setAttribute('aria-label', ariaLabel);
+  if (resetIso) cell.dataset.resetIso = resetIso;
+  if (ariaBase) {
+    cell.dataset.ariaBase = ariaBase;
+    cell.setAttribute('aria-label', `${ariaBase} (${resetText})`);
+  } else if (ariaLabel) {
+    cell.setAttribute('aria-label', ariaLabel);
+  }
 
   const top = document.createElement('div');
   top.className = 'agm-quota-cell-top';
@@ -697,6 +953,7 @@ function renderQuotaGridCell({
   reset.className = `agm-quota-reset${effectiveResetTone ? ` is-${effectiveResetTone}` : ''}`;
   reset.appendChild(iconClock());
   const resetVal = document.createElement('span');
+  resetVal.className = 'agm-quota-reset-value';
   resetVal.textContent = resetText;
   reset.appendChild(resetVal);
   foot.appendChild(reset);
@@ -801,13 +1058,14 @@ function renderQuotaGroups(acc, hasStatusMessage = false) {
         gridEl.appendChild(renderQuotaGridCell({
           periodLabel,
           resetText,
+          resetIso: bucket.resetTime || '',
           resetTone: periodKind,
           pct: pct ?? 0,
           disabled,
           superseded,
           stateTag,
           isFull: bucketEntries.length === 1 || isLastOdd,
-          ariaLabel: `${groupTitle} ${periodLabel}: ${disabled ? t('agManager.bucketDisabled') : `${pct}%`} (${resetText})`
+          ariaBase: `${groupTitle} ${periodLabel}: ${disabled ? t('agManager.bucketDisabled') : `${pct}%`}`
         }));
       });
 
@@ -838,10 +1096,11 @@ function renderQuotaGroups(acc, hasStatusMessage = false) {
         icon: useClaudeIcon ? iconClaude() : iconGemini(),
         periodLabel: name,
         resetText,
+        resetIso: m.resetTime || '',
         resetTone: 'weekly',
         pct,
         isFull: slice.length === 1 || isLastOdd,
-        ariaLabel: `${name}: ${pct}% (${resetText})`
+        ariaBase: `${name}: ${pct}%`
       }));
     });
     return grid;
@@ -874,11 +1133,9 @@ function buildCardSignature(acc, activeSlots) {
   const modelsKey = models.map((m) => (
     `${m?.name || ''}|${m?.displayName || ''}|${m?.percentage ?? ''}|${m?.resetTime || ''}`
   )).join('/');
-  const minuteBucket = Math.floor(Date.now() / 60000);
   const switchingId = effectiveSwitchingId();
   return [
     state.locale,
-    minuteBucket,
     acc.id,
     acc.email || '',
     acc.name || '',
@@ -951,7 +1208,8 @@ function renderAccountCard(acc, activeAccounts) {
   const isRefreshingThis = state.refreshingIds.has(acc.id);
 
   const card = document.createElement('article');
-  card.className = `agm-card${activeSlots.length > 0 ? ' is-active' : ''}${acc.disabled ? ' is-disabled' : ''}${isMenuOpen ? ' has-menu-open' : ''}${isSwitchingThis ? ' is-switching' : ''}`;
+  const isSelected = state.selectedIds.has(acc.id);
+  card.className = `agm-card${activeSlots.length > 0 ? ' is-active' : ''}${isSelected ? ' is-selected' : ''}${acc.disabled ? ' is-disabled' : ''}${isMenuOpen ? ' has-menu-open' : ''}${isSwitchingThis ? ' is-switching' : ''}`;
   card.dataset.accountId = acc.id;
 
   const head = document.createElement('div');
@@ -963,16 +1221,20 @@ function renderAccountCard(acc, activeAccounts) {
   const checkbox = document.createElement('input');
   checkbox.type = 'checkbox';
   checkbox.className = 'agm-card-check';
-  checkbox.checked = state.selectedIds.has(acc.id);
+  checkbox.checked = isSelected;
   checkbox.setAttribute('aria-label', t('agManager.aria.selectAccount', { email: acc.email || acc.id }));
   checkbox.addEventListener('change', () => {
     if (checkbox.checked) state.selectedIds.add(acc.id);
     else state.selectedIds.delete(acc.id);
+    card.classList.toggle('is-selected', checkbox.checked);
     state.batchDeleteConfirm = false;
     syncCachedCardSignature(acc.id);
     renderSummaryAndControls();
     const visible = filteredAccounts();
-    els.selectAllInput.checked = visible.length > 0 && visible.every((item) => state.selectedIds.has(item.id));
+    const allChecked = visible.length > 0 && visible.every((item) => state.selectedIds.has(item.id));
+    const someChecked = visible.some((item) => state.selectedIds.has(item.id));
+    els.selectAllInput.checked = allChecked;
+    els.selectAllInput.indeterminate = !allChecked && someChecked;
   });
 
   const emailEl = document.createElement('div');
@@ -1100,11 +1362,14 @@ function renderAccountCard(acc, activeAccounts) {
 
   metaRow.appendChild(pills);
 
-  const tsText = formatCompactTimestamp(acc.quota?.lastUpdatedAt || acc.lastUsedAt);
+  const tsRaw = acc.quota?.lastUpdatedAt || acc.lastUsedAt;
+  const tsText = formatCompactTimestamp(tsRaw);
   if (tsText) {
     const timeEl = document.createElement('span');
     timeEl.className = 'agm-card-time';
-    timeEl.textContent = tsText;
+    timeEl.dataset.ageTs = String(tsRaw);
+    timeEl.textContent = formatRelativeAge(tsRaw) || tsText;
+    timeEl.setAttribute('aria-label', `${t('agManager.lastRefresh')}: ${tsText}`);
     metaRow.appendChild(timeEl);
   }
   card.appendChild(metaRow);
@@ -1154,6 +1419,7 @@ function renderAccountCard(acc, activeAccounts) {
       if (m.resetTime) {
         const mReset = document.createElement('span');
         mReset.className = 'agm-model-reset';
+        mReset.dataset.resetIso = m.resetTime;
         mReset.textContent = formatResetCountdown(m.resetTime);
         mRight.appendChild(mReset);
       }
@@ -1382,6 +1648,8 @@ function positionRefreshPopover() {
   if (rect.left < 14) {
     els.refreshPopover.classList.add('align-left');
   }
+  const top = els.refreshPopover.getBoundingClientRect().top;
+  els.refreshPopover.style.maxHeight = `${Math.max(180, Math.floor(window.innerHeight - top - 12))}px`;
 }
 
 function positionAutoSwitchPopover() {
@@ -1391,19 +1659,33 @@ function positionAutoSwitchPopover() {
   if (rect.right > window.innerWidth - 14) {
     els.autoSwitchPopover.classList.remove('align-left');
   }
+  const top = els.autoSwitchPopover.getBoundingClientRect().top;
+  els.autoSwitchPopover.style.maxHeight = `${Math.max(180, Math.floor(window.innerHeight - top - 12))}px`;
 }
 
 function renderAccounts() {
   const list = filteredAccounts();
   els.selectAllInput.disabled = list.length === 0;
   if (list.length === 0) {
+    const isPoolEmpty = (state.manager?.accounts || []).length === 0;
     const empty = document.createElement('div');
     empty.className = 'agm-empty';
-    empty.textContent = (state.manager?.accounts || []).length === 0
+    const msg = document.createElement('p');
+    msg.textContent = isPoolEmpty
       ? t('agManager.emptyPool')
       : t('agManager.emptyFilter');
+    const cta = document.createElement('button');
+    cta.type = 'button';
+    cta.className = isPoolEmpty ? 'agm-btn agm-btn-primary' : 'agm-btn';
+    cta.textContent = isPoolEmpty ? t('agManager.openImport') : t('agManager.clearFilters');
+    cta.addEventListener('click', () => {
+      if (isPoolEmpty) openImportModal();
+      else clearAccountFilters();
+    });
+    empty.append(msg, cta);
     els.accountList.replaceChildren(empty);
     els.selectAllInput.checked = false;
+    els.selectAllInput.indeterminate = false;
     return;
   }
   const active = state.manager?.activeAccounts || {};
@@ -1438,13 +1720,66 @@ function renderAccounts() {
     }
   }
 
-  els.selectAllInput.checked = list.every((acc) => state.selectedIds.has(acc.id));
+  const allChecked = list.length > 0 && list.every((acc) => state.selectedIds.has(acc.id));
+  const someChecked = list.some((acc) => state.selectedIds.has(acc.id));
+  els.selectAllInput.checked = allChecked;
+  els.selectAllInput.indeterminate = !allChecked && someChecked;
   if (state.openMoreId) positionOpenMoreMenu();
+  refreshLiveTimes();
 }
 
 function renderAll() {
   renderSummaryAndControls();
   renderAccounts();
+}
+
+function refreshLiveTimes() {
+  for (const el of document.querySelectorAll('[data-reset-iso]')) {
+    const iso = el.dataset.resetIso;
+    if (!iso) continue;
+    const nextText = formatResetCountdown(iso);
+    const target = el.querySelector('.agm-quota-reset-value') || el;
+    if (target.textContent !== nextText) {
+      target.textContent = nextText;
+    }
+    if (el.dataset.ariaBase) {
+      const nextAria = `${el.dataset.ariaBase} (${nextText})`;
+      if (el.getAttribute('aria-label') !== nextAria) {
+        el.setAttribute('aria-label', nextAria);
+      }
+    }
+  }
+  for (const el of document.querySelectorAll('[data-age-ts]')) {
+    const nextAge = formatRelativeAge(el.dataset.ageTs);
+    if (nextAge && el.textContent !== nextAge) {
+      el.textContent = nextAge;
+    }
+  }
+}
+
+function clearAccountFilters() {
+  if (state.searchTimer) {
+    clearTimeout(state.searchTimer);
+    state.searchTimer = null;
+  }
+  state.search = '';
+  if (els.searchInput) els.searchInput.value = '';
+  state.filter = 'all';
+  for (const c of els.filterChips) {
+    const active = (c.dataset.filter || 'all') === 'all';
+    c.classList.toggle('active', active);
+    c.setAttribute('aria-pressed', String(active));
+  }
+  state.sort = 'default';
+  if (els.sortSelect) els.sortSelect.value = 'default';
+  renderAccounts();
+}
+
+function openImportModal() {
+  closeRefreshPopover();
+  closeAutoSwitchPopover();
+  setImportStatus('');
+  els.importDialog.showModal();
 }
 
 function openDeviceDialog(acc) {
@@ -1611,6 +1946,58 @@ function closeAutoSwitchPopover({ restoreFocus = false } = {}) {
   return true;
 }
 
+function setImportStatus(text, isError = false) {
+  if (!els.importStatus) return;
+  const msg = String(text || '');
+  els.importStatus.textContent = msg;
+  els.importStatus.classList.toggle('is-error', Boolean(isError && msg));
+  els.importStatus.classList.toggle('hidden', !msg);
+  els.importStatus.setAttribute('role', isError ? 'alert' : 'status');
+}
+
+function setImportControlsBusy(busy) {
+  const locked = Boolean(busy || state.oauthBusy);
+  for (const btn of importButtons) {
+    btn.disabled = locked;
+  }
+  if (els.startOAuthBtn) {
+    els.startOAuthBtn.disabled = locked;
+  }
+  if (els.importDialog) {
+    els.importDialog.setAttribute('aria-busy', String(locked));
+  }
+}
+
+async function runImportAction(button, invoke, successText) {
+  if (state.importBusy || state.oauthBusy) return;
+  state.importBusy = true;
+  setImportControlsBusy(true);
+  button?.classList.add('is-busy');
+  setImportStatus('');
+  try {
+    const res = await invoke();
+    if (res?.canceled) return;
+    if (res?.ok) {
+      showToast(successText(res));
+      els.importDialog.close();
+    } else {
+      const msg = res?.error || t('agManager.toast.actionFailed');
+      setImportStatus(msg, true);
+      showToast(msg, true);
+    }
+  } catch (err) {
+    const msg = err?.message || t('agManager.toast.actionFailed');
+    setImportStatus(msg, true);
+    showToast(msg, true);
+  } finally {
+    state.importBusy = false;
+    setImportControlsBusy(false);
+    button?.classList.remove('is-busy');
+    hideProgressBar();
+    await loadState();
+  }
+}
+
 function wireEvents() {
   els.themeToggle.addEventListener('click', () => {
     state.flat = !state.flat;
@@ -1619,6 +2006,7 @@ function wireEvents() {
   });
   els.minBtn.addEventListener('click', () => agmApi().minimize());
   els.closeBtn.addEventListener('click', () => agmApi().close());
+  els.toast?.addEventListener('click', () => hideToast());
 
   els.targetClient.addEventListener('change', () => {
     void persistConfigPatch({ defaultSwitchTarget: els.targetClient.value });
@@ -1717,6 +2105,20 @@ function wireEvents() {
   registerCleanup(() => document.removeEventListener('click', onDocumentClick));
 
   const onDocumentKeyDown = (ev) => {
+    const targetEl = ev.target instanceof Element ? ev.target : null;
+    const isEditable = Boolean(
+      targetEl?.closest?.('input, textarea, select')
+      || (targetEl instanceof HTMLElement && targetEl.isContentEditable)
+    );
+    const hasOpenDialog = Boolean(els.importDialog?.open || els.deviceDialog?.open);
+    const isFindShortcut = (ev.key === '/' && !ev.ctrlKey && !ev.metaKey && !ev.altKey)
+      || ((ev.ctrlKey || ev.metaKey) && !ev.altKey && String(ev.key || '').toLowerCase() === 'f');
+    if (isFindShortcut && !isEditable && !hasOpenDialog && !ev.isComposing) {
+      ev.preventDefault();
+      els.searchInput?.focus();
+      els.searchInput?.select();
+      return;
+    }
     if (ev.key !== 'Escape') return;
     if (closeAutoSwitchPopover({ restoreFocus: true })) {
       ev.preventDefault();
@@ -1836,6 +2238,20 @@ function wireEvents() {
     }, 100);
   });
 
+  els.searchInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && (els.searchInput.value || state.search)) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (state.searchTimer) {
+        clearTimeout(state.searchTimer);
+        state.searchTimer = null;
+      }
+      els.searchInput.value = '';
+      state.search = '';
+      renderAccounts();
+    }
+  });
+
   for (const chip of els.filterChips) {
     chip.addEventListener('click', () => {
       state.filter = chip.dataset.filter || 'all';
@@ -1847,6 +2263,17 @@ function wireEvents() {
       renderAccounts();
     });
   }
+
+  els.sortSelect?.addEventListener('change', () => {
+    state.sort = els.sortSelect.value || 'default';
+    renderAccounts();
+  });
+
+  els.clearSelectionBtn?.addEventListener('click', () => {
+    state.selectedIds.clear();
+    state.batchDeleteConfirm = false;
+    renderAll();
+  });
 
   els.selectAllInput.addEventListener('change', () => {
     const visible = filteredAccounts();
@@ -1915,11 +2342,7 @@ function wireEvents() {
   });
 
   // Import and device dialogs
-  els.openImportBtn.addEventListener('click', () => {
-    closeRefreshPopover();
-    closeAutoSwitchPopover();
-    els.importDialog.showModal();
-  });
+  els.openImportBtn.addEventListener('click', () => openImportModal());
   els.closeImportDialog.addEventListener('click', () => els.importDialog.close());
   els.closeDeviceDialog.addEventListener('click', () => els.deviceDialog.close());
 
@@ -1957,154 +2380,72 @@ function wireEvents() {
     });
   }
 
-  els.pickJsonFileBtn.addEventListener('click', async () => {
-    state.importBusy = true;
-    els.pickJsonFileBtn.disabled = true;
-    try {
-      const res = await agmApi().pickAndImportJson({ refreshAfterImport: els.refreshAfterImportInput.checked });
-      if (res?.canceled) return;
-      if (res?.ok) {
-        showToast(t('agManager.toast.importDone', { success: res.success, failed: res.failed }));
-        els.importDialog.close();
-      } else {
-        showToast(res?.error || t('agManager.toast.actionFailed'), true);
-      }
-    } catch (err) {
-      showToast(err?.message || t('agManager.toast.actionFailed'), true);
-    } finally {
-      state.importBusy = false;
-      els.pickJsonFileBtn.disabled = false;
-      hideProgressBar();
-      await loadState();
-    }
+  els.pickJsonFileBtn.addEventListener('click', () => {
+    void runImportAction(
+      els.pickJsonFileBtn,
+      () => agmApi().pickAndImportJson({ refreshAfterImport: els.refreshAfterImportInput.checked }),
+      (res) => t('agManager.toast.importDone', { success: res.success, failed: res.failed })
+    );
   });
 
-  els.submitPasteBtn.addEventListener('click', async () => {
+  els.submitPasteBtn.addEventListener('click', () => {
     const text = els.tokenPasteInput.value.trim();
     if (!text) return;
-    state.importBusy = true;
-    els.submitPasteBtn.disabled = true;
-    try {
-      const res = await agmApi().importFromString(text, { refreshAfterImport: els.refreshAfterImportInput.checked });
-      if (res?.ok) {
+    void runImportAction(
+      els.submitPasteBtn,
+      () => agmApi().importFromString(text, { refreshAfterImport: els.refreshAfterImportInput.checked }),
+      (res) => {
         els.tokenPasteInput.value = '';
-        showToast(t('agManager.toast.importDone', { success: res.success, failed: res.failed }));
-        els.importDialog.close();
-      } else {
-        showToast(res?.error || t('agManager.toast.actionFailed'), true);
+        return t('agManager.toast.importDone', { success: res.success, failed: res.failed });
       }
-    } catch (err) {
-      showToast(err?.message || t('agManager.toast.actionFailed'), true);
-    } finally {
-      state.importBusy = false;
-      els.submitPasteBtn.disabled = false;
-      hideProgressBar();
-      await loadState();
-    }
+    );
   });
 
-  els.importDefaultDirBtn.addEventListener('click', async () => {
-    els.importDefaultDirBtn.disabled = true;
-    try {
-      const res = await agmApi().importDefaultDataDir();
-      if (res?.ok) {
-        showToast(t('agManager.toast.importDirDone', { count: res.imported }));
-        els.importDialog.close();
-      } else {
-        showToast(res?.error || t('agManager.toast.actionFailed'), true);
-      }
-    } catch (err) {
-      showToast(err?.message || t('agManager.toast.actionFailed'), true);
-    } finally {
-      els.importDefaultDirBtn.disabled = false;
-      await loadState();
-    }
+  els.importDefaultDirBtn.addEventListener('click', () => {
+    void runImportAction(
+      els.importDefaultDirBtn,
+      () => agmApi().importDefaultDataDir(),
+      (res) => t('agManager.toast.importDirDone', { count: res.imported })
+    );
   });
 
-  els.pickDataDirBtn.addEventListener('click', async () => {
-    els.pickDataDirBtn.disabled = true;
-    try {
-      const res = await agmApi().pickAndImportDataDir();
-      if (res?.canceled) return;
-      if (res?.ok) {
-        showToast(t('agManager.toast.importDirDone', { count: res.imported }));
-        els.importDialog.close();
-      } else {
-        showToast(res?.error || t('agManager.toast.actionFailed'), true);
-      }
-    } catch (err) {
-      showToast(err?.message || t('agManager.toast.actionFailed'), true);
-    } finally {
-      els.pickDataDirBtn.disabled = false;
-      await loadState();
-    }
+  els.pickDataDirBtn.addEventListener('click', () => {
+    void runImportAction(
+      els.pickDataDirBtn,
+      () => agmApi().pickAndImportDataDir(),
+      (res) => t('agManager.toast.importDirDone', { count: res.imported })
+    );
   });
 
-  els.scanLocalBtn.addEventListener('click', async () => {
-    state.importBusy = true;
-    els.scanLocalBtn.disabled = true;
-    try {
-      const res = await agmApi().scanLocalAccounts();
-      if (res?.ok) {
-        showToast(t('agManager.toast.importDone', { success: res.success, failed: res.failed }));
-        els.importDialog.close();
-      } else {
-        showToast(res?.error || t('agManager.toast.actionFailed'), true);
-      }
-    } catch (err) {
-      showToast(err?.message || t('agManager.toast.actionFailed'), true);
-    } finally {
-      state.importBusy = false;
-      els.scanLocalBtn.disabled = false;
-      hideProgressBar();
-      await loadState();
-    }
+  els.scanLocalBtn.addEventListener('click', () => {
+    void runImportAction(
+      els.scanLocalBtn,
+      () => agmApi().scanLocalAccounts(),
+      (res) => t('agManager.toast.importDone', { success: res.success, failed: res.failed })
+    );
   });
 
-  els.pickStateDbBtn.addEventListener('click', async () => {
-    els.pickStateDbBtn.disabled = true;
-    try {
-      const res = await agmApi().pickAndImportStateDb();
-      if (res?.canceled) return;
-      if (res?.ok) {
-        showToast(t('agManager.toast.importSingleOk', { email: res.account?.email || '' }));
-        els.importDialog.close();
-      } else {
-        showToast(res?.error || t('agManager.toast.actionFailed'), true);
-      }
-    } catch (err) {
-      showToast(err?.message || t('agManager.toast.actionFailed'), true);
-    } finally {
-      els.pickStateDbBtn.disabled = false;
-      await loadState();
-    }
+  els.pickStateDbBtn.addEventListener('click', () => {
+    void runImportAction(
+      els.pickStateDbBtn,
+      () => agmApi().pickAndImportStateDb(),
+      (res) => t('agManager.toast.importSingleOk', { email: res.account?.email || '' })
+    );
   });
 
-  els.pickV1DirBtn.addEventListener('click', async () => {
-    state.importBusy = true;
-    els.pickV1DirBtn.disabled = true;
-    try {
-      const res = await agmApi().pickAndImportV1Dir();
-      if (res?.canceled) return;
-      if (res?.ok) {
-        showToast(t('agManager.toast.importDone', { success: res.success, failed: res.failed }));
-        els.importDialog.close();
-      } else {
-        showToast(res?.error || t('agManager.toast.actionFailed'), true);
-      }
-    } catch (err) {
-      showToast(err?.message || t('agManager.toast.actionFailed'), true);
-    } finally {
-      state.importBusy = false;
-      els.pickV1DirBtn.disabled = false;
-      hideProgressBar();
-      await loadState();
-    }
+  els.pickV1DirBtn.addEventListener('click', () => {
+    void runImportAction(
+      els.pickV1DirBtn,
+      () => agmApi().pickAndImportV1Dir(),
+      (res) => t('agManager.toast.importDone', { success: res.success, failed: res.failed })
+    );
   });
 
   els.startOAuthBtn.addEventListener('click', async () => {
+    if (state.importBusy || state.oauthBusy) return;
+    setImportStatus('');
     state.oauthBusy = true;
-    els.startOAuthBtn.disabled = true;
+    setImportControlsBusy(false);
     els.cancelOAuthBtn.classList.remove('hidden');
     try {
       const res = await agmApi().startOAuthLogin(els.oauthClientSelect.value);
@@ -2112,13 +2453,17 @@ function wireEvents() {
         showToast(t('agManager.toast.importSingleOk', { email: res.account?.email || '' }));
         els.importDialog.close();
       } else {
-        showToast(res?.error || t('agManager.toast.actionFailed'), true);
+        const msg = res?.error || t('agManager.toast.actionFailed');
+        setImportStatus(msg, true);
+        showToast(msg, true);
       }
     } catch (err) {
-      showToast(err?.message || t('agManager.toast.actionFailed'), true);
+      const msg = err?.message || t('agManager.toast.actionFailed');
+      setImportStatus(msg, true);
+      showToast(msg, true);
     } finally {
       state.oauthBusy = false;
-      els.startOAuthBtn.disabled = false;
+      setImportControlsBusy(false);
       els.cancelOAuthBtn.classList.add('hidden');
       await loadState();
     }
@@ -2133,21 +2478,19 @@ function wireEvents() {
   }));
   registerCleanup(agmApi().onRefreshProgress?.((p) => {
     if (!p || !p.total) return;
-    els.progressBar.classList.remove('hidden');
-    els.progressBar.textContent = t('agManager.refreshProgress', {
+    showProgress(t('agManager.refreshProgress', {
       current: p.current,
       total: p.total,
       email: p.currentEmail || ''
-    });
+    }), p.current, p.total);
   }));
   registerCleanup(agmApi().onImportProgress?.((p) => {
     if (!p || !p.total) return;
-    els.progressBar.classList.remove('hidden');
-    els.progressBar.textContent = t('agManager.importProgress', {
+    showProgress(t('agManager.importProgress', {
       current: p.current,
       total: p.total,
       email: p.email || ''
-    });
+    }), p.current, p.total);
   }));
 }
 
@@ -2190,6 +2533,21 @@ async function boot() {
   const onReducedMotionChange = () => applyAppearance(state.settings);
   reducedMotionMedia?.addEventListener?.('change', onReducedMotionChange);
   registerCleanup(() => reducedMotionMedia?.removeEventListener?.('change', onReducedMotionChange));
+
+  state.liveTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') refreshLiveTimes();
+  }, 30000);
+  registerCleanup(() => {
+    if (state.liveTimer) {
+      clearInterval(state.liveTimer);
+      state.liveTimer = 0;
+    }
+  });
+  const onVisibilityChange = () => {
+    if (document.visibilityState === 'visible') refreshLiveTimes();
+  };
+  document.addEventListener('visibilitychange', onVisibilityChange);
+  registerCleanup(() => document.removeEventListener('visibilitychange', onVisibilityChange));
 
   window.addEventListener('beforeunload', () => {
     if (state.toastTimer) {

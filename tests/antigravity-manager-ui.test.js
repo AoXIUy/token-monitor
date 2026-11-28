@@ -400,12 +400,13 @@ test('antigravityManager reuses unchanged account card DOM nodes while preservin
       }
     },
     els: {
-      selectAllInput: { disabled: false, checked: false },
+      selectAllInput: { disabled: false, checked: false, indeterminate: false },
       accountList
     },
     t: (k) => k,
     isAbnormalAccount: () => false,
     positionOpenMoreMenu: () => {},
+    refreshLiveTimes: () => {},
     renderAccountCard: (acc) => {
       createdCount += 1;
       const node = {
@@ -448,4 +449,136 @@ test('antigravityManager reuses unchanged account card DOM nodes while preservin
   ctx.state.manager.config = { selectionMode: 'weighted' };
   ctx.renderAccounts();
   assert.equal(createdCount, 6, 'toggling selectionMode rebuilds cards to render inline weight controls');
+});
+
+test('antigravityManager filteredAccounts and accountQuotaScore support all sort modes cleanly', () => {
+  const js = readRenderer('antigravityManager.js');
+  const snippet = extractFunction(js, 'function filteredAccounts(', '\nconst SVG_NS');
+
+  const accounts = [
+    {
+      id: 'disabled-high',
+      email: 'a-disabled@example.com',
+      subscriptionTier: 'ULTRA',
+      disabled: true,
+      hasToken: true,
+      lastUsedAt: 500,
+      quota: {
+        lastUpdatedAt: 900,
+        groups: [{ buckets: [{ remainingFraction: 0.99 }] }]
+      }
+    },
+    {
+      id: 'free-nodata',
+      email: 'b-nodata@example.com',
+      subscriptionTier: 'FREE',
+      disabled: false,
+      hasToken: true,
+      lastUsedAt: 100,
+      quota: { groups: [], models: [] }
+    },
+    {
+      id: 'pro-best',
+      email: 'd-pro@example.com',
+      subscriptionTier: 'PRO',
+      disabled: false,
+      hasToken: true,
+      quota: {
+        lastUpdatedAt: 200,
+        groups: [
+          { buckets: [{ remainingFraction: 0.2 }, { remainingFraction: 0.9 }] },
+          { buckets: [{ remainingFraction: 0.75 }, { remainingFraction: 0.85 }] }
+        ]
+      }
+    },
+    {
+      id: 'ultra-mid',
+      email: 'c-ultra@example.com',
+      subscriptionTier: 'ULTRA',
+      disabled: false,
+      hasToken: true,
+      quota: {
+        lastUpdatedAt: 600,
+        groups: [
+          { buckets: [{ remainingFraction: 0.4 }, { remainingFraction: 0.8 }] }
+        ]
+      }
+    }
+  ];
+
+  const runSort = (sort) => {
+    const ctx = {
+      state: { search: '', filter: 'all', sort, manager: { accounts } },
+      isAbnormalAccount: (a) => Boolean(a.disabled)
+    };
+    vm.runInNewContext(snippet, ctx);
+    return ctx;
+  };
+
+  const base = runSort('default');
+  assert.deepEqual(Array.from(base.filteredAccounts(), (a) => a.id), ['disabled-high', 'free-nodata', 'pro-best', 'ultra-mid']);
+  assert.equal(base.accountQuotaScore(accounts[2]), 0.75);
+  assert.equal(base.accountQuotaScore(accounts[0]), -2);
+  assert.equal(base.accountQuotaScore(accounts[1]), -1);
+
+  assert.deepEqual(
+    Array.from(runSort('quota').filteredAccounts(), (a) => a.id),
+    ['pro-best', 'ultra-mid', 'free-nodata', 'disabled-high']
+  );
+  assert.deepEqual(
+    Array.from(runSort('tier').filteredAccounts(), (a) => a.id),
+    ['disabled-high', 'ultra-mid', 'pro-best', 'free-nodata']
+  );
+  assert.deepEqual(
+    Array.from(runSort('email').filteredAccounts(), (a) => a.id),
+    ['disabled-high', 'free-nodata', 'ultra-mid', 'pro-best']
+  );
+  assert.deepEqual(
+    Array.from(runSort('updated').filteredAccounts(), (a) => a.id),
+    ['disabled-high', 'ultra-mid', 'pro-best', 'free-nodata']
+  );
+});
+
+test('antigravityManager formatRelativeAge formats localized relative ages cleanly', () => {
+  const js = readRenderer('antigravityManager.js');
+  const snippet = extractFunction(js, 'function formatCompactTimestamp(', '\nfunction inferCapabilityPills(');
+  const nowMs = Date.UTC(2026, 10, 28, 12, 0, 0);
+  const nowSec = Math.floor(nowMs / 1000);
+  const ctx = {
+    state: { locale: 'en' },
+    Date: class MockDate extends Date {
+      constructor(...args) {
+        if (args.length === 0) super(nowMs);
+        else super(...args);
+      }
+      static now() { return nowMs; }
+    }
+  };
+  vm.runInNewContext(snippet, ctx);
+
+  const expected5m = new Intl.RelativeTimeFormat('en', { numeric: 'auto', style: 'narrow' }).format(-5, 'minute');
+  assert.equal(ctx.formatRelativeAge(nowSec - 300), expected5m);
+  assert.equal(ctx.formatRelativeAge(0), '');
+});
+
+test('antigravityManager keeps popover toast, live countdown attributes, busy import guard, and popover scroll invariants', () => {
+  const html = readRenderer('antigravityManager.html');
+  const js = readRenderer('antigravityManager.js');
+  const css = readRenderer('antigravityManager.css');
+
+  assert.match(html, /id="agmToast"[^>]*popover="manual"/);
+  assert.match(html, /id="agmSortSelect"/);
+  assert.match(html, /data-count-for="abnormal"/);
+  assert.match(html, /id="agmImportStatus"/);
+  assert.match(html, /id="agmAutoSwitchHistory"/);
+
+  assert.doesNotMatch(js, /\bminuteBucket\b/);
+  assert.match(js, /dataset\.resetIso/);
+  assert.match(js, /visibilityState/);
+  assert.match(js, /indeterminate/);
+  assert.match(js, /function runImportAction\(/);
+  assert.match(js, /showPopover/);
+
+  assert.match(css, /\.agm-popover\s*\{[^}]*overflow-y:\s*auto/);
+  assert.match(css, /\.agm-chip-count\s*\{/);
 });
