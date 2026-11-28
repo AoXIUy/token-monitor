@@ -88,7 +88,7 @@ test('antigravityManager.html exposes proper import label, localized aria-labels
   const html = readRenderer('antigravityManager.html');
   assert.match(html, /id="agmOpenImportBtn"[^>]*data-i18n="agManager\.openImport"/);
   assert.match(html, /id="agmTokenPasteInput"[^>]*data-i18n-placeholder="agManager\.tokenPastePlaceholder"/);
-  for (const id of ['agmThemeToggle', 'agmMinBtn', 'agmCloseBtn', 'agmTargetClient', 'agmAutoSwitchMenuBtn', 'agmAutoSwitchPopover', 'agmRefreshMenuBtn', 'agmRefreshPopover', 'agmSearchInput', 'agmFilterChips', 'agmCloseImportDialog', 'agmCloseDeviceDialog']) {
+  for (const id of ['agmThemeToggle', 'agmMinBtn', 'agmCloseBtn', 'agmTargetClient', 'agmAutoSwitchMenuBtn', 'agmAutoSwitchPopover', 'agmRefreshMenuBtn', 'agmRefreshPopover', 'agmSearchInput', 'agmFilterChips', 'agmToggleModelsBtn', 'agmCloseImportDialog', 'agmCloseDeviceDialog']) {
     assert.match(html, new RegExp(`id="${id}"[^>]*data-i18n-aria-label="agManager\\.aria\\.`));
   }
   const tabMatches = [...html.matchAll(/role="tab"[^>]*aria-selected="(true|false)"[^>]*aria-controls="agmImportTab/g)];
@@ -379,6 +379,16 @@ test('antigravityManager reuses unchanged account card DOM nodes while preservin
     Array,
     Set,
     Map,
+    document: {
+      createElement: () => ({
+        className: '',
+        type: '',
+        textContent: '',
+        classList: { contains: () => false },
+        addEventListener: () => {},
+        append: () => {}
+      })
+    },
     cardCache: new Map(),
     state: {
       locale: 'zh-CN',
@@ -581,4 +591,204 @@ test('antigravityManager keeps popover toast, live countdown attributes, busy im
 
   assert.match(css, /\.agm-popover\s*\{[^}]*overflow-y:\s*auto/);
   assert.match(css, /\.agm-chip-count\s*\{/);
+  assert.match(css, /\.agm-account-list\s*\{[^}]*align-items:\s*start/);
+  const actionsGridRule = css.match(/\.agm-card-actions-grid\s*\{([^}]*)\}/)?.[1] || '';
+  assert.doesNotMatch(actionsGridRule, /margin-top:\s*auto/, 'card action grid must not stretch blank space inside sibling cards');
+  assert.match(css, /\.agm-models-section\s*\{/);
+  assert.match(css, /\.agm-models-toggle\s*\{/);
+  assert.match(css, /\.agm-toggle-models-btn\.is-active\s*\{/);
+});
+
+test('antigravityManager supports global expand/collapse all models, per-card overrides, and selective card rebuilds', () => {
+  const js = readRenderer('antigravityManager.js');
+  const snippet = [
+    extractFunction(js, 'function filteredAccounts(', '\nconst SVG_NS'),
+    extractFunction(js, 'function effectiveSwitchingId(', '\nasync function deleteSingleAccount('),
+    extractFunction(js, 'function renderAccounts(', '\nfunction renderAll('),
+    extractFunction(js, 'function hideProgressBar(', '\nasync function copyEmailText('),
+    extractFunction(js, 'function applyManagerState(', '\nasync function loadState(')
+  ].join('\n');
+
+  const children = [];
+  const accountList = {
+    get children() { return children; },
+    get firstElementChild() { return children[0] || null; },
+    replaceChildren(...nodes) {
+      children.length = 0;
+      for (const n of nodes) children.push(n);
+    },
+    insertBefore(node, ref) {
+      const existingIdx = children.indexOf(node);
+      if (existingIdx >= 0) children.splice(existingIdx, 1);
+      if (!ref) {
+        children.push(node);
+        return node;
+      }
+      const refIdx = children.indexOf(ref);
+      if (refIdx >= 0) children.splice(refIdx, 0, node);
+      else children.push(node);
+      return node;
+    }
+  };
+
+  const toggleBtnClasses = new Set();
+  const toggleBtnAttrs = new Map();
+  const toggleModelsBtn = {
+    disabled: false,
+    classList: {
+      toggle: (cls, on) => {
+        if (on) toggleBtnClasses.add(cls);
+        else toggleBtnClasses.delete(cls);
+      }
+    },
+    setAttribute: (k, v) => toggleBtnAttrs.set(k, v)
+  };
+  const toggleModelsLabel = { textContent: '' };
+
+  let createdCount = 0;
+  const ctx = {
+    Date: { now: () => 1763942400000 },
+    Math,
+    Object,
+    Array,
+    Set,
+    Map,
+    document: {
+      createElement: () => ({
+        className: '',
+        type: '',
+        textContent: '',
+        classList: { contains: () => false },
+        addEventListener: () => {},
+        append: () => {}
+      })
+    },
+    cardCache: new Map(),
+    state: {
+      locale: 'zh-CN',
+      search: '',
+      filter: 'all',
+      sort: 'default',
+      selectedIds: new Set(),
+      expandedModels: new Set(),
+      collapsedModels: new Set(),
+      allModelsExpanded: false,
+      openMoreId: '',
+      confirmDeleteId: '',
+      batchDeleteConfirm: false,
+      importBusy: false,
+      switchBestBusy: false,
+      switchingId: '',
+      refreshingIds: new Set(),
+      manager: {
+        activeAccounts: {},
+        accounts: [
+          { id: 'a1', email: 'one@example.com', subscriptionTier: 'PRO', quota: { groups: [], models: [{ name: 'claude-opus-4-6', percentage: 100 }] } },
+          { id: 'a2', email: 'two@example.com', subscriptionTier: 'PRO', quota: { groups: [], models: [{ name: 'gemini-3.8-flash', percentage: 80 }] } },
+          { id: 'a3', email: 'empty@example.com', subscriptionTier: 'FREE', quota: { groups: [], models: [] } }
+        ]
+      }
+    },
+    els: {
+      selectAllInput: { disabled: false, checked: false, indeterminate: false },
+      toggleModelsBtn,
+      toggleModelsLabel,
+      progressBar: { textContent: '', classList: { add: () => {}, remove: () => {} } },
+      accountList
+    },
+    t: (k) => k,
+    isAbnormalAccount: () => false,
+    positionOpenMoreMenu: () => {},
+    refreshLiveTimes: () => {},
+    renderAll: () => ctx.renderAccounts(),
+    renderAccountCard: (acc) => {
+      createdCount += 1;
+      const node = {
+        id: acc.id,
+        rev: createdCount,
+        expanded: ctx.isAccountModelsExpanded(acc.id),
+        classList: { contains: () => false },
+        remove() {
+          const i = children.indexOf(node);
+          if (i >= 0) children.splice(i, 1);
+        }
+      };
+      return node;
+    }
+  };
+  vm.runInNewContext(snippet, ctx);
+
+  // Initial state: none expanded, global button enabled & inactive
+  ctx.renderAccounts();
+  assert.equal(createdCount, 3);
+  assert.equal(toggleModelsBtn.disabled, false);
+  assert.equal(toggleBtnClasses.has('is-active'), false);
+  assert.equal(toggleBtnAttrs.get('aria-pressed'), 'false');
+  assert.equal(toggleModelsLabel.textContent, 'agManager.expandAllModels');
+  const initialA3 = children[2];
+
+  // Expanding a single card updates only that card and keeps global toggle in "expand all" state
+  ctx.setAccountModelsExpanded('a1', true);
+  ctx.renderAccounts();
+  assert.equal(createdCount, 4);
+  assert.equal(ctx.isAccountModelsExpanded('a1'), true);
+  assert.equal(ctx.isAccountModelsExpanded('a2'), false);
+  assert.equal(toggleBtnClasses.has('is-active'), false);
+  assert.equal(toggleModelsLabel.textContent, 'agManager.expandAllModels');
+  const expandedA1 = children[0];
+
+  // Global toggle expands remaining expandable accounts while reusing already-expanded a1
+  ctx.toggleAllVisibleModels();
+  assert.equal(ctx.state.allModelsExpanded, true);
+  assert.equal(ctx.isAccountModelsExpanded('a1'), true);
+  assert.equal(ctx.isAccountModelsExpanded('a2'), true);
+  assert.equal(children[0], expandedA1, 'already-expanded card should reuse its cached DOM node');
+  assert.equal(children[2], initialA3, 'account without models should reuse its cached DOM node on global toggle');
+  assert.equal(toggleBtnClasses.has('is-active'), true);
+  assert.equal(toggleBtnAttrs.get('aria-pressed'), 'true');
+  assert.equal(toggleModelsLabel.textContent, 'agManager.collapseAllModels');
+
+  // Collapsing one card while allModelsExpanded=true records per-card override without collapsing siblings
+  ctx.setAccountModelsExpanded('a1', false);
+  ctx.renderAccounts();
+  assert.equal(ctx.state.allModelsExpanded, true);
+  assert.equal(ctx.isAccountModelsExpanded('a1'), false);
+  assert.equal(ctx.isAccountModelsExpanded('a2'), true);
+  assert.equal(toggleBtnClasses.has('is-active'), false);
+  assert.equal(toggleModelsLabel.textContent, 'agManager.expandAllModels');
+
+  // Manually collapsing the last remaining expanded card resets allModelsExpanded back to false
+  ctx.setAccountModelsExpanded('a2', false);
+  ctx.renderAccounts();
+  assert.equal(ctx.state.allModelsExpanded, false);
+  assert.equal(ctx.state.collapsedModels.size, 0);
+
+  // Expanding all then clicking global toggle again collapses all
+  ctx.toggleAllVisibleModels();
+  assert.equal(ctx.state.allModelsExpanded, true);
+  ctx.toggleAllVisibleModels();
+  assert.equal(ctx.state.allModelsExpanded, false);
+  assert.equal(ctx.isAccountModelsExpanded('a1'), false);
+  assert.equal(ctx.isAccountModelsExpanded('a2'), false);
+  assert.equal(toggleBtnClasses.has('is-active'), false);
+  assert.equal(toggleModelsLabel.textContent, 'agManager.expandAllModels');
+
+  // Filtering to accounts with no models disables the global button
+  ctx.state.filter = 'FREE';
+  ctx.renderAccounts();
+  assert.equal(toggleModelsBtn.disabled, true);
+  assert.equal(toggleBtnClasses.has('is-active'), false);
+  ctx.state.filter = 'all';
+
+  // applyManagerState prunes stale collapsedModels and resets allModelsExpanded when empty
+  ctx.state.allModelsExpanded = true;
+  ctx.state.collapsedModels.add('a1');
+  ctx.state.collapsedModels.add('stale');
+  ctx.applyManagerState({ accounts: [{ id: 'a1', quota: { groups: [], models: [{ name: 'm1', percentage: 50 }] } }], isRefreshing: false });
+  assert.deepEqual([...ctx.state.collapsedModels], ['a1']);
+  ctx.applyManagerState({ accounts: [], isRefreshing: false });
+  assert.equal(ctx.state.allModelsExpanded, false);
+  assert.equal(ctx.state.collapsedModels.size, 0);
+  assert.equal(toggleModelsBtn.disabled, true);
+  assert.equal(toggleBtnClasses.has('is-active'), false);
 });

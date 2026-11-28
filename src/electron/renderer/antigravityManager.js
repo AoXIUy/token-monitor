@@ -18,6 +18,8 @@ const state = {
   sort: 'default',
   selectedIds: new Set(),
   expandedModels: new Set(),
+  collapsedModels: new Set(),
+  allModelsExpanded: false,
   openMoreId: '',
   confirmDeleteId: '',
   batchDeleteConfirm: false,
@@ -81,6 +83,8 @@ const els = {
   filterChips: Array.from(document.querySelectorAll('#agmFilterChips .agm-chip')),
   chipCounts: Array.from(document.querySelectorAll('[data-count-for]')),
   sortSelect: document.getElementById('agmSortSelect'),
+  toggleModelsBtn: document.getElementById('agmToggleModelsBtn'),
+  toggleModelsLabel: document.getElementById('agmToggleModelsLabel'),
   selectAllInput: document.getElementById('agmSelectAllInput'),
   selectedCount: document.getElementById('agmSelectedCount'),
   clearSelectionBtn: document.getElementById('agmClearSelectionBtn'),
@@ -1122,6 +1126,65 @@ function isAnySwitchInFlight() {
   return Boolean(state.switchBestBusy || state.switchingId || state.manager?.isSwitching || state.manager?.isAutoSwitching);
 }
 
+function accountHasModels(acc) {
+  return Array.isArray(acc?.quota?.models) && acc.quota.models.length > 0;
+}
+
+function isAccountModelsExpanded(accountId) {
+  if (state.allModelsExpanded) {
+    return !state.collapsedModels?.has(accountId);
+  }
+  return Boolean(state.expandedModels?.has(accountId));
+}
+
+function setAccountModelsExpanded(accountId, expanded) {
+  if (state.allModelsExpanded) {
+    if (!state.collapsedModels) state.collapsedModels = new Set();
+    if (expanded) state.collapsedModels.delete(accountId);
+    else state.collapsedModels.add(accountId);
+    const allExpandable = (state.manager?.accounts || []).filter(accountHasModels);
+    if (allExpandable.length > 0 && allExpandable.every((a) => state.collapsedModels.has(a.id))) {
+      state.allModelsExpanded = false;
+      state.collapsedModels.clear();
+      state.expandedModels?.clear();
+    }
+    return;
+  }
+  if (!state.expandedModels) state.expandedModels = new Set();
+  if (expanded) state.expandedModels.add(accountId);
+  else state.expandedModels.delete(accountId);
+}
+
+function toggleAllVisibleModels() {
+  const visible = filteredAccounts();
+  const expandable = visible.filter(accountHasModels);
+  if (expandable.length === 0) return;
+  const nextExpand = !expandable.every((acc) => isAccountModelsExpanded(acc.id));
+  state.allModelsExpanded = nextExpand;
+  state.expandedModels?.clear();
+  state.collapsedModels?.clear();
+  renderAccounts();
+}
+
+function syncToggleAllModelsButton(visibleList) {
+  if (!els.toggleModelsBtn) return;
+  const expandable = visibleList.filter(accountHasModels);
+  const hasExpandable = expandable.length > 0;
+  const allExpanded = hasExpandable && expandable.every((acc) => isAccountModelsExpanded(acc.id));
+  els.toggleModelsBtn.disabled = !hasExpandable;
+  els.toggleModelsBtn.classList.toggle('is-active', allExpanded);
+  els.toggleModelsBtn.setAttribute('aria-pressed', String(allExpanded));
+  if (els.toggleModelsLabel) {
+    els.toggleModelsLabel.textContent = allExpanded
+      ? t('agManager.collapseAllModels')
+      : t('agManager.expandAllModels');
+  }
+}
+
+function modelSectionDomId(accountId) {
+  return `agm-models-${Array.from(String(accountId || ''), (ch) => (/[a-zA-Z0-9_-]/.test(ch) ? ch : `_${ch.codePointAt(0).toString(16)}_`)).join('')}`;
+}
+
 function buildCardSignature(acc, activeSlots) {
   const groups = Array.isArray(acc?.quota?.groups) ? acc.quota.groups : [];
   const models = Array.isArray(acc?.quota?.models) ? acc.quota.models : [];
@@ -1156,7 +1219,7 @@ function buildCardSignature(acc, activeSlots) {
     acc.quota?.forbiddenReason || '',
     activeSlots.join(','),
     state.selectedIds.has(acc.id) ? 1 : 0,
-    state.expandedModels.has(acc.id) ? 1 : 0,
+    models.length > 0 && isAccountModelsExpanded(acc.id) ? 1 : 0,
     state.openMoreId === acc.id ? 1 : 0,
     state.confirmDeleteId === acc.id ? 1 : 0,
     switchingId === acc.id ? 1 : 0,
@@ -1189,6 +1252,8 @@ async function deleteSingleAccount(acc) {
       return;
     }
     state.selectedIds.delete(acc.id);
+    state.expandedModels.delete(acc.id);
+    state.collapsedModels.delete(acc.id);
     cardCache.delete(acc.id);
     showToast(t('agManager.toast.deletedCount', { count: 1 }));
   } catch (err) {
@@ -1405,34 +1470,70 @@ function renderAccountCard(acc, activeAccounts) {
   if (quotaNode) card.appendChild(quotaNode);
 
   const models = Array.isArray(acc?.quota?.models) ? acc.quota.models : [];
-  if (models.length > 0 && state.expandedModels.has(acc.id)) {
-    const grid = document.createElement('div');
-    grid.className = 'agm-models-grid';
-    for (const m of models) {
-      const mRow = document.createElement('div');
-      mRow.className = 'agm-model-row';
-      const mName = document.createElement('span');
-      mName.className = 'agm-model-name';
-      mName.textContent = m.displayName || m.name;
-      const mRight = document.createElement('span');
-      mRight.className = 'agm-model-meta';
-      if (m.resetTime) {
-        const mReset = document.createElement('span');
-        mReset.className = 'agm-model-reset';
-        mReset.dataset.resetIso = m.resetTime;
-        mReset.textContent = formatResetCountdown(m.resetTime);
-        mRight.appendChild(mReset);
+  const modelsExpanded = models.length > 0 && isAccountModelsExpanded(acc.id);
+  if (models.length > 0) {
+    const modelsSection = document.createElement('div');
+    modelsSection.className = `agm-models-section${modelsExpanded ? ' is-expanded' : ''}`;
+
+    const modelsGridId = modelSectionDomId(acc.id);
+    const modelsToggleBtn = document.createElement('button');
+    modelsToggleBtn.type = 'button';
+    modelsToggleBtn.className = 'agm-models-toggle';
+    modelsToggleBtn.setAttribute('aria-expanded', String(modelsExpanded));
+    if (modelsExpanded) modelsToggleBtn.setAttribute('aria-controls', modelsGridId);
+
+    const toggleText = document.createElement('span');
+    toggleText.className = 'agm-models-toggle-label';
+    toggleText.textContent = modelsExpanded
+      ? t('agManager.hideModels', { count: models.length })
+      : t('agManager.showModels', { count: models.length });
+    const toggleChevron = document.createElement('span');
+    toggleChevron.className = 'agm-models-toggle-chevron';
+    toggleChevron.setAttribute('aria-hidden', 'true');
+    toggleChevron.textContent = '▾';
+    modelsToggleBtn.append(toggleText, toggleChevron);
+    modelsToggleBtn.addEventListener('click', (ev) => {
+      setAccountModelsExpanded(acc.id, !modelsExpanded);
+      renderAccounts();
+      if (ev.detail === 0) {
+        const nextToggle = els.accountList.querySelector(`.agm-card[data-account-id="${CSS.escape(acc.id)}"] .agm-models-toggle`);
+        nextToggle?.focus();
       }
-      const mPctVal = Math.max(0, Math.min(100, Math.round(Number(m.percentage || 0))));
-      const mTone = pctToneClass(mPctVal);
-      const mPct = document.createElement('span');
-      mPct.className = `agm-model-pct${mTone ? ` ${mTone}` : ''}`;
-      mPct.textContent = `${mPctVal}%`;
-      mRight.appendChild(mPct);
-      mRow.append(mName, mRight);
-      grid.appendChild(mRow);
+    });
+    modelsSection.appendChild(modelsToggleBtn);
+
+    if (modelsExpanded) {
+      const grid = document.createElement('div');
+      grid.id = modelsGridId;
+      grid.className = 'agm-models-grid';
+      for (const m of models) {
+        const mRow = document.createElement('div');
+        mRow.className = 'agm-model-row';
+        const mName = document.createElement('span');
+        mName.className = 'agm-model-name';
+        mName.textContent = m.displayName || m.name;
+        const mRight = document.createElement('span');
+        mRight.className = 'agm-model-meta';
+        if (m.resetTime) {
+          const mReset = document.createElement('span');
+          mReset.className = 'agm-model-reset';
+          mReset.dataset.resetIso = m.resetTime;
+          mReset.textContent = formatResetCountdown(m.resetTime);
+          mRight.appendChild(mReset);
+        }
+        const mPctVal = Math.max(0, Math.min(100, Math.round(Number(m.percentage || 0))));
+        const mTone = pctToneClass(mPctVal);
+        const mPct = document.createElement('span');
+        mPct.className = `agm-model-pct${mTone ? ` ${mTone}` : ''}`;
+        mPct.textContent = `${mPctVal}%`;
+        mRight.appendChild(mPct);
+        mRow.append(mName, mRight);
+        grid.appendChild(mRow);
+      }
+      modelsSection.appendChild(grid);
     }
-    card.appendChild(grid);
+
+    card.appendChild(modelsSection);
   }
 
   const actions = document.createElement('div');
@@ -1564,7 +1665,7 @@ function renderAccountCard(acc, activeAccounts) {
     });
 
     if (models.length > 0) {
-      const expanded = state.expandedModels.has(acc.id);
+      const expanded = isAccountModelsExpanded(acc.id);
       const modelsItem = document.createElement('button');
       modelsItem.type = 'button';
       modelsItem.className = 'agm-more-item';
@@ -1573,8 +1674,7 @@ function renderAccountCard(acc, activeAccounts) {
         ? t('agManager.hideModels', { count: models.length })
         : t('agManager.showModels', { count: models.length });
       modelsItem.addEventListener('click', () => {
-        if (state.expandedModels.has(acc.id)) state.expandedModels.delete(acc.id);
-        else state.expandedModels.add(acc.id);
+        setAccountModelsExpanded(acc.id, !expanded);
         state.openMoreId = '';
         renderAccounts();
       });
@@ -1665,6 +1765,7 @@ function positionAutoSwitchPopover() {
 
 function renderAccounts() {
   const list = filteredAccounts();
+  syncToggleAllModelsButton(list);
   els.selectAllInput.disabled = list.length === 0;
   if (list.length === 0) {
     const isPoolEmpty = (state.manager?.accounts || []).length === 0;
@@ -1859,6 +1960,12 @@ function applyManagerState(nextState) {
   for (const id of [...state.expandedModels]) {
     if (!validIds.has(id)) state.expandedModels.delete(id);
   }
+  if (state.collapsedModels) {
+    for (const id of [...state.collapsedModels]) {
+      if (!validIds.has(id)) state.collapsedModels.delete(id);
+    }
+  }
+  if (validIds.size === 0) state.allModelsExpanded = false;
   if (state.refreshingIds) {
     for (const id of [...state.refreshingIds]) {
       if (!validIds.has(id)) state.refreshingIds.delete(id);
@@ -2267,6 +2374,10 @@ function wireEvents() {
   els.sortSelect?.addEventListener('change', () => {
     state.sort = els.sortSelect.value || 'default';
     renderAccounts();
+  });
+
+  els.toggleModelsBtn?.addEventListener('click', () => {
+    toggleAllVisibleModels();
   });
 
   els.clearSelectionBtn?.addEventListener('click', () => {

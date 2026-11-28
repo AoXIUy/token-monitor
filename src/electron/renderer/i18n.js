@@ -3033,7 +3033,10 @@
       'agManager.clearFilters': 'Clear filters',
       'agManager.autoSwitchHistoryTitle': 'Recent auto-switches',
       'agManager.autoSwitchHistoryEmpty': 'No auto-switch has happened yet.',
-      'agManager.autoSwitchHistoryFailed': 'Failed: {error}'
+      'agManager.autoSwitchHistoryFailed': 'Failed: {error}',
+      'agManager.expandAllModels': 'Expand all models',
+      'agManager.collapseAllModels': 'Collapse all models',
+      'agManager.aria.toggleAllModels': 'Expand or collapse all account models'
     },
     'zh-TW': {
       "realtimeSession.title": "會話即時觀測速率",
@@ -6051,7 +6054,10 @@
       'agManager.clearFilters': '清除篩選',
       'agManager.autoSwitchHistoryTitle': '最近自動切換',
       'agManager.autoSwitchHistoryEmpty': '尚無自動切換紀錄。',
-      'agManager.autoSwitchHistoryFailed': '失敗：{error}'
+      'agManager.autoSwitchHistoryFailed': '失敗：{error}',
+      'agManager.expandAllModels': '展開全部模型',
+      'agManager.collapseAllModels': '收合全部模型',
+      'agManager.aria.toggleAllModels': '展開或收合全部帳號模型'
     },
     'zh-CN': {
       "realtimeSession.title": "会话实时观测速率",
@@ -9069,7 +9075,10 @@
       'agManager.clearFilters': '清除筛选',
       'agManager.autoSwitchHistoryTitle': '最近自动切换',
       'agManager.autoSwitchHistoryEmpty': '暂无自动切换记录。',
-      'agManager.autoSwitchHistoryFailed': '失败：{error}'
+      'agManager.autoSwitchHistoryFailed': '失败：{error}',
+      'agManager.expandAllModels': '展开全部模型',
+      'agManager.collapseAllModels': '收起全部模型',
+      'agManager.aria.toggleAllModels': '展开或收起全部账号模型'
     },
     ko: {
       "realtimeSession.title": "세션 실시간 관측 속도",
@@ -12087,7 +12096,10 @@
       'agManager.clearFilters': '필터 지우기',
       'agManager.autoSwitchHistoryTitle': '최근 자동 전환',
       'agManager.autoSwitchHistoryEmpty': '아직 자동 전환 기록이 없습니다.',
-      'agManager.autoSwitchHistoryFailed': '실패: {error}'
+      'agManager.autoSwitchHistoryFailed': '실패: {error}',
+      'agManager.expandAllModels': '모든 모델 펼치기',
+      'agManager.collapseAllModels': '모든 모델 접기',
+      'agManager.aria.toggleAllModels': '모든 계정 모델 펼치기 또는 접기'
     },
     ja: {
       "realtimeSession.title": "セッションのリアルタイム観測速度",
@@ -15105,7 +15117,10 @@
       'agManager.clearFilters': 'フィルターを解除',
       'agManager.autoSwitchHistoryTitle': '最近の自動切替',
       'agManager.autoSwitchHistoryEmpty': '自動切替の履歴はまだありません。',
-      'agManager.autoSwitchHistoryFailed': '失敗: {error}'
+      'agManager.autoSwitchHistoryFailed': '失敗: {error}',
+      'agManager.expandAllModels': 'すべてのモデルを展開',
+      'agManager.collapseAllModels': 'すべてのモデルを折りたたむ',
+      'agManager.aria.toggleAllModels': 'すべてのアカウントのモデルを展開または折りたたむ'
     },
     es: {
       "realtimeSession.title": "Ritmo observado de la sesión",
@@ -18118,7 +18133,10 @@
       'agManager.clearFilters': 'Quitar filtros',
       'agManager.autoSwitchHistoryTitle': 'Cambios automáticos recientes',
       'agManager.autoSwitchHistoryEmpty': 'Aún no hay cambios automáticos.',
-      'agManager.autoSwitchHistoryFailed': 'Error: {error}'
+      'agManager.autoSwitchHistoryFailed': 'Error: {error}',
+      'agManager.expandAllModels': 'Expandir todos los modelos',
+      'agManager.collapseAllModels': 'Contraer todos los modelos',
+      'agManager.aria.toggleAllModels': 'Expandir o contraer todos los modelos'
     },
     'pt-BR': {
       "realtimeSession.title": "Taxa observada da sessão",
@@ -21136,7 +21154,10 @@
       'agManager.clearFilters': 'Limpar filtros',
       'agManager.autoSwitchHistoryTitle': 'Trocas automáticas recentes',
       'agManager.autoSwitchHistoryEmpty': 'Ainda não houve trocas automáticas.',
-      'agManager.autoSwitchHistoryFailed': 'Falha: {error}'
+      'agManager.autoSwitchHistoryFailed': 'Falha: {error}',
+      'agManager.expandAllModels': 'Expandir todos os modelos',
+      'agManager.collapseAllModels': 'Recolher todos os modelos',
+      'agManager.aria.toggleAllModels': 'Expandir ou recolher todos os modelos'
     }
   };
 
