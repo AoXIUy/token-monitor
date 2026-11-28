@@ -56,7 +56,7 @@ function parseSqliteTimestampMs(raw) {
   }
   const text = String(raw || '').trim();
   if (!text) return 0;
-  if (/^\d+$/.test(text)) {
+  if (/^\d+(?:\.\d+)?$/.test(text)) {
     const n = Number(text);
     if (!Number.isFinite(n) || n <= 0) return 0;
     return n < 10_000_000_000 ? Math.trunc(n * 1000) : Math.trunc(n);
@@ -121,8 +121,18 @@ function isStepUserCanceled(step) {
  */
 function isStepQuotaExhausted(step) {
   if (!step || typeof step !== 'object') return false;
-  const text = `${step.error || ''} ${step.error_message || ''} ${step.failure || ''} ${step.message || ''} ${step.content || ''}`;
-  return QUOTA_ERROR_MESSAGE_RE.test(text);
+  const errFields = `${step.error || ''} ${step.error_message || ''} ${step.failure || ''}`.trim();
+  if (errFields && QUOTA_ERROR_MESSAGE_RE.test(errFields)) return true;
+  const typeUpper = String(step.type || '').trim().toUpperCase();
+  const statusUpper = String(step.status || '').trim().toUpperCase();
+  const isErrorStep = (
+    typeUpper === 'ERROR'
+    || statusUpper === 'ERROR'
+    || statusUpper === 'FAILED'
+  );
+  if (!isErrorStep) return false;
+  const stepText = `${step.message || ''} ${step.content || ''}`.trim();
+  return Boolean(stepText && QUOTA_ERROR_MESSAGE_RE.test(stepText));
 }
 
 /**
@@ -219,9 +229,6 @@ function inspectTranscriptTailInterruption(rootDir, conversationId, fsApi = fs) 
     if (turnSteps.some(isStepUserCanceled)) {
       return { interrupted: false, definitive: true, reason: '' };
     }
-    if (turnSteps.some(isStepQuotaExhausted)) {
-      return { interrupted: true, definitive: true, reason: 'quota_exhausted', quotaExhausted: true };
-    }
 
     let lastPlannerIdx = -1;
     for (let i = turnSteps.length - 1; i >= 0; i -= 1) {
@@ -247,6 +254,11 @@ function inspectTranscriptTailInterruption(rootDir, conversationId, fsApi = fs) 
       if (lastPlanner.status === 'DONE' && !plannerHasToolCalls && !plannerHasError && !trailingIndicatesInterruption) {
         return { interrupted: false, definitive: true, reason: '' };
       }
+    }
+
+    const unrecoveredSteps = lastPlannerIdx >= 0 ? turnSteps.slice(lastPlannerIdx) : turnSteps;
+    if (unrecoveredSteps.some(isStepQuotaExhausted)) {
+      return { interrupted: true, definitive: true, reason: 'quota_exhausted', quotaExhausted: true };
     }
 
     const hasToolCalls = Array.isArray(lastStep.tool_calls) && lastStep.tool_calls.length > 0;
@@ -566,8 +578,15 @@ function callConversationServiceHttp({ port, csrfToken, method, body, timeoutMs 
 function resolveAgentApiCommand(opts = {}) {
   const platform = opts.platform || process.platform;
   const home = opts.homeDir || os.homedir();
-  const existsSync = opts.fs?.existsSync || fs.existsSync;
-  const readFileSync = opts.fs?.readFileSync || (!opts.fs ? fs.readFileSync : null);
+  const rawExistsSync = opts.fs?.existsSync || fs.existsSync;
+  const rawReadFileSync = opts.fs?.readFileSync || (!opts.fs ? fs.readFileSync : null);
+  const normalizeHostFsPath = (/** @type {string} */ p) => (
+    (!opts.fs && process.platform !== 'win32') ? String(p).replace(/\\/g, '/') : p
+  );
+  const existsSync = (/** @type {string} */ p) => rawExistsSync(normalizeHostFsPath(p));
+  const readFileSync = typeof rawReadFileSync === 'function'
+    ? (/** @type {string} */ p, /** @type {BufferEncoding} */ enc) => rawReadFileSync(normalizeHostFsPath(p), enc)
+    : null;
   const pathApi = platform === 'win32' ? path.win32 : path;
   const target = String(opts.targetClient || '').trim().toLowerCase();
   const rawProcs = opts.procs || [];
@@ -588,7 +607,7 @@ function resolveAgentApiCommand(opts = {}) {
       && processManager.classifyProcess(proc.name, proc.exePath, proc.argv0, proc.args) === 'language_server'
       && existsSync(proc.exePath)
     ) {
-      return { bin: proc.exePath, prefixArgs: ['agentapi'] };
+      return { bin: normalizeHostFsPath(proc.exePath), prefixArgs: ['agentapi'] };
     }
   }
 
@@ -599,7 +618,7 @@ function resolveAgentApiCommand(opts = {}) {
     : [pathApi.join(binDir, 'agentapi')];
   for (const candidate of wrapperCandidates) {
     if (existsSync(candidate)) {
-      return { bin: candidate, prefixArgs: [] };
+      return { bin: normalizeHostFsPath(candidate), prefixArgs: [] };
     }
   }
   if (platform === 'win32' && typeof readFileSync === 'function') {
@@ -608,9 +627,13 @@ function resolveAgentApiCommand(opts = {}) {
       if (!existsSync(scriptPath)) continue;
       try {
         const rawScript = String(readFileSync(scriptPath, 'utf8') || '');
-        const match = rawScript.match(/"([^"\r\n]*language[_-]server[^"\r\n]*\.exe)"\s+agentapi\b/i);
-        if (match?.[1] && existsSync(match[1])) {
-          return { bin: match[1], prefixArgs: ['agentapi'] };
+        const match = rawScript.match(/"([^"\r\n]*language[_-]server[^"\r\n]*\.exe)"\s+agentapi\b/i)
+          || rawScript.match(/(?:^|[\s@])([^\s"\r\n]*language[_-]server[^\s"\r\n]*\.exe)\s+agentapi\b/im);
+        const rawCandidate = match?.[1]
+          ? match[1].replace(/^%~dp0[\\/]?/i, `${binDir}${pathApi.sep}`)
+          : '';
+        if (rawCandidate && existsSync(rawCandidate)) {
+          return { bin: normalizeHostFsPath(rawCandidate), prefixArgs: ['agentapi'] };
         }
       } catch (_) {}
     }
@@ -658,7 +681,7 @@ function resolveAgentApiCommand(opts = {}) {
       ];
       for (const rel of relatives) {
         if (existsSync(rel)) {
-          return { bin: rel, prefixArgs: ['agentapi'] };
+          return { bin: normalizeHostFsPath(rel), prefixArgs: ['agentapi'] };
         }
       }
     }

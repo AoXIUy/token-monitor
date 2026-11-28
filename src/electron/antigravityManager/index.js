@@ -33,7 +33,7 @@ const {
  *   getDeviceIdentity?: () => { deviceId: string, hostname: string },
  *   getHubSyncTarget?: () => { mode: string, hubUrl?: string, secret?: string, embeddedHub?: any } | null,
  *   isLocalAntigravityBusy?: () => boolean,
- *   isLocalAntigravityActivelyGenerating?: () => boolean,
+ *   isLocalAntigravityActivelyGenerating?: (opts?: { nowMs?: number, targetClient?: string | null }) => boolean,
  *   probeLocalLimits?: (opts?: { signal?: AbortSignal }) => Promise<any>,
  *   getLatestLocalLimits?: () => any,
  *   onAutoSwitchCompleted?: (result: any) => void,
@@ -1245,7 +1245,7 @@ function createAntigravityManagerService(options) {
       ? isBusy
       : (isBusy && (
           typeof options.isLocalAntigravityActivelyGenerating === 'function'
-            ? options.isLocalAntigravityActivelyGenerating() === true
+            ? options.isLocalAntigravityActivelyGenerating({ nowMs: now, targetClient: cfg.defaultSwitchTarget }) === true
             : (options.switcherDeps
                 ? true
                 : (typeof resumeApiForBusy.hasActivelyGeneratingTurn === 'function'

@@ -341,29 +341,33 @@ function sendPayloadTooLarge(req, res, payload, extraHeaders = {}) {
   let reqEnded = Boolean(req?.complete || req?.readableEnded);
   let finishFired = false;
   let drainTimer = null;
-  const finalizeDestroy = () => {
+  const clearDrainWatchers = () => {
     if (drainTimer) {
       clearTimeout(drainTimer);
       drainTimer = null;
     }
     req?.removeListener?.('data', onDrainChunk);
     req?.removeListener?.('end', onReqEnd);
+  };
+  const finalizeDestroy = () => {
+    clearDrainWatchers();
     try { req?.destroy?.(); } catch (_) {}
   };
   const onDrainChunk = (chunk) => {
-    drainedBytes += chunk?.length || 0;
-    if (drainedBytes > MAX_POST_413_DRAIN_BYTES && finishFired) {
-      finalizeDestroy();
+    drainedBytes += typeof chunk === 'string' ? Buffer.byteLength(chunk, 'utf8') : (chunk?.length || 0);
+    if (drainedBytes > MAX_POST_413_DRAIN_BYTES) {
+      if (finishFired) {
+        finalizeDestroy();
+      } else {
+        req?.removeListener?.('data', onDrainChunk);
+        try { req?.pause?.(); } catch (_) {}
+      }
     }
   };
   const onReqEnd = () => {
     reqEnded = true;
     if (finishFired) {
-      if (drainTimer) {
-        clearTimeout(drainTimer);
-        drainTimer = null;
-      }
-      req?.removeListener?.('data', onDrainChunk);
+      clearDrainWatchers();
     }
   };
   if (!reqEnded && typeof req?.on === 'function') {
@@ -371,12 +375,12 @@ function sendPayloadTooLarge(req, res, payload, extraHeaders = {}) {
     req.once('end', onReqEnd);
     try { req.resume?.(); } catch (_) {}
   }
+  res.once?.('close', clearDrainWatchers);
   rawSendJson(res, 413, payload, { ...extraHeaders, connection: 'close' });
   res.once?.('finish', () => {
     finishFired = true;
     if (reqEnded || req?.complete || req?.readableEnded) {
-      if (drainTimer) clearTimeout(drainTimer);
-      req?.removeListener?.('data', onDrainChunk);
+      clearDrainWatchers();
       return;
     }
     if (drainedBytes > MAX_POST_413_DRAIN_BYTES) {

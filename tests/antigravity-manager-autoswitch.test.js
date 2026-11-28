@@ -1324,6 +1324,7 @@ test('Windows 0% quota bypasses background-only busy state, unverified Win32 hot
   // 1. Unix-second SQLite timestamps normalize to milliseconds
   assert.equal(taskResume.parseSqliteTimestampMs(1_770_000_000), 1_770_000_000_000);
   assert.equal(taskResume.parseSqliteTimestampMs('1770000000'), 1_770_000_000_000);
+  assert.equal(taskResume.parseSqliteTimestampMs('1770000000.25'), 1_770_000_000_250);
 
   // 2. Setup classic conversation_summaries.db where turn crashed with quota error (`IDLE`),
   // while a background shell command keeps `not_fully_idle = 1`
@@ -1377,6 +1378,7 @@ test('Windows 0% quota bypasses background-only busy state, unverified Win32 hot
   ins.run('conv-bg-task-stalled', 'Background test task', '', 'CASCADE_RUN_STATUS_IDLE', 1, nowIso, nowIso);
   ins.run('conv-manual-quota-err', 'Hit 429 quota', '', 'CASCADE_RUN_STATUS_IDLE', 0, nowIso, nowIso);
   ins.run('conv-old-idle', 'Finished cleanly', '', 'CASCADE_RUN_STATUS_IDLE', 0, nowIso, nowIso);
+  ins.run('conv-discussed-429-done', 'Discussed 429 in prose', '', 'CASCADE_RUN_STATUS_IDLE', 0, nowIso, nowIso);
   db.close();
 
   const writeTranscript = (cid, rows) => {
@@ -1391,6 +1393,10 @@ test('Windows 0% quota bypasses background-only busy state, unverified Win32 hot
   writeTranscript('conv-old-idle', [
     { step_index: 0, type: 'USER_INPUT', status: 'DONE' },
     { step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE' }
+  ]);
+  writeTranscript('conv-discussed-429-done', [
+    { step_index: 0, type: 'USER_INPUT', status: 'DONE', content: 'Why does HTTP 429 rate limit or Individual quota reached happen?' },
+    { step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE', content: 'HTTP 429 too many requests means rate limited; fixed cleanly.' }
   ]);
 
   assert.equal(

@@ -8515,10 +8515,10 @@ function ensureAntigravityManagerService() {
       return null;
     },
     isLocalAntigravityBusy: () => hasRunningLocalAntigravitySession(lastCollectedDevice),
-    isLocalAntigravityActivelyGenerating: () => {
+    isLocalAntigravityActivelyGenerating: (opts) => {
       try {
         const taskResume = require('./antigravityManager/taskResume');
-        return taskResume.hasActivelyGeneratingTurn();
+        return taskResume.hasActivelyGeneratingTurn(opts);
       } catch (_) {
         return false;
       }
