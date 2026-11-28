@@ -4,15 +4,15 @@
 
 <!-- app-update-notes:en:start -->
 ### Fixed
-- **Active model quota-pool scoping for Antigravity auto-switch:** Detect the model currently used by active Antigravity conversations (via read-only conversation summaries, transcript tails, and `antigravity_state.pbtxt` paired with the local RPC model catalog) so running Gemini models no longer triggers auto-switching when an account's Claude/GPT pool is at 0%, while exhaustion in the actively used pool still triggers and prioritizes replacements for that pool.
-- **Pre-switch stale RPC snapshot protection and safer acknowledgment pruning:** Ignore cached local RPC rows whose `updatedAt` predates the latest completed account switch so cross-provider `LimitsRuntime` refreshes cannot wipe manual-switch acknowledgments or replay an old exhausted account, and prune acknowledged windows only after observing explicit recovery rather than transient omission.
+- **No blank stretching in Antigravity Account Manager cards:** Align account grid cards to their natural content height and remove bottom action stretching so expanding one account's model breakdown (or viewing accounts with different quota sections) never creates empty gaps inside neighboring cards.
+- **One-click global and per-card model expansion:** Added an "Expand all models / Collapse all models" toggle in the filter bar plus a direct collapsible model bar on each account card (synchronized with the More menu and DOM card cache across all 7 locales), eliminating the need to expand accounts one by one.
 <!-- app-update-notes:en:end -->
 ## Download
 
-- **Windows Installer** — [Token-Monitor-Setup-0.107.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-Setup-0.107.1.exe) (recommended)
-- **Windows Portable** — [Token-Monitor-0.107.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-0.107.1.exe) (no install required)
-- **Linux amd64** — [Token-Monitor-0.107.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-0.107.1-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.107.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-0.107.1-x86_64.AppImage)
+- **Windows Installer** — [Token-Monitor-Setup-0.107.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-Setup-0.107.2.exe) (recommended)
+- **Windows Portable** — [Token-Monitor-0.107.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-0.107.2.exe) (no install required)
+- **Linux amd64** — [Token-Monitor-0.107.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-0.107.2-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.107.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-0.107.2-x86_64.AppImage)
 
 <details>
 <summary><strong>First launch and other notes</strong></summary>
@@ -21,7 +21,7 @@
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.107.1-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.107.1-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.107.2-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.107.2-x86_64.AppImage` then run it.
 
 ### Other notes
 
@@ -41,16 +41,16 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 <!-- app-update-notes:zh:start -->
 ### 修复
-- **Antigravity 自动切号按当前对话模型额度池精准过滤：** 通过只读检测当前活跃 Antigravity 对话的尾部模型记录与界面选定模型（结合本地 RPC 模型目录映射），使用 Gemini 系列模型时即使当前账号的 Claude/GPT 池为 0% 也不再误触发自动切号；仅当正在使用的额度池达到阈值时才触发切号并优先选择该池余量更高的账号。
-- **切号前旧 RPC 缓存行隔离与手动确认修剪加固：** 自动切号与手动确认核销现在会直接忽略 `updatedAt` 早于最近一次切号完成时间的旧缓存行，彻底解决其他服务商（如 Codex）刷新推送全量快照时意外清空手动切号确认或重放旧限额账号的问题，并确保仅在明确观测到窗口恢复后才移除已确认标记。
+- **修复 Antigravity 账号管理卡片展开模型后的留白问题：** 为账号网格启用顶部自然对齐并移除卡片底部操作区拉伸，展开单个账号的模型明细（或不同账号配额高度不一致）时不再导致同行其余卡片出现大块空白。
+- **支持一键全局展开/收起与单卡直达切换模型明细：** 在筛选栏新增「展开全部模型 / 收起全部模型」按钮，并为含模型数据的账号卡片新增直达折叠条（与「更多」菜单、卡片 DOM 缓存及 7 语种文案完整联动），无需再逐个账号展开查看。
 <!-- app-update-notes:zh:end -->
 
 ## 下载
 
-- **Windows 安装版** — [Token-Monitor-Setup-0.107.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-Setup-0.107.1.exe)（推荐）
-- **Windows 便携版** — [Token-Monitor-0.107.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-0.107.1.exe)（免安装）
-- **Linux amd64** — [Token-Monitor-0.107.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-0.107.1-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.107.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-0.107.1-x86_64.AppImage)
+- **Windows 安装版** — [Token-Monitor-Setup-0.107.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-Setup-0.107.2.exe)（推荐）
+- **Windows 便携版** — [Token-Monitor-0.107.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-0.107.2.exe)（免安装）
+- **Linux amd64** — [Token-Monitor-0.107.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-0.107.2-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.107.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-0.107.2-x86_64.AppImage)
 
 <details>
 <summary><strong>首次启动与其他说明</strong></summary>
@@ -59,7 +59,7 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.107.1-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.107.1-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.107.2-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.107.2-x86_64.AppImage` then run it.
 
 ### 其他说明
 
@@ -74,7 +74,7 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ---
 
 <details>
-<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.107.0...v0.107.1">v0.107.0...v0.107.1</a></summary>
+<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.107.1...v0.107.2">v0.107.1...v0.107.2</a></summary>
 
 <!-- github-generated-release-notes -->
 
@@ -92,16 +92,16 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 <!-- app-update-notes:zh-TW:start -->
 ### 修復
-- **Antigravity 自動切換依目前對話模型額度池精準過濾：** 透過唯讀偵測目前活躍 Antigravity 對話的尾部模型紀錄與介面選定模型（結合本機 RPC 模型目錄對應），使用 Gemini 系列模型時即使目前帳號的 Claude/GPT 池為 0% 也不再誤觸發自動切換；僅當正在使用的額度池達到門檻時才觸發切換並優先挑選該池餘額較高的帳號。
-- **切換前舊 RPC 快取列隔離與手動確認修剪強化：** 自動切換與手動確認核銷現在會直接略過 `updatedAt` 早於最近一次切換完成時間的舊快取列，徹底解決其他服務商（如 Codex）重新整理推送完整快照時意外清空手動切換確認或重播舊限額帳號的問題，並確保僅在明確觀測到視窗恢復後才移除已確認標記。
+- **修復 Antigravity 帳號管理卡片展開模型後的留白問題：** 為帳號網格啟用頂部自然對齊並移除卡片底部操作區拉伸，展開單一帳號的模型明細（或不同帳號配額高度不一致）時不再導致同行其餘卡片出現大塊空白。
+- **支援一鍵全域展開/收合與單卡直達切換模型明細：** 在篩選列新增「展開全部模型 / 收合全部模型」按鈕，並為含模型資料的帳號卡片新增直達摺疊列（與「更多」選單、卡片 DOM 快取及 7 語系文案完整連動），無需再逐一展開查看。
 <!-- app-update-notes:zh-TW:end -->
 
 ## 下載
 
-- **Windows 安裝版** — [Token-Monitor-Setup-0.107.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-Setup-0.107.1.exe)（推薦）
-- **Windows 便攜版** — [Token-Monitor-0.107.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-0.107.1.exe)（免安裝）
-- **Linux amd64** — [Token-Monitor-0.107.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-0.107.1-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.107.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-0.107.1-x86_64.AppImage)
+- **Windows 安裝版** — [Token-Monitor-Setup-0.107.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-Setup-0.107.2.exe)（推薦）
+- **Windows 便攜版** — [Token-Monitor-0.107.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-0.107.2.exe)（免安裝）
+- **Linux amd64** — [Token-Monitor-0.107.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-0.107.2-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.107.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-0.107.2-x86_64.AppImage)
 
 </details>
 
@@ -114,16 +114,16 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 <!-- app-update-notes:ko:start -->
 ### 수정
-- **활성 대화 모델 할당량 풀 기준의 Antigravity 자동 전환 필터링:** 실행 중인 Antigravity 대화의 요약·트랜스크립트 끝부분과 `antigravity_state.pbtxt`(로컬 RPC 모델 카탈로그와 연계)를 읽기 전용으로 감지해, Gemini 모델을 사용 중일 때는 계정의 Claude/GPT 풀이 0%여도 자동 전환이 오작동하지 않으며 실제 사용 중인 풀이 소진될 때만 해당 풀 잔량이 높은 계정으로 전환합니다.
-- **전환 이전 구버전 RPC 스냅샷 차단 및 수동 확인 정리 강화:** 최근 완료된 계정 전환 시각보다 이전의 `updatedAt`을 가진 캐시 RPC 행을 무시해 다른 공급자(예: Codex) 새로고침 시 전체 스냅샷 재발행으로 수동 전환 확인 상태가 지워지거나 이전 소진 계정이 재트리거되는 문제를 방지하고, 일시 누락이 아닌 명확한 복구가 관측된 경우에만 확인된 창을 제거합니다.
+- **Antigravity 계정 관리 카드 모델 펼치기 시 빈 여백 문제 수정:** 계정 그리드 카드를 각 카드의 자연 높이에 맞춰 정렬하고 하단 작업 영역의 세로 늘어남을 제거해, 한 계정의 모델 목록을 펼치거나 카드 높이가 달라도 같은 행의 다른 카드 내부에 큰 공백이 생기지 않도록 개선했습니다.
+- **전체 모델 일괄 펼치기/접기 및 카드별 바로 토글 추가:** 필터 바에 '모든 모델 펼치기 / 접기' 버튼을 추가하고 모델 데이터가 있는 각 계정 카드에 바로 접고 펼 수 있는 토글 바를 제공해(더보기 메뉴·카드 DOM 캐시·7개 언어와 동기화) 계정을 하나씩 열어볼 필요가 없도록 개선했습니다.
 <!-- app-update-notes:ko:end -->
 
 ## 다운로드
 
-- **Windows 설치 버전** — [Token-Monitor-Setup-0.107.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-Setup-0.107.1.exe) (권장)
-- **Windows 포터블 버전** — [Token-Monitor-0.107.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-0.107.1.exe) (설치 필요 없음)
-- **Linux amd64** — [Token-Monitor-0.107.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-0.107.1-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.107.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-0.107.1-x86_64.AppImage)
+- **Windows 설치 버전** — [Token-Monitor-Setup-0.107.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-Setup-0.107.2.exe) (권장)
+- **Windows 포터블 버전** — [Token-Monitor-0.107.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-0.107.2.exe) (설치 필요 없음)
+- **Linux amd64** — [Token-Monitor-0.107.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-0.107.2-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.107.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-0.107.2-x86_64.AppImage)
 
 </details>
 
@@ -136,16 +136,16 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 <!-- app-update-notes:ja:start -->
 ### 修正
-- **Antigravity 自動切替のアクティブモデル別クォータプール絞り込み：** 実行中の Antigravity 会話サマリー・トランスクリプト末尾および `antigravity_state.pbtxt`（ローカル RPC のモデルカタログと照合）を読み取り専用で検出し、Gemini 系モデル実行中はアカウントの Claude/GPT プールが 0% でも誤って自動切替されないようにし、実際に使用中のプールが枯渇した際のみそのプール残量が多いアカウントへ切り替えます。
-- **切替前の古い RPC スナップショット除外と手動確認クリアの堅牢化：** 直近のアカウント切替完了時刻より古い `updatedAt` を持つキャッシュ RPC 行を無視することで、他プロバイダー（Codex など）更新時の全量再配信による手動切替確認の消失や旧枯渇アカウントの再発火を防ぎ、一時的な欠落ではなく明確な回復を観測した場合のみ確認済みウィンドウを解除します。
+- **Antigravity アカウント管理カードのモデル展開時の余白問題を修正：** アカウントグリッドのカードを各カードの本来の高さに上揃えし、下部アクション領域の引き伸ばしを廃止することで、1 つのアカウントのモデル一覧を展開しても同じ行の他カード内に大きな空白が生じないようにしました。
+- **全モデルの一括展開/折りたたみとカード単位の直接トグルを追加：** フィルターバーに「すべてのモデルを展開 / 折りたたむ」ボタンを追加し、モデル情報を持つ各アカウントカードにも直接開閉できるトグルバーを配置（その他メニュー・カード DOM キャッシュ・7 言語と同期）することで、アカウントごとに 1 つずつ開く手間を解消しました。
 <!-- app-update-notes:ja:end -->
 
 ## ダウンロード
 
-- **Windows インストーラー** — [Token-Monitor-Setup-0.107.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-Setup-0.107.1.exe)（推奨）
-- **Windows ポータブル版** — [Token-Monitor-0.107.1.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-0.107.1.exe)（インストール不要）
-- **Linux amd64** — [Token-Monitor-0.107.1-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-0.107.1-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.107.1-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.1/Token-Monitor-0.107.1-x86_64.AppImage)
+- **Windows インストーラー** — [Token-Monitor-Setup-0.107.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-Setup-0.107.2.exe)（推奨）
+- **Windows ポータブル版** — [Token-Monitor-0.107.2.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-0.107.2.exe)（インストール不要）
+- **Linux amd64** — [Token-Monitor-0.107.2-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-0.107.2-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.107.2-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.107.2/Token-Monitor-0.107.2-x86_64.AppImage)
 
 </details>
 
