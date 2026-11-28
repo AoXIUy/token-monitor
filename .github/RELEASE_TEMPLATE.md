@@ -4,16 +4,16 @@
 
 <!-- app-update-notes:en:start -->
 ### Fixed
-- **Active-turn auto-switch protection and race cleanup:** Defer 0%-remaining quota auto-switches while local Antigravity sessions are actively running (with a bounded timeout fallback) instead of terminating in-flight turns mid-execution, clear queued triggers on manual switches, and re-probe live RPC state on turn completion.
-- **Pool quota freshness, family selection, and multi-client routing:** Require fresh verified pool quotas before auto-switching, prevent primary-scope fallback from cycling into accounts depleted in the triggered model family, probe concurrent local `app` / `cli` / `ide` RPC sources independently, support automatic ACP plugin routing and CLI credential sync, and retry post-hot-switch identity checks.
-- **Safer post-switch task auto-resume and audit history:** Exclude user-canceled turns, `ask_question` / feedback-waiting prompts, and completed turns with trailing checkpoints from automatic `agentapi` resumption, limit manual switches to actively running turns isolated by target client, and persist bounded local auto-switch history across restarts.
+- **Windows Antigravity 2.x account switching and credential persistence:** Read `product.json` and `package.json` directly from `resources/app.asar` so Antigravity 2.x desktop installs reliably resolve their version and update system keyring credentials, perform clean full restarts for stdin-bridge desktop language servers and unverified Windows hot-switches, filter Electron worker processes via `ParentProcessId`, and add bounded Windows atomic-rename and `SQLITE_BUSY` retries.
+- **Zero-quota busy-deferral recovery and safer task auto-resume:** Bypass the 180-second busy-deferral wait at 0% quota when a model turn has already halted to idle while background shell tasks remain active, resume recent conversations halted by explicit quota errors on manual switches without disturbing completed turns, and support Windows `agentapi.bat` / `agentapi.cmd` wrappers and Unix-second SQLite timestamps.
+- **Native Win32 RPC socket discovery, packaging, and Hub 413 handling:** Query `iphlpapi.dll` `GetExtendedTcpTable` via Koffi on Windows to avoid spawning PowerShell processes during local Antigravity RPC probes, align Windows `electron-builder` packaging scripts with `scripts/electron-builder.config.js`, and drain bounded request bytes before closing HTTP `413` sockets on Windows Winsock.
 <!-- app-update-notes:en:end -->
 ## Download
 
-- **Windows Installer** — [Token-Monitor-Setup-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-Setup-0.106.3.exe) (recommended)
-- **Windows Portable** — [Token-Monitor-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3.exe) (no install required)
-- **Linux amd64** — [Token-Monitor-0.106.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.106.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-x86_64.AppImage)
+- **Windows Installer** — [Token-Monitor-Setup-0.106.4.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-Setup-0.106.4.exe) (recommended)
+- **Windows Portable** — [Token-Monitor-0.106.4.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-0.106.4.exe) (no install required)
+- **Linux amd64** — [Token-Monitor-0.106.4-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-0.106.4-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.106.4-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-0.106.4-x86_64.AppImage)
 
 <details>
 <summary><strong>First launch and other notes</strong></summary>
@@ -22,7 +22,7 @@
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.106.3-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.106.3-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.106.4-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.106.4-x86_64.AppImage` then run it.
 
 ### Other notes
 
@@ -42,17 +42,17 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 <!-- app-update-notes:zh:start -->
 ### 修复
-- **活跃会话防误杀保护与状态机竞态清理：** 在本地 Antigravity 会话活跃运行期间延迟 0% 硬耗尽自动切号（带防卡死超时兜底），避免跨模型族任务或本地工具执行被中途强杀；手动切号时立即清理挂起的旧限流快照，并在轮次结束时优先重探实时本地 RPC 状态。
-- **账号池配额新鲜度门控、家族选号与多客户端路由：** 自动切号前强制校验候选账号配额新鲜度并识别已过重置时间的恢复窗口，阻止主池模式下回退切入同模型族耗尽账号引发死循环；支持本地 `app` / `cli` / `ide` 多端并发探测、ACP 插件自动路由与 CLI 凭据联动同步，并为热切身份核验增加重试与自动重启升级。
-- **中断对话自动续跑安全门控与历史持久化：** 自动续跑时排除用户主动取消、等待交互提问或审批（`ask_question`）及带尾部检查点的已完成对话，手动切号仅接续切号瞬间运行中的目标客户端对话，并在本地持久化自动切号历史记录。
+- **Windows 版 Antigravity 2.x 切号与凭据写入加固：** 支持直接从 `resources/app.asar` 解析 `product.json` 与 `package.json` 版本号以确保 Antigravity 2.x 桌面端可靠更新系统凭据库，识别 stdin 桥接桌面语言服务与未通过核验的 Windows 热切换并自动升级为干净完整重启，结合 `ParentProcessId` 过滤 Electron 工作子进程，并为原子文件替换与 `SQLITE_BUSY` 增加有界重试。
+- **0% 配额忙等待防卡死与中断对话自动续跑增强：** 当模型轮次已停机回到空闲态而仅剩后台终端任务保持活跃时跳过 180 秒忙等待延迟并立即切号，支持手动切号自动续跑近期因明确配额错误中断的对话且不打扰正常完结会话，并兼容 Windows `agentapi.bat` / `agentapi.cmd` 包装脚本与秒级 SQLite 时间戳。
+- **Win32 原生 RPC 端口探测、打包配置与 Hub 413 响应优化：** 在 Windows 下通过 Koffi 直接调用 `iphlpapi.dll` `GetExtendedTcpTable` 取代频繁拉起 PowerShell 子进程探测本地 Antigravity RPC 端口，对齐 Windows `electron-builder` 打包脚本配置，并在 Windows Winsock 关闭 HTTP `413` 连接前有界排空请求体以避免连接重置丢失响应。
 <!-- app-update-notes:zh:end -->
 
 ## 下载
 
-- **Windows 安装版** — [Token-Monitor-Setup-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-Setup-0.106.3.exe)（推荐）
-- **Windows 便携版** — [Token-Monitor-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3.exe)（免安装）
-- **Linux amd64** — [Token-Monitor-0.106.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.106.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-x86_64.AppImage)
+- **Windows 安装版** — [Token-Monitor-Setup-0.106.4.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-Setup-0.106.4.exe)（推荐）
+- **Windows 便携版** — [Token-Monitor-0.106.4.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-0.106.4.exe)（免安装）
+- **Linux amd64** — [Token-Monitor-0.106.4-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-0.106.4-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.106.4-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-0.106.4-x86_64.AppImage)
 
 <details>
 <summary><strong>首次启动与其他说明</strong></summary>
@@ -61,7 +61,7 @@ Tokscale is bundled with this app and updated through Token Monitor releases. Se
 
 **Windows:** Unsigned fork executables; Windows may show an unknown publisher warning.
 
-**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.106.3-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.106.3-x86_64.AppImage` then run it.
+**Linux:** `.deb`: `sudo apt install ./Token-Monitor-0.106.4-amd64.deb`; AppImage: `chmod +x Token-Monitor-0.106.4-x86_64.AppImage` then run it.
 
 ### 其他说明
 
@@ -76,7 +76,7 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 ---
 
 <details>
-<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.106.1...v0.106.3">v0.106.1...v0.106.3</a></summary>
+<summary><strong>Full Changelog:</strong> <a href="https://github.com/AoXIUy/token-monitor/compare/v0.106.3...v0.106.4">v0.106.3...v0.106.4</a></summary>
 
 <!-- github-generated-release-notes -->
 
@@ -94,17 +94,17 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 <!-- app-update-notes:zh-TW:start -->
 ### 修復
-- **活躍工作階段防誤殺保護與狀態機競態清理：** 在本機 Antigravity 工作階段活躍執行期間延後 0% 硬耗盡自動切號（附防卡死逾時保底），避免跨模型族任務或本機工具執行被中途強制終止；手動切號時立即清除掛起的舊限流快照，並在輪次結束時優先重探即時本機 RPC 狀態。
-- **帳號池配額新鮮度門控、家族選號與多用戶端路由：** 自動切號前強制校驗候選帳號配額新鮮度並識別已過重設時間的恢復視窗，阻止主池模式下回退切入同模型族耗盡帳號引發死循環；支援本機 `app` / `cli` / `ide` 多端並行探測、ACP 外掛自動路由與 CLI 憑證聯動同步，並為熱切身分核驗增加重試與自動重啟升級。
-- **中斷對話自動續跑安全門控與歷史持久化：** 自動續跑時排除使用者主動取消、等待互動提問或審批（`ask_question`）及附尾部檢查點的已完成對話，手動切號僅接續切號瞬間執行中的目標用戶端對話，並在本機持久化自動切號歷史紀錄。
+- **Windows 版 Antigravity 2.x 切號與憑證寫入強化：** 支援直接從 `resources/app.asar` 解析 `product.json` 與 `package.json` 版本號以確保 Antigravity 2.x 桌面版可靠更新系統憑證庫，識別 stdin 橋接桌面語言服務與未通過核驗的 Windows 熱切換並自動升級為乾淨完整重啟，結合 `ParentProcessId` 過濾 Electron 工作子程序，並為原子檔案替換與 `SQLITE_BUSY` 增加有界重試。
+- **0% 配額忙等待防卡死與中斷對話自動續跑增強：** 當模型輪次已停機回到閒置態而僅剩背景終端機任務保持活躍時跳過 180 秒忙等待延遲並立即切號，支援手動切號自動續跑近期因明確配額錯誤中斷的對話且不打擾正常完結工作階段，並相容 Windows `agentapi.bat` / `agentapi.cmd` 包裝指令碼與秒級 SQLite 時間戳。
+- **Win32 原生 RPC 連接埠探測、封裝設定與 Hub 413 回應最佳化：** 在 Windows 下透過 Koffi 直接呼叫 `iphlpapi.dll` `GetExtendedTcpTable` 取代頻繁啟動 PowerShell 子程序探測本機 Antigravity RPC 連接埠，對齊 Windows `electron-builder` 封裝指令碼設定，並在 Windows Winsock 關閉 HTTP `413` 連線前有界排空請求內容以避免連線重設遺失回應。
 <!-- app-update-notes:zh-TW:end -->
 
 ## 下載
 
-- **Windows 安裝版** — [Token-Monitor-Setup-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-Setup-0.106.3.exe)（推薦）
-- **Windows 便攜版** — [Token-Monitor-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3.exe)（免安裝）
-- **Linux amd64** — [Token-Monitor-0.106.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.106.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-x86_64.AppImage)
+- **Windows 安裝版** — [Token-Monitor-Setup-0.106.4.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-Setup-0.106.4.exe)（推薦）
+- **Windows 便攜版** — [Token-Monitor-0.106.4.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-0.106.4.exe)（免安裝）
+- **Linux amd64** — [Token-Monitor-0.106.4-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-0.106.4-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.106.4-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-0.106.4-x86_64.AppImage)
 
 </details>
 
@@ -117,17 +117,17 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 <!-- app-update-notes:ko:start -->
 ### 수정
-- **실행 중인 턴 보호 및 자동 전환 경합 정리:** 로컬 Antigravity 세션이 활발히 실행 중일 때는 0% 소진 자동 전환을 지연(타임아웃 폴백 포함)하여 도구 실행이나 다른 모델 작업이 중간에 강제 종료되지 않도록 보호하고, 수동 전환 시 대기 중인 이전 한도 스냅샷을 즉시 비우며 턴 종료 시 실시간 로컬 RPC 상태를 다시 확인합니다.
-- **계정 풀 할당량 최신성 검증, 패밀리 선택 및 다중 클라이언트 라우팅:** 자동 전환 전 후보 계정 할당량의 최신성과 초기화된 리셋 시간을 검증하고, 기본 범위에서 동일 모델 패밀리가 소진된 계정으로 반복 전환되는 루프를 차단하며, 로컬 `app` / `cli` / `ide` 동시 프로빙, ACP 플러그인 자동 라우팅, CLI 자격 증명 동기화 및 핫스위치 검증 재시도를 지원합니다.
-- **안전한 작업 자동 재개 및 전환 기록 보존:** 사용자가 직접 취소한 턴, `ask_question` 응답 대기 상태, 후행 체크포인트가 있는 완료 대화를 `agentapi` 자동 재개 대상에서 제외하고, 수동 전환은 대상 클라이언트의 실행 중인 대화만 이어가며 로컬 자동 전환 이력을 재시작 후에도 유지합니다.
+- **Windows Antigravity 2.x 계정 전환 및 자격 증명 저장 강화:** `resources/app.asar`에서 `product.json` 및 `package.json` 버전을 직접 읽어 Antigravity 2.x 데스크톱 설치본의 시스템 키링 자격 증명을 안정적으로 갱신하고, stdin 브리지 데스크톱 언어 서버와 미검증 Windows 핫스위치를 깔끔한 전체 재시작으로 전환하며, `ParentProcessId`로 Electron 워커 프로세스를 필터링하고 Windows 원자적 파일 교체 및 `SQLITE_BUSY` 재시도를 추가했습니다.
+- **0% 할당량 대기 교착 해소 및 안전한 작업 자동 재개:** 모델 턴이 이미 유휴 상태로 멈추고 백그라운드 셸 작업만 남아 있을 때 0% 할당량에서 180초 지연 대기를 건너뛰어 즉시 전환하고, 완료된 대화는 건드리지 않은 채 수동 전환 시 명확한 할당량 오류로 중단된 최근 대화를 자동 재개하며, Windows `agentapi.bat` / `agentapi.cmd` 래퍼와 초 단위 SQLite 타임스탬프를 지원합니다.
+- **네이티브 Win32 RPC 소켓 탐색, 패키징 및 Hub 413 처리 개선:** Windows에서 로컬 Antigravity RPC 프로브 시 PowerShell 프로세스를 반복 실행하는 대신 Koffi를 통해 `iphlpapi.dll` `GetExtendedTcpTable`을 직접 조회하고, Windows `electron-builder` 스크립트를 `scripts/electron-builder.config.js`와 정렬하며, Windows Winsock에서 HTTP `413` 소켓을 닫기 전에 제한된 요청 바이트를 비워 응답 유실을 방지합니다.
 <!-- app-update-notes:ko:end -->
 
 ## 다운로드
 
-- **Windows 설치 버전** — [Token-Monitor-Setup-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-Setup-0.106.3.exe) (권장)
-- **Windows 포터블 버전** — [Token-Monitor-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3.exe) (설치 필요 없음)
-- **Linux amd64** — [Token-Monitor-0.106.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.106.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-x86_64.AppImage)
+- **Windows 설치 버전** — [Token-Monitor-Setup-0.106.4.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-Setup-0.106.4.exe) (권장)
+- **Windows 포터블 버전** — [Token-Monitor-0.106.4.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-0.106.4.exe) (설치 필요 없음)
+- **Linux amd64** — [Token-Monitor-0.106.4-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-0.106.4-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.106.4-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-0.106.4-x86_64.AppImage)
 
 </details>
 
@@ -140,17 +140,17 @@ Tokscale 已随应用内置，并通过 Token Monitor 发布版本更新。你�
 
 <!-- app-update-notes:ja:start -->
 ### 修正
-- **実行中ターンの自動切替保護と競合状態の解消：** ローカルの Antigravity セッションが稼働中の場合は残量 0% 到達時の自動切替をターン終了まで待機（上限タイムアウト付き）して実行中のツールや別モデルタスクの強制終了を防ぎ、手動切替時に保留中の古い上限スナップショットを破棄してターン終了時に最新 RPC 状態を再確認するよう修正しました。
-- **プール残量の鮮度検証・ファミリー選択・複数クライアントルーティング：** 自動切替前に候補アカウント残量の鮮度と経過済みリセット時刻を検証し、主要スコープで同一モデルファミリーが枯渇したアカウントへループ切替する不具合を防止するとともに、ローカル `app` / `cli` / `ide` の個別プローブ、ACP プラグイン自動ルーティング、CLI 認証情報同期、ホットスイッチ検証の再試行に対応しました。
-- **安全な中断タスク自動再開と切替履歴の永続化：** ユーザーが手動停止したターン、`ask_question` などの応答待ち状態、末尾チェックポイント付きの完了済み会話を `agentapi` 自動再開の対象から除外し、手動切替時は対象クライアントで実行中の会話のみを引き継ぎ、自動切替履歴を再起動後も保持するよう改善しました。
+- **Windows 版 Antigravity 2.x のアカウント切替と認証情報保存の強化：** `resources/app.asar` から `product.json` と `package.json` を直接読み取って Antigravity 2.x デスクトップ版のバージョン判定とシステムキーリング更新を確実に行い、stdin ブリッジ型デスクトップ言語サーバーおよび未検証の Windows ホットスイッチをクリーンな完全再起動へ切り替え、`ParentProcessId` による Electron ワーカープロセスの除外と Windows のアトミックリネームおよび `SQLITE_BUSY` の有界リトライを追加しました。
+- **残量 0% 時のビジー待機スタック解消と安全なタスク自動再開：** モデルターンが既にアイドル停止しバックグラウンドのシェルタスクのみが残っている場合は残量 0% 到達時の 180 秒待機をスキップして即座に切り替え、完了済み会話に影響を与えず手動切替時にも明確なクォータエラーで停止した直近の会話を自動再開し、Windows の `agentapi.bat` / `agentapi.cmd` ラッパーと秒単位の SQLite タイムスタンプに対応しました。
+- **Win32 ネイティブ RPC ソケット検出・パッケージング・Hub 413 応答の改善：** Windows のローカル Antigravity RPC プローブで PowerShell プロセス起動を避けて Koffi 経由で `iphlpapi.dll` の `GetExtendedTcpTable` を直接照会し、Windows の `electron-builder` スクリプトを `scripts/electron-builder.config.js` に統一するとともに、Windows Winsock で HTTP `413` ソケットを閉じる前に上限付きでリクエストボディを読み捨てて応答消失を防止しました。
 <!-- app-update-notes:ja:end -->
 
 ## ダウンロード
 
-- **Windows インストーラー** — [Token-Monitor-Setup-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-Setup-0.106.3.exe)（推奨）
-- **Windows ポータブル版** — [Token-Monitor-0.106.3.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3.exe)（インストール不要）
-- **Linux amd64** — [Token-Monitor-0.106.3-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-amd64.deb)
-- **Linux x86_64 AppImage** — [Token-Monitor-0.106.3-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.3/Token-Monitor-0.106.3-x86_64.AppImage)
+- **Windows インストーラー** — [Token-Monitor-Setup-0.106.4.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-Setup-0.106.4.exe)（推奨）
+- **Windows ポータブル版** — [Token-Monitor-0.106.4.exe](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-0.106.4.exe)（インストール不要）
+- **Linux amd64** — [Token-Monitor-0.106.4-amd64.deb](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-0.106.4-amd64.deb)
+- **Linux x86_64 AppImage** — [Token-Monitor-0.106.4-x86_64.AppImage](https://github.com/AoXIUy/token-monitor/releases/download/v0.106.4/Token-Monitor-0.106.4-x86_64.AppImage)
 
 </details>
 
