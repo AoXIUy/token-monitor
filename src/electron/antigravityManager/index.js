@@ -117,6 +117,9 @@ function createAntigravityManagerService(options) {
   let lastAutoSwitchWasEmptyPool = false;
   /** @type {{ fromEmail: string, at: number } | null} */
   let lastUnverifiedHotSwitch = null;
+  /** @type {{ email: string, sinceMs: number, windowKeys: Set<string> | null } | null} */
+  let manualAck = null;
+  const MANUAL_ACK_PENDING_TTL_MS = 10 * 60_000;
   /** @type {Record<string, any> | null} */
   let lastAutoSwitch = store.getLastAutoSwitch();
 
@@ -601,7 +604,7 @@ function createAntigravityManagerService(options) {
     notifyStateChanged(true);
     if (touchedAutoSwitch && updated.autoSwitchEnabled) {
       const cachedLimits = options.getLatestLocalLimits?.();
-      if (cachedLimits && hasFreshLocalRpcRow(cachedLimits, 15_000) && autoSwitch.evaluateLocalQuotaTrigger(cachedLimits, updated).triggered) {
+      if (cachedLimits && hasFreshLocalRpcRow(cachedLimits, 15_000) && evaluateTrigger(cachedLimits, updated).triggered) {
         void Promise.resolve(onLocalLimitsUpdated(cachedLimits)).catch(() => {});
       } else if (typeof options.probeLocalLimits === 'function') {
         void probeAndEvaluateLocalQuota('config_change', { bypassMinInterval: true });
@@ -905,6 +908,13 @@ function createAntigravityManagerService(options) {
         lastUnverifiedHotSwitch = null;
       }
       switchedOk = Boolean(res?.ok);
+      if (switchedOk && !switchOpts?.isAutoSwitch && account.email) {
+        manualAck = {
+          email: String(account.email).trim().toLowerCase(),
+          sinceMs: nowMsFn(),
+          windowKeys: null
+        };
+      }
       if (switchedOk && !autoSwitchInFlight) {
         resetAutoSwitchCooldown();
       }
@@ -1174,6 +1184,9 @@ function createAntigravityManagerService(options) {
         forceRestart: shouldEscalateHotSwitch,
         triggeredFromEmail: evalRes.accountEmail || ''
       });
+      if (switchRes?.ok) {
+        manualAck = null;
+      }
       const record = commitAutoSwitchRecord({
         at: nowMsFn(),
         fromEmail: evalRes.accountEmail || '',
@@ -1211,6 +1224,55 @@ function createAntigravityManagerService(options) {
   }
 
   /**
+   * Snapshot or prune manually acknowledged exhausted windows against the latest local RPC limits.
+   * @param {unknown} limits
+   * @param {Record<string, any>} cfg
+   */
+  function reconcileManualAck(limits, cfg) {
+    const ack = manualAck;
+    if (!ack) return;
+    const rows = autoSwitch.listLocalExhaustedWindowKeys(limits, cfg);
+    if (rows.length === 0) return;
+
+    const match = rows.find((r) => r.email === ack.email)
+      || (rows.every((r) => !r.email) ? rows[0] : undefined);
+    if (!match) {
+      const hasDifferentEmail = rows.some((r) => r.email && r.email !== ack.email);
+      if (hasDifferentEmail) {
+        manualAck = null;
+        return;
+      }
+      if (ack.windowKeys === null && nowMsFn() - ack.sinceMs > MANUAL_ACK_PENDING_TTL_MS) {
+        manualAck = null;
+      }
+      return;
+    }
+
+    if (ack.windowKeys === null) {
+      ack.windowKeys = new Set(match.keys);
+      return;
+    }
+
+    for (const key of [...ack.windowKeys]) {
+      if (!match.keys.has(key)) {
+        ack.windowKeys.delete(key);
+      }
+    }
+  }
+
+  /**
+   * @param {unknown} limits
+   * @param {Record<string, any>} cfg
+   */
+  function evaluateTrigger(limits, cfg) {
+    return autoSwitch.evaluateLocalQuotaTrigger(limits, cfg, {
+      acknowledged: manualAck?.windowKeys
+        ? { email: manualAck.email, windowKeys: manualAck.windowKeys }
+        : null
+    });
+  }
+
+  /**
    * Evaluate a read-only local Antigravity RPC limits snapshot and trigger auto-switch when exhausted.
    * @param {unknown} limits
    */
@@ -1222,7 +1284,8 @@ function createAntigravityManagerService(options) {
       busyDeferralStartedAtMs = 0;
       return { triggered: false, skipped: 'disabled' };
     }
-    const evalRes = autoSwitch.evaluateLocalQuotaTrigger(limits, cfg);
+    reconcileManualAck(limits, cfg);
+    const evalRes = evaluateTrigger(limits, cfg);
     if (!evalRes.triggered) {
       pendingAutoSwitchLimits = null;
       busyDeferralStartedAtMs = 0;
@@ -1448,6 +1511,7 @@ function createAntigravityManagerService(options) {
     started = false;
     pendingAutoSwitchLimits = null;
     busyDeferralStartedAtMs = 0;
+    manualAck = null;
     clearAutoSwitchMonitorTimers();
     scheduler.stop();
     resolveRefreshWaiters();

@@ -152,6 +152,164 @@ function resolveSwitchTargetForTrigger(defaultSwitchTarget, sourceDetail, active
 }
 
 /**
+ * @typedef {{
+ *   label: string,
+ *   period: '5h' | 'weekly',
+ *   groupName: string,
+ *   family: 'gemini' | 'claude' | 'other',
+ *   remainingPercent: number,
+ *   resetsAt: string | null
+ * }} LocalMeteredWindow
+ */
+
+/**
+ * Build a stable lookup key for a metered local RPC quota window.
+ * @param {Pick<LocalMeteredWindow, 'groupName' | 'period'>} win
+ * @returns {string}
+ */
+function localWindowKey(win) {
+  return `${String(win?.groupName || '').toLowerCase()}|${String(win?.period || '')}`;
+}
+
+/**
+ * @param {{
+ *   autoSwitchScope?: string,
+ *   autoSwitchThresholdPercent?: number,
+ *   defaultSwitchTarget?: string
+ * }} [rawConfig]
+ */
+function normalizeTriggerConfig(rawConfig = {}) {
+  const scope = VALID_AUTO_SWITCH_SCOPES.has(String(rawConfig?.autoSwitchScope || ''))
+    ? /** @type {'primary' | 'any' | 'all'} */ (rawConfig.autoSwitchScope)
+    : 'primary';
+  const configuredTarget = String(rawConfig?.defaultSwitchTarget || 'auto').trim().toLowerCase();
+  const rawThreshold = Number(rawConfig?.autoSwitchThresholdPercent);
+  const threshold = Number.isFinite(rawThreshold) ? Math.max(0, Math.min(50, Math.round(rawThreshold))) : 0;
+  return {
+    scope,
+    configuredTarget,
+    thresholdLimit: threshold + 1e-6
+  };
+}
+
+/**
+ * @param {unknown} limitsPayload
+ * @returns {Array<Record<string, any>>}
+ */
+function extractLimitsProviders(limitsPayload) {
+  return Array.isArray(limitsPayload)
+    ? limitsPayload
+    : (limitsPayload && typeof limitsPayload === 'object' && Array.isArray(/** @type {any} */ (limitsPayload).providers)
+        ? /** @type {any} */ (limitsPayload).providers
+        : []);
+}
+
+/**
+ * @param {unknown} row
+ * @param {string} configuredTarget
+ * @returns {row is Record<string, any>}
+ */
+function isEligibleRpcRow(row, configuredTarget) {
+  if (!row || typeof row !== 'object') return false;
+  const r = /** @type {Record<string, any>} */ (row);
+  if (r.provider !== 'antigravity' || r.source !== 'rpc' || r.status !== 'ok') return false;
+  const rowSourceDetail = String(r.sourceDetail || '').trim().toLowerCase();
+  if (configuredTarget === 'agy' && rowSourceDetail && rowSourceDetail !== 'cli') return false;
+  if ((configuredTarget === 'classic' || configuredTarget === 'ide') && rowSourceDetail === 'cli') return false;
+  return Array.isArray(r.windows) && r.windows.length > 0;
+}
+
+/**
+ * @param {Record<string, any>} row
+ * @param {'primary' | 'any' | 'all'} scope
+ * @param {number} thresholdLimit
+ * @returns {{ meteredWindows: LocalMeteredWindow[], exhaustedWindows: LocalMeteredWindow[] }}
+ */
+function collectExhaustedWindowsForRow(row, scope, thresholdLimit) {
+  /** @type {LocalMeteredWindow[]} */
+  const meteredWindows = [];
+  for (const win of row.windows) {
+    if (!win || win.showMeter === false) continue;
+    if (typeof win.usedPercent !== 'number' || !Number.isFinite(win.usedPercent)) continue;
+    const period = classifyLimitWindowPeriod(win);
+    if (!period) continue;
+    const groupName = extractLimitWindowGroupName(win);
+    const family = classifyQuotaGroupFamily(groupName);
+    const remainingPercent = Math.max(0, Math.min(100, 100 - win.usedPercent));
+    meteredWindows.push({
+      label: String(win.label || `${groupName} ${period}`),
+      period,
+      groupName,
+      family,
+      remainingPercent,
+      resetsAt: typeof win.resetsAt === 'string' && win.resetsAt ? win.resetsAt : null
+    });
+  }
+  if (meteredWindows.length === 0) {
+    return { meteredWindows: [], exhaustedWindows: [] };
+  }
+
+  /** @type {LocalMeteredWindow[]} */
+  let exhaustedWindows = [];
+
+  if (scope === 'primary') {
+    const primaryWindows = meteredWindows.filter((w) => w.family === 'gemini' || w.family === 'claude');
+    const candidates = primaryWindows.length > 0 ? primaryWindows : meteredWindows;
+    exhaustedWindows = candidates.filter((w) => w.remainingPercent <= thresholdLimit);
+  } else if (scope === 'any') {
+    exhaustedWindows = meteredWindows.filter((w) => w.remainingPercent <= thresholdLimit);
+  } else {
+    /** @type {Map<string, LocalMeteredWindow[]>} */
+    const byGroup = new Map();
+    for (const win of meteredWindows) {
+      const key = win.groupName.toLowerCase();
+      const list = byGroup.get(key) || [];
+      list.push(win);
+      byGroup.set(key, list);
+    }
+    const allGroupsExhausted = byGroup.size > 0
+      && [...byGroup.values()].every((groupWins) => groupWins.some((w) => w.remainingPercent <= thresholdLimit));
+    if (allGroupsExhausted) {
+      exhaustedWindows = meteredWindows.filter((w) => w.remainingPercent <= thresholdLimit);
+    }
+  }
+
+  return { meteredWindows, exhaustedWindows };
+}
+
+/**
+ * List exhausted local quota window keys per eligible RPC provider row.
+ *
+ * @param {unknown} limitsPayload
+ * @param {{
+ *   autoSwitchScope?: string,
+ *   autoSwitchThresholdPercent?: number,
+ *   defaultSwitchTarget?: string
+ * }} [rawConfig]
+ * @returns {Array<{ email: string, sourceDetail: string, keys: Set<string> }>}
+ */
+function listLocalExhaustedWindowKeys(limitsPayload, rawConfig = {}) {
+  const providers = extractLimitsProviders(limitsPayload);
+  if (providers.length === 0) return [];
+  const { scope, configuredTarget, thresholdLimit } = normalizeTriggerConfig(rawConfig);
+  /** @type {Array<{ email: string, sourceDetail: string, keys: Set<string> }>} */
+  const rows = [];
+
+  for (const row of providers) {
+    if (!isEligibleRpcRow(row, configuredTarget)) continue;
+    const { meteredWindows, exhaustedWindows } = collectExhaustedWindowsForRow(row, scope, thresholdLimit);
+    if (meteredWindows.length === 0) continue;
+    rows.push({
+      email: String(row.accountEmail || '').trim().toLowerCase(),
+      sourceDetail: String(row.sourceDetail || '').trim().toLowerCase(),
+      keys: new Set(exhaustedWindows.map(localWindowKey))
+    });
+  }
+
+  return rows;
+}
+
+/**
  * Evaluate whether local Antigravity RPC quota limits have hit the 5-hour or weekly threshold.
  * Strictly inspects `provider === 'antigravity' && source === 'rpc' && status === 'ok'` rows.
  *
@@ -161,100 +319,62 @@ function resolveSwitchTargetForTrigger(defaultSwitchTarget, sourceDetail, active
  *   autoSwitchThresholdPercent?: number,
  *   defaultSwitchTarget?: string
  * }} [rawConfig]
+ * @param {{
+ *   acknowledged?: { email: string, windowKeys: Set<string> } | null
+ * }} [options]
  */
-function evaluateLocalQuotaTrigger(limitsPayload, rawConfig = {}) {
+function evaluateLocalQuotaTrigger(limitsPayload, rawConfig = {}, options = {}) {
   const empty = {
     triggered: false,
     accountKey: '',
     accountEmail: '',
     sourceDetail: '',
-    exhaustedWindows: /** @type {Array<{ label: string, period: '5h' | 'weekly', groupName: string, family: 'gemini' | 'claude' | 'other', remainingPercent: number, resetsAt: string | null }>} */ ([]),
+    exhaustedWindows: /** @type {LocalMeteredWindow[]} */ ([]),
     exhaustedFamilies: /** @type {Array<'gemini' | 'claude' | 'other'>} */ ([]),
     hardExhausted: false,
-    triggerLabel: ''
+    triggerLabel: '',
+    acknowledgedWindows: /** @type {string[]} */ ([])
   };
 
-  const providers = Array.isArray(limitsPayload)
-    ? limitsPayload
-    : (limitsPayload && typeof limitsPayload === 'object' && Array.isArray(/** @type {any} */ (limitsPayload).providers)
-        ? /** @type {any} */ (limitsPayload).providers
-        : []);
+  const providers = extractLimitsProviders(limitsPayload);
   if (providers.length === 0) return empty;
 
-  const scope = VALID_AUTO_SWITCH_SCOPES.has(String(rawConfig?.autoSwitchScope || ''))
-    ? /** @type {'primary' | 'any' | 'all'} */ (rawConfig.autoSwitchScope)
-    : 'primary';
-  const configuredTarget = String(rawConfig?.defaultSwitchTarget || 'auto').trim().toLowerCase();
-  const rawThreshold = Number(rawConfig?.autoSwitchThresholdPercent);
-  const threshold = Number.isFinite(rawThreshold) ? Math.max(0, Math.min(50, Math.round(rawThreshold))) : 0;
-  const thresholdLimit = threshold + 1e-6;
+  const { scope, configuredTarget, thresholdLimit } = normalizeTriggerConfig(rawConfig);
+  const ackEmail = String(options?.acknowledged?.email || '').trim().toLowerCase();
+  const ackKeys = options?.acknowledged?.windowKeys instanceof Set ? options.acknowledged.windowKeys : null;
 
   for (const row of providers) {
-    if (!row || typeof row !== 'object') continue;
-    if (row.provider !== 'antigravity' || row.source !== 'rpc' || row.status !== 'ok') continue;
-    const rowSourceDetail = String(row.sourceDetail || '').trim().toLowerCase();
-    if (configuredTarget === 'agy' && rowSourceDetail && rowSourceDetail !== 'cli') continue;
-    if ((configuredTarget === 'classic' || configuredTarget === 'ide') && rowSourceDetail === 'cli') continue;
-    if (!Array.isArray(row.windows) || row.windows.length === 0) continue;
+    if (!isEligibleRpcRow(row, configuredTarget)) continue;
+    const { meteredWindows, exhaustedWindows } = collectExhaustedWindowsForRow(row, scope, thresholdLimit);
+    if (meteredWindows.length === 0 || exhaustedWindows.length === 0) continue;
 
-    /** @type {Array<{ label: string, period: '5h' | 'weekly', groupName: string, family: 'gemini' | 'claude' | 'other', remainingPercent: number, resetsAt: string | null }>} */
-    const meteredWindows = [];
-    for (const win of row.windows) {
-      if (!win || win.showMeter === false) continue;
-      if (typeof win.usedPercent !== 'number' || !Number.isFinite(win.usedPercent)) continue;
-      const period = classifyLimitWindowPeriod(win);
-      if (!period) continue;
-      const groupName = extractLimitWindowGroupName(win);
-      const family = classifyQuotaGroupFamily(groupName);
-      const remainingPercent = Math.max(0, Math.min(100, 100 - win.usedPercent));
-      meteredWindows.push({
-        label: String(win.label || `${groupName} ${period}`),
-        period,
-        groupName,
-        family,
-        remainingPercent,
-        resetsAt: typeof win.resetsAt === 'string' && win.resetsAt ? win.resetsAt : null
-      });
-    }
-    if (meteredWindows.length === 0) continue;
-
-    /** @type {typeof meteredWindows} */
-    let exhaustedWindows = [];
-
-    if (scope === 'primary') {
-      const primaryWindows = meteredWindows.filter((w) => w.family === 'gemini' || w.family === 'claude');
-      const candidates = primaryWindows.length > 0 ? primaryWindows : meteredWindows;
-      exhaustedWindows = candidates.filter((w) => w.remainingPercent <= thresholdLimit);
-    } else if (scope === 'any') {
-      exhaustedWindows = meteredWindows.filter((w) => w.remainingPercent <= thresholdLimit);
-    } else {
-      /** @type {Map<string, typeof meteredWindows>} */
-      const byGroup = new Map();
-      for (const win of meteredWindows) {
-        const key = win.groupName.toLowerCase();
-        const list = byGroup.get(key) || [];
-        list.push(win);
-        byGroup.set(key, list);
-      }
-      const allGroupsExhausted = byGroup.size > 0
-        && [...byGroup.values()].every((groupWins) => groupWins.some((w) => w.remainingPercent <= thresholdLimit));
-      if (allGroupsExhausted) {
-        exhaustedWindows = meteredWindows.filter((w) => w.remainingPercent <= thresholdLimit);
+    const rowEmail = String(row.accountEmail || '').trim().toLowerCase();
+    const shouldCheckAck = Boolean(ackKeys && ackKeys.size > 0 && (rowEmail === ackEmail || rowEmail === ''));
+    /** @type {LocalMeteredWindow[]} */
+    const freshWindows = [];
+    /** @type {LocalMeteredWindow[]} */
+    const suppressedWindows = [];
+    for (const win of exhaustedWindows) {
+      if (shouldCheckAck && ackKeys && ackKeys.has(localWindowKey(win))) {
+        suppressedWindows.push(win);
+      } else {
+        freshWindows.push(win);
       }
     }
 
-    if (exhaustedWindows.length > 0) {
+    if (freshWindows.length > 0) {
       const exhaustedFamilies = [...new Set(exhaustedWindows.map((w) => w.family))];
-      const hardExhausted = exhaustedWindows.some((w) => w.remainingPercent <= 1e-6);
+      const hardExhausted = freshWindows.some((w) => w.remainingPercent <= 1e-6);
       return {
         triggered: true,
         accountKey: String(row.accountKey || '').trim(),
-        accountEmail: String(row.accountEmail || '').trim().toLowerCase(),
+        accountEmail: rowEmail,
         sourceDetail: String(row.sourceDetail || '').trim().toLowerCase(),
         exhaustedWindows,
         exhaustedFamilies,
         hardExhausted,
-        triggerLabel: exhaustedWindows.map((w) => w.label).join(', ')
+        triggerLabel: exhaustedWindows.map((w) => w.label).join(', '),
+        acknowledgedWindows: suppressedWindows.map((w) => w.label)
       };
     }
   }
@@ -549,6 +669,8 @@ module.exports = {
   classifyQuotaGroupFamily,
   evaluateLocalQuotaTrigger,
   isPoolAccountExhausted,
+  listLocalExhaustedWindowKeys,
+  localWindowKey,
   normalizeAccountWeight,
   resolveSwitchTargetForTrigger,
   scoreCandidateAccount,

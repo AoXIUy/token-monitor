@@ -1571,3 +1571,288 @@ test('Windows 0% quota bypasses background-only busy state, unverified Win32 hot
   assert.deepEqual(resumedIds, ['conv-bg-task-stalled', 'conv-manual-quota-err']);
   assert.equal(resumedCalls[0].bin, fakeLsExe);
 });
+
+test('evaluateLocalQuotaTrigger suppresses acknowledged exhausted windows and listLocalExhaustedWindowKeys extracts stable keys', () => {
+  const claudeOnlyPayload = {
+    providers: [{
+      provider: 'antigravity',
+      source: 'rpc',
+      sourceDetail: 'cli',
+      status: 'ok',
+      accountEmail: 'x@example.com',
+      windows: [
+        { kind: 'session', label: 'Gemini 5-hour', usedPercent: 20, windowMinutes: 300, showMeter: true },
+        { kind: 'session', label: 'Claude/GPT 5-hour', usedPercent: 100, windowMinutes: 300, showMeter: true }
+      ]
+    }]
+  };
+
+  assert.equal(
+    autoSwitch.localWindowKey({ groupName: 'Claude/GPT', period: '5h' }),
+    'claude/gpt|5h'
+  );
+  const listed = autoSwitch.listLocalExhaustedWindowKeys(claudeOnlyPayload, { autoSwitchScope: 'primary' });
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].email, 'x@example.com');
+  assert.equal(listed[0].sourceDetail, 'cli');
+  assert.deepEqual([...listed[0].keys], ['claude/gpt|5h']);
+
+  const ack = { email: 'x@example.com', windowKeys: new Set(['claude/gpt|5h']) };
+  const suppressed = autoSwitch.evaluateLocalQuotaTrigger(
+    claudeOnlyPayload,
+    { autoSwitchScope: 'primary' },
+    { acknowledged: ack }
+  );
+  assert.equal(suppressed.triggered, false);
+  assert.deepEqual(suppressed.acknowledgedWindows, []);
+
+  // Different window (Gemini) exhausting on the same acknowledged account triggers and reports suppressed window label
+  const bothExhaustedPayload = {
+    providers: [{
+      provider: 'antigravity',
+      source: 'rpc',
+      sourceDetail: 'cli',
+      status: 'ok',
+      accountEmail: 'x@example.com',
+      windows: [
+        { kind: 'session', label: 'Gemini 5-hour', usedPercent: 100, windowMinutes: 300, showMeter: true },
+        { kind: 'session', label: 'Claude/GPT 5-hour', usedPercent: 100, windowMinutes: 300, showMeter: true }
+      ]
+    }]
+  };
+  const freshGemini = autoSwitch.evaluateLocalQuotaTrigger(
+    bothExhaustedPayload,
+    { autoSwitchScope: 'primary' },
+    { acknowledged: ack }
+  );
+  assert.equal(freshGemini.triggered, true);
+  assert.equal(freshGemini.hardExhausted, true);
+  assert.deepEqual(freshGemini.acknowledgedWindows, ['Claude/GPT 5-hour']);
+  assert.deepEqual(freshGemini.exhaustedFamilies.sort(), ['claude', 'gemini']);
+
+  // hardExhausted is computed strictly from fresh (unacknowledged) windows
+  const softGeminiPayload = {
+    providers: [{
+      provider: 'antigravity',
+      source: 'rpc',
+      sourceDetail: 'cli',
+      status: 'ok',
+      accountEmail: 'x@example.com',
+      windows: [
+        { kind: 'session', label: 'Gemini 5-hour', usedPercent: 92, windowMinutes: 300, showMeter: true },
+        { kind: 'session', label: 'Claude/GPT 5-hour', usedPercent: 100, windowMinutes: 300, showMeter: true }
+      ]
+    }]
+  };
+  const softFresh = autoSwitch.evaluateLocalQuotaTrigger(
+    softGeminiPayload,
+    { autoSwitchScope: 'primary', autoSwitchThresholdPercent: 10 },
+    { acknowledged: ack }
+  );
+  assert.equal(softFresh.triggered, true);
+  assert.equal(softFresh.hardExhausted, false);
+  assert.deepEqual(softFresh.acknowledgedWindows, ['Claude/GPT 5-hour']);
+
+  // Different account email is never suppressed by x@'s acknowledgment
+  const otherAccountPayload = {
+    providers: [{
+      ...claudeOnlyPayload.providers[0],
+      accountEmail: 'y@example.com'
+    }]
+  };
+  const otherRes = autoSwitch.evaluateLocalQuotaTrigger(
+    otherAccountPayload,
+    { autoSwitchScope: 'primary' },
+    { acknowledged: ack }
+  );
+  assert.equal(otherRes.triggered, true);
+  assert.equal(otherRes.accountEmail, 'y@example.com');
+  assert.deepEqual(otherRes.acknowledgedWindows, []);
+});
+
+test('manual switch back to an account with an exhausted Claude pool suppresses re-switch until Gemini exhausts or Claude recovers', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-manual-ack-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  let clockMs = 1_760_000_000_000;
+  let keyringStored = null;
+  let yDepleted = false;
+
+  const quotasByToken = {
+    'ya29.x': {
+      tier: 'pro-tier',
+      groups: [
+        { displayName: 'Gemini', buckets: [{ window: '5h', remainingFraction: 0.8 }] },
+        { displayName: 'Claude and GPT', buckets: [{ window: '5h', remainingFraction: 0, resetTime: '2026-11-27T04:00:00Z' }] }
+      ]
+    },
+    'ya29.y': {
+      tier: 'pro-tier',
+      groups: [
+        { displayName: 'Gemini', buckets: [{ window: '5h', remainingFraction: 0.95 }] },
+        { displayName: 'Claude and GPT', buckets: [{ window: '5h', remainingFraction: 0.95 }, { window: 'weekly', remainingFraction: 0.9 }] }
+      ]
+    },
+    'ya29.z': {
+      tier: 'pro-tier',
+      groups: [
+        { displayName: 'Gemini', buckets: [{ window: '5h', remainingFraction: 0.9 }] },
+        { displayName: 'Claude and GPT', buckets: [{ window: '5h', remainingFraction: 0.9 }, { window: 'weekly', remainingFraction: 0.85 }] }
+      ]
+    }
+  };
+
+  const service = createAntigravityManagerService({
+    baseDir: path.join(dir, 'mgr'),
+    nowMs: () => clockMs,
+    isLocalAntigravityBusy: () => false,
+    switcherDeps: {
+      oauth: { ensureFreshToken: async (tok) => tok },
+      deviceProfile: {
+        getStoragePath: () => '',
+        readDeviceProfile: () => null,
+        generateDeviceProfile: () => ({
+          machineId: 'auth0|user_mock',
+          macMachineId: 'mac-mock',
+          devDeviceId: 'dev-mock',
+          sqmId: '{SQM-MOCK}'
+        })
+      },
+      keyring: {
+        writeToSystemKeyring: (payload) => { keyringStored = payload; },
+        readFromSystemKeyring: () => keyringStored
+      },
+      fileCredentials: { writeFileCredentials: () => {} }
+    },
+    fetch: async (url, init) => {
+      const auth = String(init?.headers?.authorization || '').replace(/^Bearer\s+/i, '');
+      const mock = auth === 'ya29.y' && yDepleted
+        ? {
+            tier: 'pro-tier',
+            groups: [
+              { displayName: 'Gemini', buckets: [{ window: '5h', remainingFraction: 0 }] },
+              { displayName: 'Claude and GPT', buckets: [{ window: '5h', remainingFraction: 0 }] }
+            ]
+          }
+        : (quotasByToken[auth] || quotasByToken['ya29.z']);
+      if (String(url).includes('loadCodeAssist')) {
+        return new Response(JSON.stringify({ currentTier: { id: mock.tier } }), { status: 200 });
+      }
+      if (String(url).includes('fetchAvailableModels')) {
+        return new Response(JSON.stringify({ models: {} }), { status: 200 });
+      }
+      if (String(url).includes('retrieveUserQuotaSummary')) {
+        return new Response(JSON.stringify({ groups: mock.groups }), { status: 200 });
+      }
+      return new Response('{}', { status: 200 });
+    }
+  });
+  t.after(() => service.stop());
+
+  const seedDir = path.join(dir, 'seed');
+  fs.mkdirSync(path.join(seedDir, 'accounts'), { recursive: true });
+  const exp = Math.floor(clockMs / 1000) + 7200;
+  for (const item of [
+    { file: 'x.json', email: 'x@example.com', access: 'ya29.x', rt: '1//x' },
+    { file: 'y.json', email: 'y@example.com', access: 'ya29.y', rt: '1//y' },
+    { file: 'z.json', email: 'z@example.com', access: 'ya29.z', rt: '1//z' }
+  ]) {
+    fs.writeFileSync(path.join(seedDir, 'accounts', item.file), JSON.stringify({
+      email: item.email,
+      token: { access_token: item.access, refresh_token: item.rt, expiry_timestamp: exp }
+    }));
+  }
+  service.importDataDir(seedDir);
+  const byEmail = Object.fromEntries(service.getState().accounts.map((a) => [a.email, a.id]));
+  service.updateConfig({
+    autoSwitchEnabled: true,
+    autoSwitchScope: 'primary',
+    autoSwitchCooldownSeconds: 60,
+    refreshSlideDelaySecs: 0
+  });
+
+  const xClaudeExhausted = {
+    providers: [{
+      provider: 'antigravity',
+      source: 'rpc',
+      sourceDetail: 'cli',
+      status: 'ok',
+      accountEmail: 'x@example.com',
+      windows: [
+        { kind: 'session', label: 'Gemini 5-hour', usedPercent: 20, windowMinutes: 300, showMeter: true },
+        { kind: 'session', label: 'Claude/GPT 5-hour', usedPercent: 100, windowMinutes: 300, showMeter: true }
+      ]
+    }]
+  };
+
+  // 1. x@ Claude exhausts -> auto-switches to y@
+  const firstAuto = await service.onLocalLimitsUpdated(xClaudeExhausted);
+  assert.equal(firstAuto.triggered, true);
+  assert.equal(firstAuto.ok, true);
+  assert.equal(firstAuto.account.email, 'y@example.com');
+  assert.equal(service.getState().activeAccounts.agy, byEmail['y@example.com']);
+
+  // 2. Advance past cooldown and manually switch back to x@ to use its Gemini quota
+  clockMs += 90_000;
+  yDepleted = true;
+  const manualBack = await service.switchAccountTo(byEmail['x@example.com'], 'agy');
+  assert.equal(manualBack.ok, true);
+  assert.equal(service.getState().activeAccounts.agy, byEmail['x@example.com']);
+
+  // 3. Subsequent RPC polls still reporting Claude 100% / Gemini 20% must NOT re-switch off x@
+  const pollAfterManual1 = await service.onLocalLimitsUpdated(xClaudeExhausted);
+  assert.equal(pollAfterManual1.triggered, false);
+  assert.equal(service.getState().activeAccounts.agy, byEmail['x@example.com']);
+
+  clockMs += 30_000;
+  const pollAfterManual2 = await service.onLocalLimitsUpdated(xClaudeExhausted);
+  assert.equal(pollAfterManual2.triggered, false);
+  assert.equal(service.getState().activeAccounts.agy, byEmail['x@example.com']);
+
+  // 4. Once Gemini also hits 0%, auto-switch fires immediately to z@
+  const xGeminiExhausted = {
+    providers: [{
+      provider: 'antigravity',
+      source: 'rpc',
+      sourceDetail: 'cli',
+      status: 'ok',
+      accountEmail: 'x@example.com',
+      windows: [
+        { kind: 'session', label: 'Gemini 5-hour', usedPercent: 100, windowMinutes: 300, showMeter: true },
+        { kind: 'session', label: 'Claude/GPT 5-hour', usedPercent: 100, windowMinutes: 300, showMeter: true }
+      ]
+    }]
+  };
+  const secondAuto = await service.onLocalLimitsUpdated(xGeminiExhausted);
+  assert.equal(secondAuto.triggered, true);
+  assert.equal(secondAuto.ok, true);
+  assert.equal(secondAuto.account.email, 'z@example.com');
+  assert.equal(service.getState().activeAccounts.agy, byEmail['z@example.com']);
+
+  // 5. Manually switch back to x@, let Claude recover, then exhaust Claude again -> pruned ack triggers auto-switch
+  clockMs += 90_000;
+  const manualBackAgain = await service.switchAccountTo(byEmail['x@example.com'], 'agy');
+  assert.equal(manualBackAgain.ok, true);
+  assert.equal((await service.onLocalLimitsUpdated(xClaudeExhausted)).triggered, false);
+
+  const xClaudeRecovered = {
+    providers: [{
+      provider: 'antigravity',
+      source: 'rpc',
+      sourceDetail: 'cli',
+      status: 'ok',
+      accountEmail: 'x@example.com',
+      windows: [
+        { kind: 'session', label: 'Gemini 5-hour', usedPercent: 20, windowMinutes: 300, showMeter: true },
+        { kind: 'session', label: 'Claude/GPT 5-hour', usedPercent: 30, windowMinutes: 300, showMeter: true }
+      ]
+    }]
+  };
+  assert.equal((await service.onLocalLimitsUpdated(xClaudeRecovered)).triggered, false);
+
+  // Exhausting Claude again after observing recovery triggers a fresh switch
+  const reExhausted = await service.onLocalLimitsUpdated(xClaudeExhausted);
+  assert.equal(reExhausted.triggered, true);
+  assert.equal(reExhausted.ok, true);
+  assert.equal(reExhausted.account.email, 'z@example.com');
+});
