@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const autoSwitch = require('../src/electron/antigravityManager/autoSwitch');
+const activeModel = require('../src/electron/antigravityManager/activeModel');
 const { createAntigravityManagerStore } = require('../src/electron/antigravityManager/store');
 const { createAntigravityManagerService } = require('../src/electron/antigravityManager');
 
@@ -1855,4 +1856,434 @@ test('manual switch back to an account with an exhausted Claude pool suppresses 
   assert.equal(reExhausted.triggered, true);
   assert.equal(reExhausted.ok, true);
   assert.equal(reExhausted.account.email, 'z@example.com');
+});
+
+test('evaluateLocalQuotaTrigger enforces minUpdatedAtMs and scopes exhaustion checks to activeModels pools', () => {
+  const switchAtMs = Date.parse('2026-11-28T06:02:33.000Z');
+  const staleRow = {
+    provider: 'antigravity',
+    source: 'rpc',
+    sourceDetail: 'app',
+    status: 'ok',
+    accountEmail: 'old@example.com',
+    updatedAt: '2026-11-28T06:01:02.894Z',
+    windows: [
+      { kind: 'session', label: 'Gemini 5-hour', usedPercent: 20, windowMinutes: 300, showMeter: true },
+      { kind: 'session', label: 'Claude/GPT 5-hour', usedPercent: 100, windowMinutes: 300, showMeter: true }
+    ]
+  };
+  assert.equal(
+    autoSwitch.evaluateLocalQuotaTrigger({ providers: [staleRow] }, { autoSwitchScope: 'primary' }, { minUpdatedAtMs: switchAtMs }).triggered,
+    false,
+    'RPC rows older than minUpdatedAtMs must be ignored'
+  );
+  assert.deepEqual(
+    autoSwitch.listLocalExhaustedWindowKeys({ providers: [staleRow] }, { autoSwitchScope: 'primary' }, { minUpdatedAtMs: switchAtMs }),
+    []
+  );
+
+  const freshRow = {
+    ...staleRow,
+    accountEmail: 'yu@example.com',
+    updatedAt: '2026-11-28T06:06:02.906Z',
+    windows: [
+      { kind: 'session', label: 'Gemini 5-hour', usedPercent: 28, windowMinutes: 300, resetsAt: '2026-11-28T11:13:10.000Z', showMeter: true },
+      { kind: 'weekly', label: 'Gemini weekly', usedPercent: 7, windowMinutes: 10080, resetsAt: '2026-12-03T08:22:47.000Z', showMeter: true },
+      { kind: 'session', label: 'Claude/GPT 5-hour', usedPercent: 100, windowMinutes: 300, resetsAt: '2026-11-28T11:11:31.000Z', showMeter: true },
+      { kind: 'weekly', label: 'Claude/GPT weekly', usedPercent: 50, windowMinutes: 10080, resetsAt: '2026-12-05T06:11:31.000Z', showMeter: true }
+    ]
+  };
+
+  const catalog = {
+    groups: [
+      {
+        groupName: 'Gemini',
+        displayName: 'Gemini Models',
+        description: 'Models within this group: Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon, Gemini 4 Hydrogen, Gemini 3.8 Flash',
+        resetTimes: ['2026-11-28T11:13:10.000Z', '2026-12-03T08:22:47.000Z']
+      },
+      {
+        groupName: 'Claude/GPT',
+        displayName: 'Claude and GPT models',
+        description: 'Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B',
+        resetTimes: ['2026-11-28T11:11:31.000Z', '2026-12-05T06:11:31.000Z']
+      }
+    ],
+    models: [
+      { id: 'MODEL_PLACEHOLDER_M535', label: 'Gemini 4 Neon (XHigh)', resetTime: '2026-11-28T11:13:10.000Z' },
+      { id: 'MODEL_PLACEHOLDER_M402', label: 'Claude Opus 5.5 (High)', resetTime: '2026-11-28T11:11:31.000Z' }
+    ]
+  };
+
+  // Running Gemini (with or without catalog) does NOT trigger on 0% Claude
+  assert.equal(
+    autoSwitch.evaluateLocalQuotaTrigger(
+      { providers: [freshRow] },
+      { autoSwitchScope: 'primary' },
+      { minUpdatedAtMs: switchAtMs, activeModels: ['gemini-4-neon-xhigh'], modelCatalog: catalog }
+    ).triggered,
+    false
+  );
+  assert.equal(
+    autoSwitch.evaluateLocalQuotaTrigger(
+      { providers: [freshRow] },
+      { autoSwitchScope: 'primary' },
+      { minUpdatedAtMs: switchAtMs, activeModels: ['gemini-4-hydrogen-xhigh'] }
+    ).triggered,
+    false
+  );
+
+  // Running Gemini triggers ONLY when Gemini itself exhausts, scoping exhaustedFamilies to ['gemini']
+  const bothExhaustedRow = {
+    ...freshRow,
+    windows: [
+      { ...freshRow.windows[0], usedPercent: 100 },
+      freshRow.windows[1],
+      freshRow.windows[2],
+      freshRow.windows[3]
+    ]
+  };
+  const geminiTrigger = autoSwitch.evaluateLocalQuotaTrigger(
+    { providers: [bothExhaustedRow] },
+    { autoSwitchScope: 'primary' },
+    { minUpdatedAtMs: switchAtMs, activeModels: ['gemini-4-neon-xhigh'], modelCatalog: catalog }
+  );
+  assert.equal(geminiTrigger.triggered, true);
+  assert.deepEqual(geminiTrigger.exhaustedFamilies, ['gemini']);
+  assert.equal(geminiTrigger.triggerLabel, 'Gemini 5-hour');
+
+  // Running Claude or multi-conversation union (Gemini + Claude) triggers when Claude is 0%
+  const claudeTrigger = autoSwitch.evaluateLocalQuotaTrigger(
+    { providers: [freshRow] },
+    { autoSwitchScope: 'primary' },
+    { minUpdatedAtMs: switchAtMs, activeModels: ['claude-opus-5-5-high'], modelCatalog: catalog }
+  );
+  assert.equal(claudeTrigger.triggered, true);
+  assert.deepEqual(claudeTrigger.exhaustedFamilies, ['claude']);
+
+  const unionTrigger = autoSwitch.evaluateLocalQuotaTrigger(
+    { providers: [freshRow] },
+    { autoSwitchScope: 'primary' },
+    { minUpdatedAtMs: switchAtMs, activeModels: ['gemini-4-neon-xhigh', 'claude-opus-5-5-high'], modelCatalog: catalog }
+  );
+  assert.equal(unionTrigger.triggered, true);
+  assert.deepEqual(unionTrigger.exhaustedFamilies, ['claude']);
+
+  // Dedicated Gemini 4 Argon window under `any` scope matches only when running Argon
+  const argonRow = {
+    ...freshRow,
+    windows: [
+      { kind: 'session', label: 'Gemini 5-hour', usedPercent: 20, windowMinutes: 300, showMeter: true },
+      { kind: 'session', label: 'Claude/GPT 5-hour', usedPercent: 20, windowMinutes: 300, showMeter: true },
+      { kind: 'weekly', label: 'Gemini 4 Argon weekly', usedPercent: 100, windowMinutes: 10080, showMeter: true }
+    ]
+  };
+  assert.equal(
+    autoSwitch.evaluateLocalQuotaTrigger({ providers: [argonRow] }, { autoSwitchScope: 'any' }, { activeModels: ['gemini-4-neon-xhigh'] }).triggered,
+    false
+  );
+  assert.equal(
+    autoSwitch.evaluateLocalQuotaTrigger({ providers: [argonRow] }, { autoSwitchScope: 'any' }, { activeModels: ['gemini-4-argon-high'] }).triggered,
+    true
+  );
+
+  // Unknown model falls back conservatively without suppressing exhaustion
+  assert.equal(
+    autoSwitch.evaluateLocalQuotaTrigger({ providers: [freshRow] }, { autoSwitchScope: 'primary' }, { activeModels: ['unrecognized-custom-model'] }).triggered,
+    true
+  );
+});
+
+test('activeModel detects running conversation models, newer settings-change overrides, multi-session unions, and pbtxt idle selection', (t) => {
+  const { DatabaseSync } = require('node:sqlite');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-active-model-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const agRoot = path.join(dir, '.gemini', 'antigravity');
+  fs.mkdirSync(agRoot, { recursive: true });
+  const dbPath = path.join(agRoot, 'conversation_summaries.db');
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE conversation_summaries (
+      conversation_id TEXT PRIMARY KEY,
+      status TEXT,
+      not_fully_idle INTEGER,
+      killed INTEGER,
+      parent_conversation_id TEXT,
+      nesting_depth INTEGER,
+      last_modified_time TEXT
+    );
+  `);
+
+  const writeTranscript = (cid, lines) => {
+    const logDir = path.join(agRoot, 'brain', cid, '.system_generated', 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(logDir, 'transcript.jsonl'),
+      lines.map((l) => JSON.stringify(l)).join('\n') + '\n'
+    );
+  };
+
+  const nowMs = Date.parse('2026-11-28T06:28:00.000Z');
+  db.prepare(`INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+    'conv-gemini', 'CASCADE_RUN_STATUS_RUNNING', 1, 0, '', 0, '2026-11-28 06:27:50+00:00'
+  );
+  writeTranscript('conv-gemini', [
+    { step_index: 1, type: 'USER_INPUT', created_at: '2026-11-28T06:27:00Z', content: '<USER_REQUEST>hi</USER_REQUEST>' },
+    { step_index: 2, type: 'PLANNER_RESPONSE', created_at: '2026-11-28T06:27:45Z', model: 'gemini-4-neon-xhigh' }
+  ]);
+
+  const runningRes = activeModel.detectActiveLocalModels({ homeDir: dir, env: {}, nowMs });
+  assert.equal(runningRes.source, 'running_conversations');
+  assert.deepEqual(runningRes.models, ['gemini-4-neon-xhigh']);
+
+  // A newer USER_INPUT Model Selection change overrides the prior PLANNER_RESPONSE even before Claude replies
+  writeTranscript('conv-gemini', [
+    { step_index: 1, type: 'PLANNER_RESPONSE', created_at: '2026-11-28T06:27:10Z', model: 'gemini-4-neon-xhigh' },
+    {
+      step_index: 2,
+      type: 'USER_INPUT',
+      created_at: '2026-11-28T06:27:55Z',
+      content: '<USER_REQUEST>test</USER_REQUEST><USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from Gemini 4 Neon (XHigh) to Claude Opus 5.5 (High). No need to comment.\n</USER_SETTINGS_CHANGE>'
+    }
+  ]);
+  const overrideRes = activeModel.detectActiveLocalModels({ homeDir: dir, env: {}, nowMs });
+  assert.equal(overrideRes.source, 'running_conversations');
+  assert.deepEqual(overrideRes.models, ['Claude Opus 5.5 (High)']);
+
+  // Multiple running top-level conversations return the union of their models
+  db.prepare(`INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+    'conv-other', 'CASCADE_RUN_STATUS_RUNNING', 1, 0, '', 0, '2026-11-28 06:27:52+00:00'
+  );
+  writeTranscript('conv-other', [
+    { step_index: 1, type: 'PLANNER_RESPONSE', created_at: '2026-11-28T06:27:52Z', model: 'gemini-3.8-flash-high' }
+  ]);
+  const unionRes = activeModel.detectActiveLocalModels({ homeDir: dir, env: {}, nowMs });
+  assert.equal(unionRes.source, 'running_conversations');
+  assert.deepEqual(unionRes.models.sort(), ['Claude Opus 5.5 (High)', 'gemini-3.8-flash-high']);
+
+  // Idle state: compare antigravity_state.pbtxt (resolved via modelCatalog) vs recent conversation transcript
+  db.prepare(`UPDATE conversation_summaries SET status = 'CASCADE_RUN_STATUS_IDLE', not_fully_idle = 0`).run();
+  const pbtxtPath = path.join(agRoot, 'antigravity_state.pbtxt');
+  fs.writeFileSync(pbtxtPath, 'last_selected_agent_model:  MODEL_PLACEHOLDER_M535\n');
+  const pbtxtTime = new Date(nowMs - 2000);
+  fs.utimesSync(pbtxtPath, pbtxtTime, pbtxtTime);
+
+  // Without modelCatalog, unresolved placeholder falls back to recent conversation transcript
+  const idleNoCatalog = activeModel.detectActiveLocalModels({ homeDir: dir, env: {}, nowMs });
+  assert.equal(idleNoCatalog.source, 'recent_conversation');
+  assert.deepEqual(idleNoCatalog.models, ['Claude Opus 5.5 (High)']);
+
+  // With modelCatalog resolving M535, newer pbtxt selection wins
+  const idleWithCatalog = activeModel.detectActiveLocalModels({
+    homeDir: dir,
+    env: {},
+    nowMs,
+    modelCatalog: { models: [{ id: 'MODEL_PLACEHOLDER_M535', label: 'Gemini 4 Neon (XHigh)' }] }
+  });
+  assert.equal(idleWithCatalog.source, 'pbtxt');
+  assert.deepEqual(idleWithCatalog.models, ['Gemini 4 Neon (XHigh)']);
+  db.close();
+});
+
+test('service ignores pre-switch stale LimitsRuntime rows, preserves manualAck across transient missing windows, and skips Claude 0% while running Gemini', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agm-stale-and-pool-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  let clockMs = Date.parse('2026-11-28T06:02:33.000Z');
+  let activeModelsToReturn = [];
+  let keyringStored = null;
+
+  const quotasByToken = {
+    'ya29.yu': {
+      tier: 'pro-tier',
+      groups: [
+        { displayName: 'Gemini Models', buckets: [{ window: '5h', remainingFraction: 0.72 }] },
+        { displayName: 'Claude and GPT models', buckets: [{ window: '5h', remainingFraction: 0 }] }
+      ]
+    },
+    'ya29.xing': {
+      tier: 'pro-tier',
+      groups: [
+        { displayName: 'Gemini Models', buckets: [{ window: '5h', remainingFraction: 0.8 }] },
+        { displayName: 'Claude and GPT models', buckets: [{ window: '5h', remainingFraction: 0.5 }] }
+      ]
+    },
+    'ya29.qiga': {
+      tier: 'pro-tier',
+      groups: [
+        { displayName: 'Gemini Models', buckets: [{ window: '5h', remainingFraction: 0.95 }] },
+        { displayName: 'Claude and GPT models', buckets: [{ window: '5h', remainingFraction: 1 }] }
+      ]
+    }
+  };
+
+  const makeSvc = () => createAntigravityManagerService({
+    baseDir: path.join(dir, 'mgr'),
+    nowMs: () => clockMs,
+    isLocalAntigravityBusy: () => false,
+    getActiveLocalModels: () => activeModelsToReturn,
+    switcherDeps: {
+      oauth: { ensureFreshToken: async (tok) => tok },
+      deviceProfile: {
+        getStoragePath: () => '',
+        readDeviceProfile: () => null,
+        generateDeviceProfile: () => ({
+          machineId: 'auth0|user_mock',
+          macMachineId: 'mac-mock',
+          devDeviceId: 'dev-mock',
+          sqmId: '{SQM-MOCK}'
+        })
+      },
+      keyring: {
+        writeToSystemKeyring: (payload) => { keyringStored = payload; },
+        readFromSystemKeyring: () => keyringStored
+      },
+      fileCredentials: { writeFileCredentials: () => {} }
+    },
+    fetch: async (url, init) => {
+      const auth = String(init?.headers?.authorization || '').replace(/^Bearer\s+/i, '');
+      const mock = quotasByToken[auth] || quotasByToken['ya29.qiga'];
+      if (String(url).includes('loadCodeAssist')) {
+        return new Response(JSON.stringify({ currentTier: { id: mock.tier } }), { status: 200 });
+      }
+      if (String(url).includes('retrieveUserQuotaSummary')) {
+        return new Response(JSON.stringify({ groups: mock.groups }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ models: {} }), { status: 200 });
+    }
+  });
+
+  const service = makeSvc();
+  t.after(() => service.stop());
+
+  const seedDir = path.join(dir, 'seed');
+  fs.mkdirSync(path.join(seedDir, 'accounts'), { recursive: true });
+  const exp = Math.floor(clockMs / 1000) + 7200;
+  for (const item of [
+    { file: 'yu.json', email: 'yu@example.com', access: 'ya29.yu', rt: '1//yu' },
+    { file: 'xing.json', email: 'xing@example.com', access: 'ya29.xing', rt: '1//xing' },
+    { file: 'qiga.json', email: 'qiga@example.com', access: 'ya29.qiga', rt: '1//qiga' }
+  ]) {
+    fs.writeFileSync(path.join(seedDir, 'accounts', item.file), JSON.stringify({
+      email: item.email,
+      token: { access_token: item.access, refresh_token: item.rt, expiry_timestamp: exp }
+    }));
+  }
+  service.importDataDir(seedDir);
+  const byEmail = Object.fromEntries(service.getState().accounts.map((a) => [a.email, a.id]));
+  service.updateConfig({
+    autoSwitchEnabled: true,
+    autoSwitchScope: 'primary',
+    autoSwitchThresholdPercent: 5,
+    autoSwitchCooldownSeconds: 180,
+    refreshSlideDelaySecs: 0
+  });
+
+  // 1. Reproduce 14:06:13 incident: manual switch back to yu@ at 06:02:33 -> snapshot claude/gpt|5h
+  const manualBack = await service.switchAccountTo(byEmail['yu@example.com'], 'agy');
+  assert.equal(manualBack.ok, true);
+  clockMs += 5_000;
+  const firstFreshYu = {
+    providers: [{
+      provider: 'antigravity',
+      source: 'rpc',
+      sourceDetail: 'cli',
+      status: 'ok',
+      accountEmail: 'yu@example.com',
+      updatedAt: new Date(clockMs).toISOString(),
+      windows: [
+        { kind: 'session', label: 'Gemini 5-hour', usedPercent: 28, windowMinutes: 300, showMeter: true },
+        { kind: 'session', label: 'Claude/GPT 5-hour', usedPercent: 100, windowMinutes: 300, showMeter: true }
+      ]
+    }]
+  };
+  assert.equal((await service.onLocalLimitsUpdated(firstFreshYu)).triggered, false);
+
+  // Cross-provider LimitsRuntime update pushes stale pre-switch xing@ row (06:01:02 < 06:02:33)
+  clockMs += 200_000;
+  const staleCrossProviderPush = {
+    providers: [{
+      provider: 'antigravity',
+      source: 'rpc',
+      sourceDetail: 'cli',
+      status: 'ok',
+      accountEmail: 'xing@example.com',
+      updatedAt: '2026-11-28T06:01:02.894Z',
+      windows: [
+        { kind: 'session', label: 'Gemini 5-hour', usedPercent: 20, windowMinutes: 300, showMeter: true },
+        { kind: 'session', label: 'Claude/GPT 5-hour', usedPercent: 51, windowMinutes: 300, showMeter: true }
+      ]
+    }]
+  };
+  assert.equal((await service.onLocalLimitsUpdated(staleCrossProviderPush)).triggered, false);
+
+  // Immediately followed by fresh yu@ row: manualAck must NOT have been wiped!
+  const freshYuAfterCrossProvider = {
+    providers: [{
+      ...firstFreshYu.providers[0],
+      updatedAt: new Date(clockMs + 100).toISOString()
+    }]
+  };
+  assert.equal((await service.onLocalLimitsUpdated(freshYuAfterCrossProvider)).triggered, false);
+  assert.equal(service.getState().activeAccounts.agy, byEmail['yu@example.com']);
+
+  // 2. Transient partial probe omitting Claude/GPT 5-hour must NOT prune acknowledged claude/gpt|5h
+  clockMs += 25_000;
+  const partialPoll = {
+    providers: [{
+      provider: 'antigravity',
+      source: 'rpc',
+      sourceDetail: 'cli',
+      status: 'ok',
+      accountEmail: 'yu@example.com',
+      updatedAt: new Date(clockMs).toISOString(),
+      windows: [
+        { kind: 'session', label: 'Gemini 5-hour', usedPercent: 30, windowMinutes: 300, showMeter: true }
+      ]
+    }]
+  };
+  assert.equal((await service.onLocalLimitsUpdated(partialPoll)).triggered, false);
+  clockMs += 25_000;
+  assert.equal(
+    (await service.onLocalLimitsUpdated({
+      providers: [{ ...firstFreshYu.providers[0], updatedAt: new Date(clockMs).toISOString() }]
+    })).triggered,
+    false
+  );
+
+  // 3. Reverse stale-row protection: manual switch away from exhausted yu@ to healthy qiga@;
+  // pre-switch exhausted yu@ row must NOT trigger a bogus switch off qiga@
+  const staleYuTimestamp = new Date(clockMs).toISOString();
+  clockMs += 30_000;
+  const manualToHealthy = await service.switchAccountTo(byEmail['qiga@example.com'], 'agy');
+  assert.equal(manualToHealthy.ok, true);
+  clockMs += 5_000;
+  const staleExhaustedYu = {
+    providers: [{ ...firstFreshYu.providers[0], updatedAt: staleYuTimestamp }]
+  };
+  assert.equal((await service.onLocalLimitsUpdated(staleExhaustedYu)).triggered, false);
+  assert.equal(service.getState().activeAccounts.agy, byEmail['qiga@example.com']);
+
+  // 4. Fresh service restart (ZERO manualAck): running Gemini suppresses Claude 0%,
+  // switching active model to Claude or exhausting Gemini triggers immediately
+  service.stop();
+  const restarted = makeSvc();
+  t.after(() => restarted.stop());
+  clockMs += 10_000;
+  activeModelsToReturn = ['gemini-4-neon-xhigh'];
+  const claudeZeroWhileRunningGemini = await restarted.onLocalLimitsUpdated({
+    providers: [{ ...firstFreshYu.providers[0], updatedAt: new Date(clockMs).toISOString() }]
+  });
+  assert.equal(claudeZeroWhileRunningGemini.triggered, false);
+
+  // Switching to Claude Opus 5.5 immediately triggers auto-switch when Claude is 0%
+  clockMs += 10_000;
+  activeModelsToReturn = ['claude-opus-5-5-high'];
+  const claudeActiveSwitch = await restarted.onLocalLimitsUpdated({
+    providers: [{ ...firstFreshYu.providers[0], updatedAt: new Date(clockMs).toISOString() }]
+  });
+  assert.equal(claudeActiveSwitch.triggered, true);
+  assert.equal(claudeActiveSwitch.ok, true);
+  assert.equal(claudeActiveSwitch.account.email, 'qiga@example.com');
 });

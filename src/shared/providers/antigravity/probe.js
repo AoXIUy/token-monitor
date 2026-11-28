@@ -987,6 +987,7 @@ async function groupedQuotaFromCandidates(candidates, call, {
   summaryDeadlineMs,
   probeDeadlineMs,
   identityTimeoutMs = 1000,
+  onQuotaModelCatalog,
   signal
 }) {
   let lastError = previousError || errorWithStatus('unavailable', 'no endpoint candidates');
@@ -1002,6 +1003,7 @@ async function groupedQuotaFromCandidates(candidates, call, {
       if (windows.some((window) => window.remainingFraction !== null)) {
         let accountPlan = null;
         let accountEmail = null;
+        let clientModelConfigs = [];
         try {
           const maxIdentityMs = candidate.desktopPid ? Math.max(identityTimeoutMs, 5000) : identityTimeoutMs;
           const identity = await callBeforeDeadline(call, {
@@ -1015,7 +1017,31 @@ async function groupedQuotaFromCandidates(candidates, call, {
             || preferredPlanInfoName(identity?.userStatus?.planStatus?.planInfo)
             || null;
           accountEmail = identity?.userStatus?.email?.trim?.() || null;
+          if (Array.isArray(identity?.userStatus?.cascadeModelConfigData?.clientModelConfigs)) {
+            clientModelConfigs = identity.userStatus.cascadeModelConfigData.clientModelConfigs;
+          }
         } catch (_) { /* An account lookup can fail after a usable quota response. */ }
+        if (typeof onQuotaModelCatalog === 'function') {
+          const rawSummary = summary?.response || summary?.summary || summary;
+          const rawGroups = Array.isArray(rawSummary?.groups) ? rawSummary.groups : [];
+          try {
+            onQuotaModelCatalog({
+              groups: rawGroups.map((group) => ({
+                groupName: quotaGroupName(group?.displayName),
+                displayName: String(group?.displayName || '').trim(),
+                description: String(group?.description || '').trim(),
+                resetTimes: (Array.isArray(group?.buckets) ? group.buckets : [])
+                  .map((b) => parseResetTime(b?.resetTime))
+                  .filter(Boolean)
+              })),
+              models: clientModelConfigs.map((cfg) => ({
+                id: String(cfg?.modelOrAlias?.model || '').trim(),
+                label: String(cfg?.label || '').trim(),
+                resetTime: parseResetTime(cfg?.quotaInfo?.resetTime)
+              })).filter((m) => m.id || m.label)
+            });
+          } catch (_) {}
+        }
         return {
           snapshot: { accountPlan, accountEmail, windows, sourceKey: candidate.csrfToken === csrfToken ? sourceKey : null },
           lastError
@@ -1186,7 +1212,8 @@ async function probe(deps = {}) {
           identityTimeoutMs: isWin32 ? 5000 : 1000,
           signal,
           csrfToken: sourceInfos[index].csrfToken,
-          sourceKey: sourceKeys[index]
+          sourceKey: sourceKeys[index],
+          onQuotaModelCatalog: deps.onQuotaModelCatalog
         };
         const grouped = await groupedQuotaFromCandidates(entry.candidates, call, {
           ...groupOptions,

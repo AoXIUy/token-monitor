@@ -973,12 +973,14 @@ module.exports = {
   MAX_INTERRUPTED_CONVERSATION_AGE_MS,
   QUOTA_ERROR_MESSAGE_RE,
   callConversationServiceHttp,
+  candidateAntigravityRoots,
   discoverLiveAgentApiEndpoint,
   hasActivelyGeneratingTurn,
   inspectTranscriptTailInterruption,
   normalizeAutoResumePrompt,
   parseSqliteTimestampMs,
   resolveAgentApiCommand,
+  resolveSqlite,
   resumeInterruptedConversations,
   snapshotInterruptedConversations
 };

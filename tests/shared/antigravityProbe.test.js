@@ -1528,3 +1528,78 @@ test('win32 native iphlpapi GetExtendedTcpTable decodes listener and established
   });
   assert.deepEqual(loopbackPorts, [49152]);
 });
+
+test('probe invokes optional onQuotaModelCatalog with sanitized groups and model configs without altering snapshot', async () => {
+  let capturedCatalog = null;
+  const snapshot = await probe.probe({
+    detectProcessInfos: async () => [{ pid: 9001, kind: 'app', csrfToken: 'csrf-tok', hubPort: 44444 }],
+    listeningPorts: async () => [44444],
+    onQuotaModelCatalog: (catalog) => { capturedCatalog = catalog; },
+    callLs: async ({ method }) => {
+      if (method === 'GetUnleashData') return {};
+      if (method === 'RetrieveUserQuotaSummary') {
+        return {
+          response: {
+            groups: [
+              {
+                displayName: 'Gemini Models',
+                description: 'Models within this group: Gemini 4 Neon, Gemini 4 Hydrogen',
+                buckets: [{ window: '5h', remainingFraction: 0.8, resetTime: '2026-11-28T11:13:10Z' }]
+              },
+              {
+                displayName: 'Claude and GPT models',
+                description: 'Models within this group: Claude Opus 5.5, GPT-OSS 120B',
+                buckets: [{ window: '5h', remainingFraction: 0, resetTime: '2026-11-28T11:11:31Z' }]
+              }
+            ]
+          }
+        };
+      }
+      if (method === 'GetUserStatus') {
+        return {
+          userStatus: {
+            email: 'user@example.com',
+            userTier: { name: 'Pro' },
+            cascadeModelConfigData: {
+              clientModelConfigs: [
+                {
+                  label: 'Gemini 4 Neon (XHigh)',
+                  modelOrAlias: { model: 'MODEL_PLACEHOLDER_M535' },
+                  quotaInfo: { remainingFraction: 0.8, resetTime: '2026-11-28T11:13:10Z' }
+                },
+                {
+                  label: 'Claude Opus 5.5 (High)',
+                  modelOrAlias: { model: 'MODEL_PLACEHOLDER_M402' },
+                  quotaInfo: { remainingFraction: 0, resetTime: '2026-11-28T11:11:31Z' }
+                }
+              ]
+            }
+          }
+        };
+      }
+      throw new Error(`unexpected method: ${method}`);
+    }
+  });
+
+  assert.equal(snapshot.accountEmail, 'user@example.com');
+  assert.equal(snapshot.windows.length, 2);
+  assert.ok(capturedCatalog);
+  assert.deepEqual(capturedCatalog.groups, [
+    {
+      groupName: 'Gemini',
+      displayName: 'Gemini Models',
+      description: 'Models within this group: Gemini 4 Neon, Gemini 4 Hydrogen',
+      resetTimes: ['2026-11-28T11:13:10.000Z']
+    },
+    {
+      groupName: 'Claude/GPT',
+      displayName: 'Claude and GPT models',
+      description: 'Models within this group: Claude Opus 5.5, GPT-OSS 120B',
+      resetTimes: ['2026-11-28T11:11:31.000Z']
+    }
+  ]);
+  assert.deepEqual(capturedCatalog.models, [
+    { id: 'MODEL_PLACEHOLDER_M535', label: 'Gemini 4 Neon (XHigh)', resetTime: '2026-11-28T11:13:10.000Z' },
+    { id: 'MODEL_PLACEHOLDER_M402', label: 'Claude Opus 5.5 (High)', resetTime: '2026-11-28T11:11:31.000Z' }
+  ]);
+});

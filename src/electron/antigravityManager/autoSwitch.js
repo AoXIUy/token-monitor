@@ -10,6 +10,9 @@ const MAX_ACCOUNT_WEIGHT = 100;
 
 const DEDICATED_CODENAME_RE = /\b(argon|neon|hydrogen|carbon|helium|wtu)\b/i;
 const CLAUDE_3P_RE = /\b(claude|gpt|3p)\b/i;
+const CLAUDE_MODEL_NAME_RE = /\b(claude|anthropic|sonnet|opus|haiku|gpt|openai|3p)\b/i;
+const GEMINI_MODEL_NAME_RE = /\b(gemini|orchestrator)\b/i;
+const OPAQUE_MODEL_PLACEHOLDER_RE = /^model_placeholder_/i;
 const WINDOW_5H_RE = /\b(5h|5-hour|five-hour|five hour|session|hour)\b/i;
 const WINDOW_WEEKLY_RE = /\b(weekly|7d|week)\b/i;
 const GENERIC_GEMINI_GROUP_LABEL_RE = /^gemini(?:\s+models?)?(?:\s+(?:5-hour|5h|five-hour|five hour|session|weekly|7d))?$/i;
@@ -205,14 +208,175 @@ function extractLimitsProviders(limitsPayload) {
 }
 
 /**
+ * @typedef {{
+ *   groups?: Array<{ groupName?: string, displayName?: string, description?: string, resetTimes?: string[] }>,
+ *   models?: Array<{ id?: string, label?: string, resetTime?: string | null }>
+ * }} LocalQuotaModelCatalog
+ */
+
+/**
+ * Normalize a model name or display label for matching against quota group descriptions
+ * and model configs (e.g. `claude-opus-5-5-high` and `Claude Opus 5.5 (High)` -> `claude opus 5 5`).
+ *
+ * @param {unknown} text
+ * @returns {string}
+ */
+function normalizeModelMatchText(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/\((?:extra\s+high|xhigh|high|medium|low|minimal)\)/gi, ' ')
+    .replace(/^model(?:_openai|_anthropic|_google)?[_-]+/i, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\b(?:extra\s+high|xhigh|high|medium|low|minimal)\b$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Resolve which quota group(s) or family(s) in `meteredWindows` a concrete Antigravity model belongs to.
+ * Uses the live RPC `modelCatalog` (group descriptions & resetTime alignment) when available,
+ * then falls back to deterministic family rules without misclassifying unified Gemini 4 codenames.
+ *
+ * @param {unknown} modelName
+ * @param {LocalMeteredWindow[]} meteredWindows
+ * @param {LocalQuotaModelCatalog | null} [modelCatalog]
+ * @returns {{ groupKeys: Set<string>, families: Set<'gemini' | 'claude' | 'other'> } | null}
+ */
+function resolveQuotaTargetForModel(modelName, meteredWindows, modelCatalog = null) {
+  const raw = String(modelName || '').trim();
+  if (!raw || OPAQUE_MODEL_PLACEHOLDER_RE.test(raw)) return null;
+  const rawLower = raw.toLowerCase();
+  const normalized = normalizeModelMatchText(raw);
+  if (!normalized) return null;
+
+  const availableGroupKeys = new Set(meteredWindows.map((w) => w.groupName.toLowerCase()));
+  /** @type {Set<string>} */
+  const matchedGroupKeys = new Set();
+
+  // 1. Dynamic match via live RetrieveUserQuotaSummary group descriptions (e.g. "Models within this group: ...")
+  const catalogGroups = Array.isArray(modelCatalog?.groups) ? modelCatalog.groups : [];
+  for (const group of catalogGroups) {
+    const groupKey = String(group?.groupName || group?.displayName || '').trim().toLowerCase();
+    if (!groupKey || !availableGroupKeys.has(groupKey)) continue;
+    const descNorm = ` ${String(group?.description || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()} `;
+    const nameNorm = ` ${String(group?.displayName || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()} `;
+    if (descNorm.includes(` ${normalized} `) || nameNorm.includes(` ${normalized} `)) {
+      matchedGroupKeys.add(groupKey);
+    }
+  }
+  if (matchedGroupKeys.size > 0) {
+    return { groupKeys: matchedGroupKeys, families: new Set() };
+  }
+
+  // 2. Dynamic match via GetUserStatus clientModelConfigs resetTime alignment
+  const catalogModels = Array.isArray(modelCatalog?.models) ? modelCatalog.models : [];
+  for (const entry of catalogModels) {
+    const entryId = String(entry?.id || '').trim().toLowerCase();
+    const entryLabelNorm = normalizeModelMatchText(entry?.label);
+    if ((entryId && entryId === rawLower) || (entryLabelNorm && entryLabelNorm === normalized)) {
+      const rt = typeof entry?.resetTime === 'string' && entry.resetTime ? entry.resetTime : null;
+      if (rt) {
+        for (const win of meteredWindows) {
+          if (win.resetsAt && win.resetsAt === rt) {
+            matchedGroupKeys.add(win.groupName.toLowerCase());
+          }
+        }
+      }
+      if (matchedGroupKeys.size > 0) {
+        return { groupKeys: matchedGroupKeys, families: new Set() };
+      }
+    }
+  }
+
+  // 3. Static fallback rules
+  if (CLAUDE_MODEL_NAME_RE.test(normalized) || CLAUDE_MODEL_NAME_RE.test(rawLower)) {
+    return { groupKeys: new Set(), families: new Set(['claude']) };
+  }
+
+  const codenameMatch = DEDICATED_CODENAME_RE.exec(normalized);
+  if (codenameMatch?.[1]) {
+    const codename = codenameMatch[1].toLowerCase();
+    for (const win of meteredWindows) {
+      if (win.groupName.toLowerCase().includes(codename)) {
+        matchedGroupKeys.add(win.groupName.toLowerCase());
+      }
+    }
+    if (matchedGroupKeys.size > 0) {
+      return { groupKeys: matchedGroupKeys, families: new Set() };
+    }
+    return { groupKeys: new Set(), families: new Set(['gemini']) };
+  }
+
+  if (GEMINI_MODEL_NAME_RE.test(normalized) || hasDedicatedGemini4Codename(rawLower)) {
+    return { groupKeys: new Set(), families: new Set(['gemini']) };
+  }
+
+  return null;
+}
+
+/**
+ * Restrict exhausted windows to the quota pool(s) actively used by `activeModels`.
+ * Falls back conservatively (unrestricted) if any active model cannot be mapped to a window in `meteredWindows`.
+ *
+ * @param {LocalMeteredWindow[]} meteredWindows
+ * @param {LocalMeteredWindow[]} exhaustedWindows
+ * @param {string[] | null | undefined} activeModels
+ * @param {LocalQuotaModelCatalog | null} [modelCatalog]
+ * @returns {{ filtered: LocalMeteredWindow[], restricted: boolean }}
+ */
+function filterExhaustedWindowsByActiveModels(meteredWindows, exhaustedWindows, activeModels, modelCatalog = null) {
+  const models = Array.isArray(activeModels)
+    ? activeModels.map((m) => String(m || '').trim()).filter(Boolean)
+    : [];
+  if (models.length === 0) {
+    return { filtered: exhaustedWindows, restricted: false };
+  }
+
+  /** @type {Set<string>} */
+  const allowedGroupKeys = new Set();
+  /** @type {Set<'gemini' | 'claude' | 'other'>} */
+  const allowedFamilies = new Set();
+
+  for (const model of models) {
+    const target = resolveQuotaTargetForModel(model, meteredWindows, modelCatalog);
+    if (!target) {
+      return { filtered: exhaustedWindows, restricted: false };
+    }
+    const matchesAnyWindow = meteredWindows.some((w) => (
+      target.groupKeys.has(w.groupName.toLowerCase()) || target.families.has(w.family)
+    ));
+    if (!matchesAnyWindow) {
+      return { filtered: exhaustedWindows, restricted: false };
+    }
+    for (const gk of target.groupKeys) allowedGroupKeys.add(gk);
+    for (const fam of target.families) allowedFamilies.add(fam);
+  }
+
+  const filtered = exhaustedWindows.filter((w) => (
+    allowedGroupKeys.has(w.groupName.toLowerCase()) || allowedFamilies.has(w.family)
+  ));
+  return { filtered, restricted: true };
+}
+
+/**
  * @param {unknown} row
  * @param {string} configuredTarget
+ * @param {number} [minUpdatedAtMs]
  * @returns {row is Record<string, any>}
  */
-function isEligibleRpcRow(row, configuredTarget) {
+function isEligibleRpcRow(row, configuredTarget, minUpdatedAtMs = 0) {
   if (!row || typeof row !== 'object') return false;
   const r = /** @type {Record<string, any>} */ (row);
   if (r.provider !== 'antigravity' || r.source !== 'rpc' || r.status !== 'ok') return false;
+  if (typeof minUpdatedAtMs === 'number' && Number.isFinite(minUpdatedAtMs) && minUpdatedAtMs > 0) {
+    const rawUpdatedAt = typeof r.updatedAt === 'string' ? r.updatedAt.trim() : '';
+    if (rawUpdatedAt) {
+      const updatedMs = Date.parse(rawUpdatedAt);
+      if (Number.isFinite(updatedMs) && updatedMs > 0 && updatedMs < minUpdatedAtMs) {
+        return false;
+      }
+    }
+  }
   const rowSourceDetail = String(r.sourceDetail || '').trim().toLowerCase();
   if (configuredTarget === 'agy' && rowSourceDetail && rowSourceDetail !== 'cli') return false;
   if ((configuredTarget === 'classic' || configuredTarget === 'ide') && rowSourceDetail === 'cli') return false;
@@ -278,7 +442,7 @@ function collectExhaustedWindowsForRow(row, scope, thresholdLimit) {
 }
 
 /**
- * List exhausted local quota window keys per eligible RPC provider row.
+ * List exhausted and present metered local quota window keys per eligible RPC provider row.
  *
  * @param {unknown} limitsPayload
  * @param {{
@@ -286,23 +450,28 @@ function collectExhaustedWindowsForRow(row, scope, thresholdLimit) {
  *   autoSwitchThresholdPercent?: number,
  *   defaultSwitchTarget?: string
  * }} [rawConfig]
- * @returns {Array<{ email: string, sourceDetail: string, keys: Set<string> }>}
+ * @param {{
+ *   minUpdatedAtMs?: number
+ * }} [options]
+ * @returns {Array<{ email: string, sourceDetail: string, keys: Set<string>, meteredKeys: Set<string> }>}
  */
-function listLocalExhaustedWindowKeys(limitsPayload, rawConfig = {}) {
+function listLocalExhaustedWindowKeys(limitsPayload, rawConfig = {}, options = {}) {
   const providers = extractLimitsProviders(limitsPayload);
   if (providers.length === 0) return [];
   const { scope, configuredTarget, thresholdLimit } = normalizeTriggerConfig(rawConfig);
-  /** @type {Array<{ email: string, sourceDetail: string, keys: Set<string> }>} */
+  const minUpdatedAtMs = Number(options?.minUpdatedAtMs || 0);
+  /** @type {Array<{ email: string, sourceDetail: string, keys: Set<string>, meteredKeys: Set<string> }>} */
   const rows = [];
 
   for (const row of providers) {
-    if (!isEligibleRpcRow(row, configuredTarget)) continue;
+    if (!isEligibleRpcRow(row, configuredTarget, minUpdatedAtMs)) continue;
     const { meteredWindows, exhaustedWindows } = collectExhaustedWindowsForRow(row, scope, thresholdLimit);
     if (meteredWindows.length === 0) continue;
     rows.push({
       email: String(row.accountEmail || '').trim().toLowerCase(),
       sourceDetail: String(row.sourceDetail || '').trim().toLowerCase(),
-      keys: new Set(exhaustedWindows.map(localWindowKey))
+      keys: new Set(exhaustedWindows.map(localWindowKey)),
+      meteredKeys: new Set(meteredWindows.map(localWindowKey))
     });
   }
 
@@ -320,7 +489,10 @@ function listLocalExhaustedWindowKeys(limitsPayload, rawConfig = {}) {
  *   defaultSwitchTarget?: string
  * }} [rawConfig]
  * @param {{
- *   acknowledged?: { email: string, windowKeys: Set<string> } | null
+ *   acknowledged?: { email: string, windowKeys: Set<string> } | null,
+ *   minUpdatedAtMs?: number,
+ *   activeModels?: string[] | null,
+ *   modelCatalog?: LocalQuotaModelCatalog | null
  * }} [options]
  */
 function evaluateLocalQuotaTrigger(limitsPayload, rawConfig = {}, options = {}) {
@@ -340,13 +512,28 @@ function evaluateLocalQuotaTrigger(limitsPayload, rawConfig = {}, options = {}) 
   if (providers.length === 0) return empty;
 
   const { scope, configuredTarget, thresholdLimit } = normalizeTriggerConfig(rawConfig);
+  const minUpdatedAtMs = Number(options?.minUpdatedAtMs || 0);
   const ackEmail = String(options?.acknowledged?.email || '').trim().toLowerCase();
   const ackKeys = options?.acknowledged?.windowKeys instanceof Set ? options.acknowledged.windowKeys : null;
 
   for (const row of providers) {
-    if (!isEligibleRpcRow(row, configuredTarget)) continue;
+    if (!isEligibleRpcRow(row, configuredTarget, minUpdatedAtMs)) continue;
     const { meteredWindows, exhaustedWindows } = collectExhaustedWindowsForRow(row, scope, thresholdLimit);
     if (meteredWindows.length === 0 || exhaustedWindows.length === 0) continue;
+
+    let effectiveExhaustedWindows = exhaustedWindows;
+    if (scope !== 'all') {
+      const scoped = filterExhaustedWindowsByActiveModels(
+        meteredWindows,
+        exhaustedWindows,
+        options?.activeModels,
+        options?.modelCatalog || null
+      );
+      if (scoped.restricted) {
+        effectiveExhaustedWindows = scoped.filtered;
+        if (effectiveExhaustedWindows.length === 0) continue;
+      }
+    }
 
     const rowEmail = String(row.accountEmail || '').trim().toLowerCase();
     const shouldCheckAck = Boolean(ackKeys && ackKeys.size > 0 && (rowEmail === ackEmail || rowEmail === ''));
@@ -354,7 +541,7 @@ function evaluateLocalQuotaTrigger(limitsPayload, rawConfig = {}, options = {}) 
     const freshWindows = [];
     /** @type {LocalMeteredWindow[]} */
     const suppressedWindows = [];
-    for (const win of exhaustedWindows) {
+    for (const win of effectiveExhaustedWindows) {
       if (shouldCheckAck && ackKeys && ackKeys.has(localWindowKey(win))) {
         suppressedWindows.push(win);
       } else {
@@ -363,17 +550,17 @@ function evaluateLocalQuotaTrigger(limitsPayload, rawConfig = {}, options = {}) 
     }
 
     if (freshWindows.length > 0) {
-      const exhaustedFamilies = [...new Set(exhaustedWindows.map((w) => w.family))];
+      const exhaustedFamilies = [...new Set(effectiveExhaustedWindows.map((w) => w.family))];
       const hardExhausted = freshWindows.some((w) => w.remainingPercent <= 1e-6);
       return {
         triggered: true,
         accountKey: String(row.accountKey || '').trim(),
         accountEmail: rowEmail,
         sourceDetail: String(row.sourceDetail || '').trim().toLowerCase(),
-        exhaustedWindows,
+        exhaustedWindows: effectiveExhaustedWindows,
         exhaustedFamilies,
         hardExhausted,
-        triggerLabel: exhaustedWindows.map((w) => w.label).join(', '),
+        triggerLabel: effectiveExhaustedWindows.map((w) => w.label).join(', '),
         acknowledgedWindows: suppressedWindows.map((w) => w.label)
       };
     }
@@ -672,6 +859,7 @@ module.exports = {
   listLocalExhaustedWindowKeys,
   localWindowKey,
   normalizeAccountWeight,
+  resolveQuotaTargetForModel,
   resolveSwitchTargetForTrigger,
   scoreCandidateAccount,
   selectReplacementAccount,

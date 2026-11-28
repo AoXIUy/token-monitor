@@ -8447,8 +8447,15 @@ function hasRunningLocalAntigravitySession(summary, now = Date.now()) {
   return extractRunningAntigravityConversationIds(summary, now).length > 0;
 }
 
+let latestLocalAntigravityModelCatalog = null;
+
 async function probeLocalAntigravityLimitsForManager(opts = {}) {
-  const probeDeps = { ...(opts?.signal ? { signal: opts.signal } : {}) };
+  const probeDeps = {
+    ...(opts?.signal ? { signal: opts.signal } : {}),
+    onQuotaModelCatalog: (catalog) => {
+      latestLocalAntigravityModelCatalog = catalog;
+    }
+  };
   let infos = null;
   try {
     infos = await antigravityProbe.detectProcessInfos(probeDeps);
@@ -8524,6 +8531,7 @@ function ensureAntigravityManagerService() {
       }
     },
     getLatestLocalLimits: () => settingsLocalLimits?.limits || lastCollectedDevice?.limits || null,
+    getLocalModelCatalog: () => latestLocalAntigravityModelCatalog,
     probeLocalLimits: (opts) => probeLocalAntigravityLimitsForManager(opts),
     onAutoSwitchCompleted: (result) => {
       if (result?.ok) {

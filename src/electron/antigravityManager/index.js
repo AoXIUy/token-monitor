@@ -16,6 +16,7 @@ const keyring = require('./keyring');
 const fileCredentials = require('./fileCredentials');
 const autoSwitch = require('./autoSwitch');
 const taskResume = require('./taskResume');
+const activeModel = require('./activeModel');
 const {
   AG_MANAGER_SNAPSHOT_PATH,
   sanitizeAntigravityManagerSnapshot
@@ -34,6 +35,8 @@ const {
  *   getHubSyncTarget?: () => { mode: string, hubUrl?: string, secret?: string, embeddedHub?: any } | null,
  *   isLocalAntigravityBusy?: () => boolean,
  *   isLocalAntigravityActivelyGenerating?: (opts?: { nowMs?: number, targetClient?: string | null }) => boolean,
+ *   getActiveLocalModels?: (opts?: { nowMs?: number, targetClient?: string | null, runningConversationIds?: Iterable<string>, modelCatalog?: any }) => string[] | { models?: string[] } | null,
+ *   getLocalModelCatalog?: () => any,
  *   probeLocalLimits?: (opts?: { signal?: AbortSignal }) => Promise<any>,
  *   getLatestLocalLimits?: () => any,
  *   onAutoSwitchCompleted?: (result: any) => void,
@@ -119,6 +122,7 @@ function createAntigravityManagerService(options) {
   let lastUnverifiedHotSwitch = null;
   /** @type {{ email: string, sinceMs: number, windowKeys: Set<string> | null } | null} */
   let manualAck = null;
+  let lastSwitchCompletedAtMs = 0;
   const MANUAL_ACK_PENDING_TTL_MS = 10 * 60_000;
   /** @type {Record<string, any> | null} */
   let lastAutoSwitch = store.getLastAutoSwitch();
@@ -908,6 +912,9 @@ function createAntigravityManagerService(options) {
         lastUnverifiedHotSwitch = null;
       }
       switchedOk = Boolean(res?.ok);
+      if (switchedOk) {
+        lastSwitchCompletedAtMs = nowMsFn();
+      }
       if (switchedOk && !switchOpts?.isAutoSwitch && account.email) {
         manualAck = {
           email: String(account.email).trim().toLowerCase(),
@@ -1231,7 +1238,9 @@ function createAntigravityManagerService(options) {
   function reconcileManualAck(limits, cfg) {
     const ack = manualAck;
     if (!ack) return;
-    const rows = autoSwitch.listLocalExhaustedWindowKeys(limits, cfg);
+    const rows = autoSwitch.listLocalExhaustedWindowKeys(limits, cfg, {
+      minUpdatedAtMs: lastSwitchCompletedAtMs
+    });
     if (rows.length === 0) return;
 
     const match = rows.find((r) => r.email === ack.email)
@@ -1254,9 +1263,66 @@ function createAntigravityManagerService(options) {
     }
 
     for (const key of [...ack.windowKeys]) {
-      if (!match.keys.has(key)) {
+      if (match.meteredKeys.has(key) && !match.keys.has(key)) {
         ack.windowKeys.delete(key);
       }
+    }
+  }
+
+  /**
+   * Resolve the model(s) currently active in local Antigravity conversations (or selected in UI)
+   * so exhausted pools unused by the active model(s) do not trigger false auto-switches.
+   *
+   * @param {unknown} limits
+   * @param {Record<string, any>} cfg
+   * @returns {{ activeModels: string[], modelCatalog: Record<string, any> | null }}
+   */
+  function resolveActiveModelsForLimits(limits, cfg) {
+    const modelCatalog = typeof options.getLocalModelCatalog === 'function'
+      ? (options.getLocalModelCatalog() || null)
+      : null;
+    const rows = autoSwitch.listLocalExhaustedWindowKeys(limits, cfg, {
+      minUpdatedAtMs: lastSwitchCompletedAtMs
+    });
+    const onlyCliRows = rows.length > 0 && rows.every((r) => r.sourceDetail === 'cli');
+    const effectiveTarget = onlyCliRows ? 'agy' : (cfg.defaultSwitchTarget || 'auto');
+
+    if (typeof options.getActiveLocalModels === 'function') {
+      try {
+        const res = options.getActiveLocalModels({
+          nowMs: nowMsFn(),
+          targetClient: effectiveTarget,
+          runningConversationIds: recentRunningConversations.keys(),
+          modelCatalog
+        });
+        const list = Array.isArray(res) ? res : (Array.isArray(res?.models) ? res.models : []);
+        return {
+          activeModels: list.map((m) => String(m || '').trim()).filter(Boolean),
+          modelCatalog
+        };
+      } catch (_) {
+        return { activeModels: [], modelCatalog };
+      }
+    }
+
+    if (options.switcherDeps && !options.taskResumeDeps) {
+      return { activeModels: [], modelCatalog };
+    }
+
+    try {
+      const detected = activeModel.detectActiveLocalModels({
+        ...(options.taskResumeDeps || {}),
+        nowMs: nowMsFn(),
+        targetClient: effectiveTarget,
+        runningConversationIds: recentRunningConversations.keys(),
+        modelCatalog
+      });
+      return {
+        activeModels: Array.isArray(detected?.models) ? detected.models : [],
+        modelCatalog
+      };
+    } catch (_) {
+      return { activeModels: [], modelCatalog };
     }
   }
 
@@ -1265,10 +1331,14 @@ function createAntigravityManagerService(options) {
    * @param {Record<string, any>} cfg
    */
   function evaluateTrigger(limits, cfg) {
+    const { activeModels, modelCatalog } = resolveActiveModelsForLimits(limits, cfg);
     return autoSwitch.evaluateLocalQuotaTrigger(limits, cfg, {
       acknowledged: manualAck?.windowKeys
         ? { email: manualAck.email, windowKeys: manualAck.windowKeys }
-        : null
+        : null,
+      minUpdatedAtMs: lastSwitchCompletedAtMs,
+      activeModels,
+      modelCatalog
     });
   }
 
@@ -1512,6 +1582,7 @@ function createAntigravityManagerService(options) {
     pendingAutoSwitchLimits = null;
     busyDeferralStartedAtMs = 0;
     manualAck = null;
+    lastSwitchCompletedAtMs = 0;
     clearAutoSwitchMonitorTimers();
     scheduler.stop();
     resolveRefreshWaiters();
